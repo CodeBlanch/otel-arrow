@@ -40,15 +40,10 @@ impl LogicalGroupExpression {
     }
 
     fn add(&mut self, expression: LogicalGroupExpressionValue) {
-        let chain_type;
-        match expression {
-            LogicalGroupExpressionValue::AndExpression(_) => {
-                chain_type = LogicalGroupExpressionChain::AndChain
-            }
-            LogicalGroupExpressionValue::OrExpression(_) => {
-                chain_type = LogicalGroupExpressionChain::OrChain
-            }
-        }
+        let chain_type = match expression {
+            LogicalGroupExpressionValue::AndExpression(_) => LogicalGroupExpressionChain::AndChain,
+            LogicalGroupExpressionValue::OrExpression(_) => LogicalGroupExpressionChain::OrChain,
+        };
 
         if self.chain_type != LogicalGroupExpressionChain::MixedChain {
             if self.chain_type == LogicalGroupExpressionChain::None {

@@ -193,10 +193,10 @@ impl Summaries {
 
         let state = borrow.get(summary_index);
 
-        if state.is_none() {
-            action(None);
+        if let Some(summary) = state {
+            action(Some(&summary.summary))
         } else {
-            action(Some(&state.unwrap().summary));
+            action(None)
         }
     }
 
@@ -277,6 +277,7 @@ pub struct Summary {
 }
 
 impl Summary {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Option<Box<str>>,
         observed_timestamp: SystemTime,
@@ -288,12 +289,11 @@ impl Summary {
         included_count: u32,
         total_count: u32,
     ) -> Summary {
-        let id_value;
-        if id.is_none() {
-            id_value = Summary::generate_id(&window_type, window_start, window_end, &grouping);
+        let id_value = if let Some(v) = id {
+            v
         } else {
-            id_value = id.unwrap();
-        }
+            Summary::generate_id(&window_type, window_start, window_end, &grouping)
+        };
 
         Self {
             id: id_value,

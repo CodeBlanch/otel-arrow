@@ -15,12 +15,18 @@ pub(crate) trait DynamicDataRecordAnyValueResolver: Any {
     ) -> Result<(), Error>;
 }
 
+type DataRecordAnyValueResolverReadValueCallback<T> =
+    dyn for<'a, 'b> Fn(&'a ValuePath, &'b T) -> DataRecordReadAnyValueResult<'b>;
+type DataRecordAnyValueResolverSetValueCallback<T> =
+    dyn Fn(&ValuePath, &mut T, AnyValue) -> DataRecordSetAnyValueResult;
+type DataRecordAnyValueResolverRemoveValueCallback<T> =
+    dyn Fn(&ValuePath, &mut T) -> DataRecordRemoveAnyValueResult;
+
 pub struct DataRecordAnyValueResolver<T: DataRecord> {
     path: ValuePath,
-    read_value_fn:
-        Box<dyn for<'a, 'b> Fn(&'a ValuePath, &'b T) -> DataRecordReadAnyValueResult<'b>>,
-    set_value_fn: Box<dyn Fn(&ValuePath, &mut T, AnyValue) -> DataRecordSetAnyValueResult>,
-    remove_value_fn: Box<dyn Fn(&ValuePath, &mut T) -> DataRecordRemoveAnyValueResult>,
+    read_value_fn: Box<DataRecordAnyValueResolverReadValueCallback<T>>,
+    set_value_fn: Box<DataRecordAnyValueResolverSetValueCallback<T>>,
+    remove_value_fn: Box<DataRecordAnyValueResolverRemoveValueCallback<T>>,
 }
 
 impl<T: DataRecord> DataRecordAnyValueResolver<T> {
@@ -141,8 +147,8 @@ where
 {
     fn invoke_once(&mut self, result: DataRecordReadAnyValueResult) {
         let callback = self.callback.take();
-        if callback.is_some() {
-            (callback.unwrap())(result);
+        if let Some(c) = callback {
+            (c)(result);
         }
     }
 }

@@ -254,24 +254,22 @@ impl ValuePath {
                         let k: &str = key;
                         let values = map_value.get_values_mut();
 
-                        if let Some(v) = iter.peek() {
-                            if let ValueSelector::Value = v {
-                                if any_value_to_set.is_null() {
-                                    let old_value = values.remove(k);
-                                    match old_value {
-                                        Some(old_value) => {
-                                            return DataRecordSetAnyValueResult::Updated(old_value);
-                                        }
-                                        None => return DataRecordSetAnyValueResult::NotFound,
+                        if let Some(ValueSelector::Value) = iter.peek() {
+                            if any_value_to_set.is_null() {
+                                let old_value = values.remove(k);
+                                match old_value {
+                                    Some(old_value) => {
+                                        return DataRecordSetAnyValueResult::Updated(old_value);
                                     }
-                                } else {
-                                    let old_value = values.insert(k.into(), any_value_to_set);
-                                    match old_value {
-                                        Some(old_value) => {
-                                            return DataRecordSetAnyValueResult::Updated(old_value);
-                                        }
-                                        None => return DataRecordSetAnyValueResult::Created,
+                                    None => return DataRecordSetAnyValueResult::NotFound,
+                                }
+                            } else {
+                                let old_value = values.insert(k.into(), any_value_to_set);
+                                match old_value {
+                                    Some(old_value) => {
+                                        return DataRecordSetAnyValueResult::Updated(old_value);
                                     }
+                                    None => return DataRecordSetAnyValueResult::Created,
                                 }
                             }
                         }
@@ -391,33 +389,30 @@ impl ValuePath {
         let mut chars = path.chars();
         let mut terminate = false;
 
-        'outer: loop {
-            match chars.next() {
-                Some(mut c) => 'inner: loop {
-                    if terminate {
-                        return Err(Error::PathParseError(format!("Path at position '{position}' contained selectors after an array or map insert operation").to_string()));
+        'outer: while let Some(mut c) = chars.next() {
+            'inner: loop {
+                if terminate {
+                    return Err(Error::PathParseError(format!("Path at position '{position}' contained selectors after an array or map insert operation").to_string()));
+                }
+                if c == '[' {
+                    let value_selector = Self::parse_array_selector(&mut position, &mut chars)?;
+                    if let ValueSelector::ArrayValueInsert(_) = value_selector {
+                        terminate = true;
                     }
-                    if c == '[' {
-                        let value_selector = Self::parse_array_selector(&mut position, &mut chars)?;
-                        if let ValueSelector::ArrayValueInsert(_) = value_selector {
-                            terminate = true;
+                    results.push(value_selector);
+                    continue 'outer;
+                } else {
+                    let (char_to_retry, value_selector) =
+                        Self::parse_key_selector(c, &mut position, &mut chars)?;
+                    results.push(value_selector);
+                    match char_to_retry {
+                        Some(retry_char) => {
+                            c = retry_char;
+                            continue 'inner;
                         }
-                        results.push(value_selector);
-                        continue 'outer;
-                    } else {
-                        let (char_to_retry, value_selector) =
-                            Self::parse_key_selector(c, &mut position, &mut chars)?;
-                        results.push(value_selector);
-                        match char_to_retry {
-                            Some(retry_char) => {
-                                c = retry_char;
-                                continue 'inner;
-                            }
-                            None => continue 'outer,
-                        }
+                        None => continue 'outer,
                     }
-                },
-                None => break,
+                }
             }
         }
 

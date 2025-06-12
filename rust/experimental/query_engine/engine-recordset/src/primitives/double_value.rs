@@ -44,10 +44,10 @@ impl DoubleValueData {
             ));
         } else if let AnyValue::StringValue(other_string_value) = other {
             let result = other_string_value.get_value().parse::<f64>();
-            if result.is_err() {
+            if let Err(e) = result {
                 return Err(Error::ExpressionError(
                     expression_id,
-                    Error::DoubleParseError(result.unwrap_err()).into(),
+                    Error::DoubleParseError(e).into(),
                 ));
             }
 

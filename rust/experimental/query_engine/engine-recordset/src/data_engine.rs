@@ -71,7 +71,7 @@ impl DataEngine {
         Ok(b.complete())
     }
 
-    fn process_item<'c, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>(
+    fn process_item<TRecord: DataRecord, TItem: DataEngineItem<TRecord>>(
         state: &mut _DataEngineState<'_, '_, TItem>,
         mut item: TItem,
     ) -> Result<(), Error> {

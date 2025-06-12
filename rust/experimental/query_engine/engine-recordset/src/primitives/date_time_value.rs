@@ -57,10 +57,10 @@ impl DateTimeValueData {
             let result = other_string_value
                 .get_value()
                 .parse::<DateTime<FixedOffset>>();
-            if result.is_err() {
+            if let Err(e) = result {
                 return Err(Error::ExpressionError(
                     expression_id,
-                    Error::DateTimeParseError(result.unwrap_err()).into(),
+                    Error::DateTimeParseError(e).into(),
                 ));
             }
             return Ok(compare_values(self.value, result.unwrap()));
@@ -77,12 +77,10 @@ impl DateTimeValueData {
         ));
 
         fn compare_values(left: DateTime<FixedOffset>, right: DateTime<FixedOffset>) -> i32 {
-            if left == right {
-                0
-            } else if left < right {
-                return -1;
-            } else {
-                return 1;
+            match left.cmp(&right) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
             }
         }
     }

@@ -1,5 +1,5 @@
 #[macro_use]
-mod macros;
+pub(crate) mod macros;
 
 pub mod data;
 pub(crate) mod data_engine;

@@ -48,11 +48,10 @@ where
             }
 
             if right_value.is_none() {
-                let mut null_value = AnyValue::NullValue;
-                result =
-                    left_value
-                        .unwrap()
-                        .compare(execution_context, expression_id, &mut null_value);
+                let null_value = AnyValue::NullValue;
+                result = left_value
+                    .unwrap()
+                    .compare(execution_context, expression_id, &null_value);
                 return;
             }
 
@@ -100,11 +99,10 @@ where
             }
 
             if right_is_none {
-                let mut null_value = AnyValue::NullValue;
-                result =
-                    left_value
-                        .unwrap()
-                        .equals(execution_context, expression_id, &mut null_value);
+                let null_value = AnyValue::NullValue;
+                result = left_value
+                    .unwrap()
+                    .equals(execution_context, expression_id, &null_value);
                 return;
             }
 
