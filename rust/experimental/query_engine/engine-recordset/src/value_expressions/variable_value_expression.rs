@@ -46,15 +46,15 @@ impl Expression for VariableValueExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"var");
                 h.add_bytes(b"name:");
                 h.add_bytes(self.name.as_bytes());
-                if !self.path.is_none() {
+                if self.path.is_some() {
                     h.add_bytes(b"path:");
                     h.add_bytes(self.path.as_ref().unwrap().get_raw_value().as_bytes());
                 }
-            });
+            })
         })
     }
 
@@ -72,9 +72,9 @@ impl Expression for VariableValueExpression {
         output.push_str("var ( name: \"");
 
         output.push_str(&self.name);
-        output.push_str("\"");
+        output.push('"');
 
-        if !self.path.is_none() {
+        if self.path.is_some() {
             output.push_str(", path: \"");
             output.push_str(self.path.as_ref().unwrap().get_raw_value());
             output.push('"');
@@ -108,7 +108,7 @@ impl ValueExpressionInternal for VariableValueExpression {
                     )),
                 );
 
-                if !self.path.is_none() {
+                if self.path.is_some() {
                     action.invoke_once(self.path.as_ref().unwrap().read(any_value));
                 } else {
                     action.invoke_once(DataRecordReadAnyValueResult::Found(any_value));
@@ -144,7 +144,7 @@ impl MutatableValueExpressionInternal for VariableValueExpression {
             Entry::Occupied(mut occupied_entry) => {
                 let current_value = occupied_entry.get_mut();
 
-                if !self.path.is_none() {
+                if self.path.is_some() {
                     return self.path.as_ref().unwrap().set(current_value, value);
                 }
 
@@ -159,10 +159,10 @@ impl MutatableValueExpressionInternal for VariableValueExpression {
                     )),
                 );
 
-                return DataRecordSetAnyValueResult::Updated(old_value);
+                DataRecordSetAnyValueResult::Updated(old_value)
             }
             Entry::Vacant(vacant_entry) => {
-                if !self.path.is_none() {
+                if self.path.is_some() {
                     execution_context.add_message_for_expression(
                         self,
                         ExpressionMessage::warn("Cannot set into a null value".to_string()),
@@ -178,7 +178,7 @@ impl MutatableValueExpressionInternal for VariableValueExpression {
                     ExpressionMessage::info("VariableValueExpression created value".to_string()),
                 );
 
-                return DataRecordSetAnyValueResult::Created;
+                DataRecordSetAnyValueResult::Created
             }
         }
     }
@@ -192,7 +192,7 @@ impl MutatableValueExpressionInternal for VariableValueExpression {
     {
         let mut variables = execution_context.get_variables().borrow_mut();
 
-        if !self.path.is_none() {
+        if self.path.is_some() {
             match variables.get_mut(self.get_name()) {
                 Some(current_value) => {
                     return self.path.as_ref().unwrap().remove(current_value);
@@ -215,7 +215,7 @@ impl MutatableValueExpressionInternal for VariableValueExpression {
                     )),
                 );
 
-                return DataRecordRemoveAnyValueResult::Removed(any_value);
+                DataRecordRemoveAnyValueResult::Removed(any_value)
             }
             None => {
                 execution_context.add_message_for_expression(
@@ -225,7 +225,7 @@ impl MutatableValueExpressionInternal for VariableValueExpression {
                     ),
                 );
 
-                return DataRecordRemoveAnyValueResult::NotFound;
+                DataRecordRemoveAnyValueResult::NotFound
             }
         }
     }

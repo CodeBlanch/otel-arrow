@@ -31,11 +31,11 @@ impl Expression for StaticValueExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"static");
                 h.add_bytes(b"value:");
                 AnyValue::add_hash_bytes(&self.value, h);
-            });
+            })
         })
     }
 

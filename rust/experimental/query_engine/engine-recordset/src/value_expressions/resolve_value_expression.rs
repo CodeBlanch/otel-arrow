@@ -35,11 +35,11 @@ impl Expression for ResolveValueExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"resolve");
                 h.add_bytes(b"path:");
                 h.add_bytes(self.path.get_raw_value().as_bytes());
-            });
+            })
         })
     }
 
@@ -72,7 +72,7 @@ impl ValueExpressionInternal for ResolveValueExpression {
     ) where
         'a: 'b,
     {
-        return execution_context.read_any_value(
+        execution_context.read_any_value(
             self.get_id(),
             self,
             &mut DataRecordAnyValueReadClosureCallback::new(|v| {
@@ -98,7 +98,7 @@ impl ValueExpressionInternal for ResolveValueExpression {
 
                 action.invoke_once(v);
             }),
-        );
+        )
     }
 }
 
@@ -121,21 +121,21 @@ impl MutatableValueExpressionInternal for ResolveValueExpression {
                         "ResolveValueExpression set not supported: {message}"
                     )),
                 );
-                return result;
+                result
             }
             DataRecordSetAnyValueResult::NotFound => {
                 execution_context.add_message_for_expression(
                     self,
                     ExpressionMessage::info("ResolveValueExpression value not found".to_string()),
                 );
-                return result;
+                result
             }
             DataRecordSetAnyValueResult::Created => {
                 execution_context.add_message_for_expression(
                     self,
                     ExpressionMessage::info("ResolveValueExpression created value".to_string()),
                 );
-                return result;
+                result
             }
             DataRecordSetAnyValueResult::Updated(old_value) => {
                 execution_context.add_message_for_expression(
@@ -145,7 +145,7 @@ impl MutatableValueExpressionInternal for ResolveValueExpression {
                         old_value
                     )),
                 );
-                return result;
+                result
             }
         }
     }
@@ -167,7 +167,7 @@ impl MutatableValueExpressionInternal for ResolveValueExpression {
                         "ResolveValueExpression could not resolve a value".to_string(),
                     ),
                 );
-                return result;
+                result
             }
             DataRecordRemoveAnyValueResult::NotSupported(message) => {
                 execution_context.add_message_for_expression(
@@ -177,7 +177,7 @@ impl MutatableValueExpressionInternal for ResolveValueExpression {
                             .to_string(),
                     ),
                 );
-                return result;
+                result
             }
             DataRecordRemoveAnyValueResult::Removed(old_value) => {
                 execution_context.add_message_for_expression(
@@ -187,7 +187,7 @@ impl MutatableValueExpressionInternal for ResolveValueExpression {
                         old_value
                     )),
                 );
-                return result;
+                result
             }
         }
     }

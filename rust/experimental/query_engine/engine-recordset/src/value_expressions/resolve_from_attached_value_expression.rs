@@ -41,13 +41,13 @@ impl Expression for ResolveFromAttachedValueExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"resolve_from_attached");
                 h.add_bytes(b"name:");
                 h.add_bytes(self.name.get_value().as_bytes());
                 h.add_bytes(b"path:");
                 h.add_bytes(self.path.get_raw_value().as_bytes());
-            });
+            })
         })
     }
 
@@ -89,7 +89,7 @@ impl ValueExpressionInternal for ResolveFromAttachedValueExpression {
     ) where
         'a: 'b,
     {
-        return execution_context.read_any_value_from_attached(
+        execution_context.read_any_value_from_attached(
             self.get_id(),
             self.name.get_value(),
             &self.path,
@@ -117,6 +117,6 @@ impl ValueExpressionInternal for ResolveFromAttachedValueExpression {
 
                 action.invoke_once(v);
             }),
-        );
+        )
     }
 }
