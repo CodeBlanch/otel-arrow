@@ -36,13 +36,13 @@ impl Expression for EqualToLogicalExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"equal_to");
                 h.add_bytes(b"left:");
                 h.add_bytes(self.left.get_hash().get_bytes());
                 h.add_bytes(b"right:");
                 h.add_bytes(self.right.get_hash().get_bytes());
-            });
+            })
         })
     }
 
@@ -93,6 +93,6 @@ impl LogicalExpressionInternal for EqualToLogicalExpression {
             ExpressionMessage::info(
                 either!(equal => "EqualToLogicalExpression evaluated as true"; "EqualToLogicalExpression evaluated as false").to_string()));
 
-        return Ok(equal);
+        Ok(equal)
     }
 }

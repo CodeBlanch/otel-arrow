@@ -36,13 +36,13 @@ impl Expression for LessThanLogicalExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"less_than");
                 h.add_bytes(b"left:");
                 h.add_bytes(self.left.get_hash().get_bytes());
                 h.add_bytes(b"right:");
                 h.add_bytes(self.right.get_hash().get_bytes());
-            });
+            })
         })
     }
 
@@ -93,6 +93,6 @@ impl LogicalExpressionInternal for LessThanLogicalExpression {
             ExpressionMessage::info(
                 either!(result < 0 => "LessThanLogicalExpression evaluated as true"; "LessThanLogicalExpression evaluated as false").to_string()));
 
-        return Ok(result < 0);
+        Ok(result < 0)
     }
 }

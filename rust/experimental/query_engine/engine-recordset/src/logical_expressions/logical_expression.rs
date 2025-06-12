@@ -63,7 +63,7 @@ where
         },
     );
 
-    return result;
+    result
 }
 
 pub(crate) fn equals<'a, 'b>(
@@ -115,5 +115,5 @@ where
         },
     );
 
-    return result;
+    result
 }

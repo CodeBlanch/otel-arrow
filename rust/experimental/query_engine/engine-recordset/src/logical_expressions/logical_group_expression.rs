@@ -69,7 +69,7 @@ impl Expression for LogicalGroupExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"logical_group");
                 h.add_bytes(b"expressions:");
                 h.add_bytes(self.first_expression.get_hash().get_bytes());
@@ -85,7 +85,7 @@ impl Expression for LogicalGroupExpression {
                         }
                     }
                 }
-            });
+            })
         })
     }
 
@@ -178,7 +178,7 @@ impl LogicalExpressionInternal for LogicalGroupExpression {
             ExpressionMessage::info(
                 either!(result => "LogicalGroupExpressionn evaluated as true"; "LogicalGroupExpression evaluated as false").to_string()));
 
-        return Ok(result);
+        Ok(result)
     }
 }
 
