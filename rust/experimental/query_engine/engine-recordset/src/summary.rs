@@ -26,14 +26,13 @@ impl Summaries {
 
         let summary_index = lookup.get_mut(id);
 
-        if !summary_index.is_none() {
+        if summary_index.is_some() {
             let index = summary_index.unwrap();
             let mut borrow = self.summary_data.borrow_mut();
             let state = borrow.get_mut(*index).expect("Summary could not be found");
 
-            state.expected_externally_included_record_count =
-                state.expected_externally_included_record_count + summary.included_count as usize;
-            state.summary.total_count = state.summary.total_count + summary.total_count;
+            state.expected_externally_included_record_count += summary.included_count as usize;
+            state.summary.total_count += summary.total_count;
 
             return SummaryInfo {
                 summary_index: *index,
@@ -63,11 +62,11 @@ impl Summaries {
 
         summary_data.push(state);
 
-        return SummaryInfo {
+        SummaryInfo {
             summary_index: index,
             total_count,
             existed: false,
-        };
+        }
     }
 
     pub fn create_or_update_summary(
@@ -81,12 +80,12 @@ impl Summaries {
 
         let summary_index = lookup.get_mut(&id);
 
-        if !summary_index.is_none() {
+        if summary_index.is_some() {
             let index = summary_index.unwrap();
             let mut borrow = self.summary_data.borrow_mut();
             let state = borrow.get_mut(*index).expect("Summary could not be found");
 
-            state.summary.total_count = state.summary.total_count + 1;
+            state.summary.total_count += 1;
 
             let summary_info = SummaryInfo {
                 summary_index: *index,
@@ -94,14 +93,14 @@ impl Summaries {
                 existed: true,
             };
 
-            let reservoir_size;
-            match &summary_lookup.reservoir_type {
-                SummaryReservoir::SimpleReservoir(s) => reservoir_size = *s as usize,
-            }
+            
+            let reservoir_size = match &summary_lookup.reservoir_type {
+                SummaryReservoir::SimpleReservoir(s) => *s as usize,
+            };
 
-            if state.included_data_records.len() < reservoir_size as usize {
+            if state.included_data_records.len() < reservoir_size {
                 state.included_data_records.push(data_record_index);
-                state.summary.included_count = state.summary.included_count + 1;
+                state.summary.included_count += 1;
 
                 return SummaryResult::Include(summary_info);
             } else {
@@ -123,10 +122,10 @@ impl Summaries {
 
         let mut summary_data = self.summary_data.borrow_mut();
 
-        let reservoir_size;
-        match &summary_lookup.reservoir_type {
-            SummaryReservoir::SimpleReservoir(s) => reservoir_size = *s,
-        }
+        
+        let reservoir_size = match &summary_lookup.reservoir_type {
+            SummaryReservoir::SimpleReservoir(s) => *s,
+        };
 
         let mut state = SummaryState::new(
             Summary::new(
@@ -170,7 +169,7 @@ impl Summaries {
 
         summary_data.push(state);
 
-        return result;
+        result
     }
 
     pub fn include_in_summary(&self, summary_index: usize) -> usize {
@@ -179,13 +178,13 @@ impl Summaries {
             .get_mut(summary_index)
             .expect("Summary could not be found");
 
-        state.externally_included_record_count = state.externally_included_record_count + 1;
+        state.externally_included_record_count += 1;
 
-        return state.externally_included_record_count;
+        state.externally_included_record_count
     }
 
     pub fn get_summary_index(&self, summary_id: &str) -> Option<usize> {
-        self.lookup.borrow().get(summary_id).map(|v| *v)
+        self.lookup.borrow().get(summary_id).copied()
     }
 
     pub fn get_summary<F>(&self, summary_index: usize, action: F)
@@ -257,12 +256,12 @@ impl SummaryLookup {
     }
 
     pub fn get_id(&self) -> Box<str> {
-        return Summary::generate_id(
+        Summary::generate_id(
             &self.window_type,
             self.window_start,
             self.window_end,
             &self.grouping,
-        );
+        )
     }
 }
 
@@ -351,7 +350,7 @@ impl Summary {
         &mut self,
         externally_included_record_count: usize,
     ) {
-        self.included_count = self.included_count + externally_included_record_count as u32;
+        self.included_count += externally_included_record_count as u32;
     }
 
     pub(crate) fn generate_id(
@@ -392,7 +391,7 @@ impl Summary {
             }
         }
 
-        return hasher.into();
+        hasher.into()
     }
 }
 
@@ -434,9 +433,9 @@ impl SummaryState {
     }
 }
 
-impl Into<Summary> for SummaryState {
-    fn into(self) -> Summary {
-        self.summary
+impl From<SummaryState> for Summary {
+    fn from(val: SummaryState) -> Self {
+        val.summary
     }
 }
 
@@ -511,7 +510,7 @@ pub enum SummaryGroupValue {
 impl SummaryGroupValue {
     pub fn new_from_any_value(any_value: &AnyValue) -> SummaryGroupValue {
         if let AnyValue::LongValue(long_value) = any_value {
-            return SummaryGroupValue::LongValue(long_value.get_value().to_le_bytes());
+            SummaryGroupValue::LongValue(long_value.get_value().to_le_bytes())
         } else if let AnyValue::DoubleValue(double_value) = any_value {
             return SummaryGroupValue::DoubleValue(double_value.get_value().to_le_bytes());
         } else if let AnyValue::StringValue(string_value) = any_value {
@@ -519,10 +518,7 @@ impl SummaryGroupValue {
         } else {
             let mut group = SummaryGroupValue::NullValue;
 
-            any_value.as_string_value(|r| match r {
-                Some(string_value) => group = SummaryGroupValue::StringValue(string_value.into()),
-                None => {}
-            });
+            any_value.as_string_value(|r| if let Some(string_value) = r { group = SummaryGroupValue::StringValue(string_value.into()) });
 
             return group;
         }
@@ -533,7 +529,7 @@ impl SummaryGroupValue {
             return Some(s);
         }
 
-        return None;
+        None
     }
 
     pub fn to_long_value(&self) -> Option<i64> {
@@ -541,7 +537,7 @@ impl SummaryGroupValue {
             return Some(i64::from_le_bytes(*b));
         }
 
-        return None;
+        None
     }
 
     pub fn to_double_value(&self) -> Option<f64> {
@@ -549,7 +545,7 @@ impl SummaryGroupValue {
             return Some(f64::from_le_bytes(*b));
         }
 
-        return None;
+        None
     }
 
     pub fn is_null_value(&self) -> bool {
@@ -557,6 +553,6 @@ impl SummaryGroupValue {
             return true;
         }
 
-        return false;
+        false
     }
 }

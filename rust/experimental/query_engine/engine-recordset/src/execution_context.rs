@@ -134,7 +134,7 @@ impl<'a> DataRecordResolvedValue<'a> {
     }
 }
 
-impl<'a> DataRecordResolvedValue<'a> {
+impl DataRecordResolvedValue<'_> {
     pub fn get_name(&self) -> Option<&str> {
         self.name
     }
@@ -166,7 +166,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             resolved_values.truncate(resolved_values_index);
         }
 
-        return result;
+        result
     }
 
     fn clear(&self) {
@@ -282,7 +282,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             resolve_value_expr.get_path(),
             self.data_record,
             |resolver, data_record| {
-                return resolver.set_value(data_record, value);
+                resolver.set_value(data_record, value)
             },
         );
 
@@ -298,7 +298,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             return DataRecordSetAnyValueResult::NotFound;
         }
 
-        return r.unwrap();
+        r.unwrap()
     }
 
     fn remove_any_value<'b>(
@@ -315,7 +315,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             resolve_value_expr.get_path(),
             self.data_record,
             |resolver, data_record| {
-                return resolver.remove_value(data_record);
+                resolver.remove_value(data_record)
             },
         );
 
@@ -331,7 +331,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             return DataRecordRemoveAnyValueResult::NotFound;
         }
 
-        return r.unwrap();
+        r.unwrap()
     }
 
     fn get_attached_data_records(&self) -> &dyn AttachedDataRecords {
@@ -369,7 +369,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             return Err(Error::ExternalSummaryNotFound(summary_id.into()));
         }
 
-        return Ok(Some(summary_index.unwrap()));
+        Ok(Some(summary_index.unwrap()))
     }
 
     fn get_summary_index(&self) -> Option<usize> {
@@ -398,7 +398,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
     }
 
     fn add_message_for_expression_id(&self, expression_id: usize, mut message: ExpressionMessage) {
-        if !self.message_scope.is_none() {
+        if self.message_scope.is_some() {
             message.add_scope(self.message_scope.as_ref().unwrap());
         }
 
@@ -427,9 +427,9 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
     ) {
         let messages = self.messages.borrow();
         let messages_for_expression = messages.get(&expression_id);
-        if !messages_for_expression.is_none() {
+        if messages_for_expression.is_some() {
             for message in messages_for_expression.unwrap() {
-                output.push_str(&padding);
+                output.push_str(padding);
                 message.write_debug_comment(output);
             }
         }
@@ -466,6 +466,6 @@ impl<'a, T: DataRecord> DataRecordExecutionContext<'a, T> {
     ) -> &'b mut Vec<ExpressionMessage> {
         let entry = messages.entry(expression_id);
 
-        return entry.or_insert_with(|| Vec::new());
+        entry.or_default()
     }
 }

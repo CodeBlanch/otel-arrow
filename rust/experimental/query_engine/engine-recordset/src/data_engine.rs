@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, marker::PhantomData, mem::replace};
+use std::{cell::RefCell, collections::HashMap, marker::PhantomData};
 
 use crate::{
     Summary,
@@ -16,6 +16,12 @@ use crate::{
 
 pub struct DataEngine {
     resolver_cache: DataRecordAnyValueResolverCache,
+}
+
+impl Default for DataEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DataEngine {
@@ -43,10 +49,10 @@ impl DataEngine {
             dropped_record_count: 0,
         };
 
-        return DataEngineBatch {
+        DataEngineBatch {
             state,
             marker: PhantomData,
-        };
+        }
     }
 
     pub fn process_complete_batch<
@@ -62,11 +68,11 @@ impl DataEngine {
 
         batch.drain(&mut b.state, Self::process_item)?;
 
-        return Ok(b.complete());
+        Ok(b.complete())
     }
 
-    fn process_item<'a, 'b, 'c, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>(
-        state: &mut _DataEngineState<'a, 'b, TItem>,
+    fn process_item<'c, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>(
+        state: &mut _DataEngineState<'_, '_, TItem>,
         mut item: TItem,
     ) -> Result<(), Error> {
         let data_record_index = state.items.len();
@@ -80,7 +86,7 @@ impl DataEngine {
             None,
             &messages,
             &state.summaries,
-            &state.resolver_cache,
+            state.resolver_cache,
         );
 
         execution_context.add_message_for_expression_id(
@@ -101,7 +107,7 @@ impl DataEngine {
                 0,
                 ExpressionMessage::info(format!(
                     "AttachedDataRecord '{name}': {:?}",
-                    item.get_attached_data_record(&name)
+                    item.get_attached_data_record(name)
                 )),
             );
         }
@@ -117,7 +123,7 @@ impl DataEngine {
             );
         } else {
             let external_summary_index = external_summary_result.unwrap();
-            if !external_summary_index.is_none() {
+            if external_summary_index.is_some() {
                 let summary_index = external_summary_index.unwrap();
 
                 let external_count = execution_context
@@ -153,7 +159,7 @@ impl DataEngine {
 
             println!("{}", output);
 
-            state.dropped_record_count = state.dropped_record_count + 1;
+            state.dropped_record_count += 1;
             if !item.on_dropped() {
                 state.items.push(DataRecordState {
                     item: Some(item),
@@ -183,7 +189,7 @@ impl DataEngine {
 
             println!("{}", output);
 
-            state.included_record_count = state.included_record_count + 1;
+            state.included_record_count += 1;
             state.items.push(DataRecordState {
                 item: Some(item),
                 result: DataRecordProcessResult::Include,
@@ -192,10 +198,10 @@ impl DataEngine {
             return Ok(());
         }
 
-        return Err(Error::ExpressionError(
+        Err(Error::ExpressionError(
             state.pipeline.get_id(),
             Error::InvalidOperation("Unexpected result from pipeline").into(),
-        ));
+        ))
     }
 }
 
@@ -204,8 +210,8 @@ pub struct DataEngineBatch<'a, 'b, TRecord: DataRecord, TItem: DataEngineItem<TR
     marker: PhantomData<TRecord>,
 }
 
-impl<'a, 'b, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>
-    DataEngineBatch<'a, 'b, TRecord, TItem>
+impl<TRecord: DataRecord, TItem: DataEngineItem<TRecord>>
+    DataEngineBatch<'_, '_, TRecord, TItem>
 {
     pub fn register_summary(&mut self, summary: Summary) {
         self.state.register_summary(summary);
@@ -214,7 +220,7 @@ impl<'a, 'b, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>
     pub fn push(&mut self, item: TItem) -> Result<(), Error> {
         let state = &mut self.state;
 
-        return DataEngine::process_item(state, item);
+        DataEngine::process_item(state, item)
     }
 
     pub fn complete(self) -> DataEngineExecutionResults<TItem> {
@@ -236,8 +242,8 @@ impl<'a, 'b, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>
                     .expect("DataRecord not found on state");
                 let consumed = data_record.on_dropped();
                 data_record_state.result = DataRecordProcessResult::Drop;
-                state.dropped_record_count = state.dropped_record_count + 1;
-                state.included_record_count = state.included_record_count - 1;
+                state.dropped_record_count += 1;
+                state.included_record_count -= 1;
                 println!(
                     "Dropped record replaced in summary reservoir: {:?}",
                     data_record
@@ -288,12 +294,12 @@ impl<'a, 'b, TRecord: DataRecord, TItem: DataEngineItem<TRecord>>
             summary_results.push(summary_state.into());
         }
 
-        return DataEngineExecutionResults::new(
+        DataEngineExecutionResults::new(
             summary_results,
             state.items,
             state.included_record_count,
             state.dropped_record_count,
-        );
+        )
     }
 }
 
@@ -362,7 +368,7 @@ pub struct Drain<'a, T> {
     included: bool,
 }
 
-impl<'a, T> Iterator for Drain<'a, T> {
+impl<T> Iterator for Drain<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -376,7 +382,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
                 .get_mut(self.index)
                 .expect("DataRecord was not found");
 
-            self.index = self.index + 1;
+            self.index += 1;
 
             if state.item.is_none() {
                 continue;
@@ -385,12 +391,12 @@ impl<'a, T> Iterator for Drain<'a, T> {
             match state.result {
                 DataRecordProcessResult::Include => {
                     if self.included {
-                        return Some(replace(&mut state.item, None).unwrap());
+                        return Some(state.item.take().unwrap());
                     }
                 }
                 DataRecordProcessResult::Drop => {
                     if !self.included {
-                        return Some(replace(&mut state.item, None).unwrap());
+                        return Some(state.item.take().unwrap());
                     }
                 }
             }
@@ -412,7 +418,7 @@ struct _DataEngineState<'a, 'b, T> {
     dropped_record_count: u32,
 }
 
-impl<'a, 'b, T> DataEngineState for _DataEngineState<'a, 'b, T> {
+impl<T> DataEngineState for _DataEngineState<'_, '_, T> {
     fn register_summary(&mut self, summary: Summary) {
         let summary_id: String = summary.get_id().into();
 
