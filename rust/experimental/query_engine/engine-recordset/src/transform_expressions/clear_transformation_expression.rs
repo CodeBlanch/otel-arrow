@@ -21,13 +21,13 @@ impl Expression for ClearTransformationExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"clear");
-                if !self.predicate.is_none() {
+                if self.predicate.is_some() {
                     h.add_bytes(b"predicate:");
                     h.add_bytes(self.predicate.as_ref().unwrap().get_hash().get_bytes());
                 }
-            });
+            })
         })
     }
 
@@ -44,7 +44,7 @@ impl Expression for ClearTransformationExpression {
         output.push_str(heading);
         output.push_str("clear (\n");
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             self.predicate.as_ref().unwrap().write_debug(
                 execution_context,
                 "predicate: ",
@@ -65,22 +65,19 @@ impl TransformationExpressionInternal for ClearTransformationExpression {
     where
         'a: 'b,
     {
-        if !self.predicate.is_none() {
-            if !self
+        if self.predicate.is_some() && !self
                 .predicate
                 .as_ref()
                 .unwrap()
-                .evaluate(execution_context)?
-            {
-                execution_context.add_message_for_expression(
-                    self,
-                    ExpressionMessage::info(
-                        "ClearTransformationExpression evaluation skipped".to_string(),
-                    ),
-                );
+                .evaluate(execution_context)? {
+            execution_context.add_message_for_expression(
+                self,
+                ExpressionMessage::info(
+                    "ClearTransformationExpression evaluation skipped".to_string(),
+                ),
+            );
 
-                return Ok(());
-            }
+            return Ok(());
         }
 
         execution_context.clear();
@@ -90,7 +87,13 @@ impl TransformationExpressionInternal for ClearTransformationExpression {
             ExpressionMessage::info("ClearTransformationExpression DataRecord cleared".to_string()),
         );
 
-        return Ok(());
+        Ok(())
+    }
+}
+
+impl Default for ClearTransformationExpression {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

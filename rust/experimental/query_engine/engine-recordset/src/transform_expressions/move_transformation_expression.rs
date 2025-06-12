@@ -24,9 +24,9 @@ impl Expression for MoveTransformationExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"move");
-                if !self.predicate.is_none() {
+                if self.predicate.is_some() {
                     h.add_bytes(b"predicate:");
                     h.add_bytes(self.predicate.as_ref().unwrap().get_hash().get_bytes());
                 }
@@ -34,7 +34,7 @@ impl Expression for MoveTransformationExpression {
                 h.add_bytes(self.destination.get_hash().get_bytes());
                 h.add_bytes(b"source:");
                 h.add_bytes(self.source.get_hash().get_bytes());
-            });
+            })
         })
     }
 
@@ -51,7 +51,7 @@ impl Expression for MoveTransformationExpression {
         output.push_str(heading);
         output.push_str("move (\n");
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             self.predicate.as_ref().unwrap().write_debug(
                 execution_context,
                 "predicate: ",
@@ -84,22 +84,19 @@ impl TransformationExpressionInternal for MoveTransformationExpression {
     where
         'a: 'b,
     {
-        if !self.predicate.is_none() {
-            if !self
+        if self.predicate.is_some() && !self
                 .predicate
                 .as_ref()
                 .unwrap()
-                .evaluate(execution_context)?
-            {
-                execution_context.add_message_for_expression(
-                    self,
-                    ExpressionMessage::info(
-                        "MoveTransformationExpression evaluation skipped".to_string(),
-                    ),
-                );
+                .evaluate(execution_context)? {
+            execution_context.add_message_for_expression(
+                self,
+                ExpressionMessage::info(
+                    "MoveTransformationExpression evaluation skipped".to_string(),
+                ),
+            );
 
-                return Ok(());
-            }
+            return Ok(());
         }
 
         match self.source.remove_any_value(execution_context) {
@@ -161,7 +158,7 @@ impl TransformationExpressionInternal for MoveTransformationExpression {
             }
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 

@@ -24,9 +24,9 @@ impl Expression for SetTransformationExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"set");
-                if !self.predicate.is_none() {
+                if self.predicate.is_some() {
                     h.add_bytes(b"predicate:");
                     h.add_bytes(self.predicate.as_ref().unwrap().get_hash().get_bytes());
                 }
@@ -34,7 +34,7 @@ impl Expression for SetTransformationExpression {
                 h.add_bytes(self.destination.get_hash().get_bytes());
                 h.add_bytes(b"value:");
                 h.add_bytes(self.value.get_hash().get_bytes());
-            });
+            })
         })
     }
 
@@ -51,7 +51,7 @@ impl Expression for SetTransformationExpression {
         output.push_str(heading);
         output.push_str("set (\n");
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             self.predicate.as_ref().unwrap().write_debug(
                 execution_context,
                 "predicate: ",
@@ -84,22 +84,19 @@ impl TransformationExpressionInternal for SetTransformationExpression {
     where
         'a: 'b,
     {
-        if !self.predicate.is_none() {
-            if !self
+        if self.predicate.is_some() && !self
                 .predicate
                 .as_ref()
                 .unwrap()
-                .evaluate(execution_context)?
-            {
-                execution_context.add_message_for_expression(
-                    self,
-                    ExpressionMessage::info(
-                        "SetTransformationExpression evaluation skipped".to_string(),
-                    ),
-                );
+                .evaluate(execution_context)? {
+            execution_context.add_message_for_expression(
+                self,
+                ExpressionMessage::info(
+                    "SetTransformationExpression evaluation skipped".to_string(),
+                ),
+            );
 
-                return Ok(());
-            }
+            return Ok(());
         }
 
         let mut result = Err(Error::ExpressionError(
@@ -168,7 +165,7 @@ impl TransformationExpressionInternal for SetTransformationExpression {
             }
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
