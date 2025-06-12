@@ -57,6 +57,6 @@ impl ArrayValueData {
             ExpressionMessage::warn(
                 format!("AnyValue '{:?}' provided as right side of array equality comparison was not an array", other)));
 
-        return Ok(false);
+        Ok(false)
     }
 }

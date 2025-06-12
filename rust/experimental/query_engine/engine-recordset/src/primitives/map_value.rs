@@ -118,6 +118,6 @@ impl MapValueData {
             )),
         );
 
-        return Ok(false);
+        Ok(false)
     }
 }

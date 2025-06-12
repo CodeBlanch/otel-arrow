@@ -66,7 +66,7 @@ impl LongValueData {
 
         fn compare_values(left: i64, right: i64) -> i32 {
             if left == right {
-                return 0;
+                0
             } else if left < right {
                 return -1;
             } else {
@@ -104,7 +104,7 @@ impl LongValueData {
             ExpressionMessage::warn(
                 format!("AnyValue '{:?}' provided as right side of long equality expression could not be convered into a long", other)));
 
-        return false;
+        false
     }
 
     pub(crate) fn to_string<F>(&self, action: F)
@@ -117,6 +117,6 @@ impl LongValueData {
             *string_value = Some(self.value.to_string());
         }
 
-        return action(string_value.as_ref().unwrap());
+        action(string_value.as_ref().unwrap())
     }
 }

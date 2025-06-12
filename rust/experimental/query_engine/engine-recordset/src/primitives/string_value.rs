@@ -23,7 +23,7 @@ impl StringValueData {
     }
 
     pub(crate) fn add_hash_bytes(&self, hasher: &mut Hasher) {
-        hasher.add_bytes(&self.value.as_bytes());
+        hasher.add_bytes(self.value.as_bytes());
     }
 
     pub(crate) fn equals(
@@ -51,6 +51,6 @@ impl StringValueData {
             }
         });
 
-        return result;
+        result
     }
 }

@@ -34,7 +34,7 @@ impl AnyValue {
         expression_id: usize,
         other: &AnyValue,
     ) -> Result<i32, Error> {
-        return match self {
+        match self {
             AnyValue::ArrayValue(_) => Err(Error::new_expression_not_supported(
                 expression_id,
                 "ArrayValue type on left side of compare expression is not supported",
@@ -76,7 +76,7 @@ impl AnyValue {
                 expression_id,
                 "XmlValue type on left side of compare expression is not supported",
             )),
-        };
+        }
     }
 
     pub(crate) fn equals(
@@ -85,7 +85,7 @@ impl AnyValue {
         expression_id: usize,
         other: &AnyValue,
     ) -> Result<bool, Error> {
-        return match self {
+        match self {
             AnyValue::NullValue => Ok(other.is_null()),
             AnyValue::ArrayValue(array_value) => {
                 array_value.equals(execution_context, expression_id, other)
@@ -120,7 +120,7 @@ impl AnyValue {
                 expression_id,
                 "XmlValue type on left side of equality expression is not supported",
             )),
-        };
+        }
     }
 
     pub(crate) fn is_null(&self) -> bool {
@@ -128,7 +128,7 @@ impl AnyValue {
             return true;
         }
 
-        return false;
+        false
     }
 
     pub(crate) fn as_string_value<F>(&self, action: F)
@@ -213,7 +213,7 @@ impl AnyValue {
             return Some(string_value.get_value());
         }
 
-        return None;
+        None
     }
 
     pub fn get_long_value(&self) -> Option<i64> {
@@ -221,7 +221,7 @@ impl AnyValue {
             return Some(long_value.get_value());
         }
 
-        return None;
+        None
     }
 
     pub fn get_double_value(&self) -> Option<f64> {
@@ -229,7 +229,7 @@ impl AnyValue {
             return Some(double_value.get_value());
         }
 
-        return None;
+        None
     }
 
     pub fn get_bool_value(&self) -> Option<bool> {
@@ -237,7 +237,7 @@ impl AnyValue {
             return Some(bool_value.get_value());
         }
 
-        return None;
+        None
     }
 
     pub fn get_array_value(&self) -> Option<&Vec<AnyValue>> {
@@ -245,7 +245,7 @@ impl AnyValue {
             return Some(array_value.get_values());
         }
 
-        return None;
+        None
     }
 
     pub fn get_map_value(&self) -> Option<&HashMap<String, AnyValue>> {
@@ -253,6 +253,6 @@ impl AnyValue {
             return Some(map_value.get_values());
         }
 
-        return None;
+        None
     }
 }

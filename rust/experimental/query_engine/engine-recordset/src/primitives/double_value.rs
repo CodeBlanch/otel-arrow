@@ -59,15 +59,15 @@ impl DoubleValueData {
             ExpressionMessage::warn(
                 format!("AnyValue '{:?}' provided as right side of double compare expression could not be convered into a double", other)));
 
-        return Err(Error::new_expression_not_supported(
+        Err(Error::new_expression_not_supported(
             expression_id,
             "AnyValue type on right side of compare expression is not supported",
-        ));
+        ))
     }
 
     pub(crate) fn compare_values(left: f64, right: f64) -> i32 {
         if left == right {
-            return 0;
+            0
         } else if left < right {
             return -1;
         } else {
@@ -104,7 +104,7 @@ impl DoubleValueData {
             ExpressionMessage::warn(
                 format!("AnyValue '{:?}' provided as right side of double equality expression could not be convered into a double", other)));
 
-        return false;
+        false
     }
 
     pub(crate) fn to_string<F>(&self, action: F)
@@ -117,6 +117,6 @@ impl DoubleValueData {
             *string_value = Some(self.value.to_string());
         }
 
-        return action(string_value.as_ref().unwrap());
+        action(string_value.as_ref().unwrap())
     }
 }

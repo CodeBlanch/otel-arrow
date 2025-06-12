@@ -9,14 +9,14 @@ pub struct RegexValueData {
 
 impl RegexValueData {
     pub fn new_from_string(value: &str) -> Result<RegexValueData, Error> {
-        let result = Regex::new(&value);
+        let result = Regex::new(value);
         if let Err(error) = result {
             return Err(Error::RegexParseError(error));
         }
 
-        return Ok(Self {
+        Ok(Self {
             regex: result.unwrap(),
-        });
+        })
     }
 
     pub fn new_from_regex(regex: Regex) -> RegexValueData {
@@ -32,6 +32,6 @@ impl RegexValueData {
     }
 
     pub(crate) fn add_hash_bytes(&self, hasher: &mut Hasher) {
-        hasher.add_bytes(&self.get_pattern().as_bytes());
+        hasher.add_bytes(self.get_pattern().as_bytes());
     }
 }

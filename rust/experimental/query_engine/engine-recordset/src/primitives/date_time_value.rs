@@ -17,10 +17,10 @@ impl DateTimeValueData {
             return Err(Error::DateTimeParseError(error));
         }
 
-        return Ok(Self {
+        Ok(Self {
             raw_value: value.into(),
             value: result.unwrap(),
-        });
+        })
     }
 
     pub fn new(raw_value: &str, value: DateTime<FixedOffset>) -> DateTimeValueData {
@@ -78,7 +78,7 @@ impl DateTimeValueData {
 
         fn compare_values(left: DateTime<FixedOffset>, right: DateTime<FixedOffset>) -> i32 {
             if left == right {
-                return 0;
+                0
             } else if left < right {
                 return -1;
             } else {
@@ -116,6 +116,6 @@ impl DateTimeValueData {
             ExpressionMessage::warn(
                 format!("AnyValue '{:?}' provided as right side of date time equality expression could not be convered into a date time", other)));
 
-        return false;
+        false
     }
 }
