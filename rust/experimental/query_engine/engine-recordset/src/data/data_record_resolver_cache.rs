@@ -14,21 +14,21 @@ pub(crate) struct DataRecordAnyValueResolverCache {
 
 impl DataRecordAnyValueResolverCache {
     pub fn new() -> DataRecordAnyValueResolverCache {
-        let cache = Self {
-            cache: HashMap::new(),
-        };
+        
 
-        return cache;
+        Self {
+            cache: HashMap::new(),
+        }
     }
 
     pub fn register<T: DataRecord>(&mut self) -> Result<(), Error> {
         match self.cache.entry(TypeId::of::<T>()) {
             Entry::Occupied(_) => {
-                return Err(Error::RegistrationError("DataRecord already registered"));
+                Err(Error::RegistrationError("DataRecord already registered"))
             }
             Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(Box::new(GenericDataRecordAnyValueResolverCache::<T>::new()));
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -118,7 +118,7 @@ impl<T: DataRecord> GenericDataRecordAnyValueResolverCache<T> {
         {
             let cache_read_borrow = self.cache.borrow();
             let resolver = cache_read_borrow.get(path);
-            if !resolver.is_none() {
+            if resolver.is_some() {
                 execution_context.add_message_for_expression_id(
                     expression_id,
                     ExpressionMessage::info(format!(
@@ -136,7 +136,7 @@ impl<T: DataRecord> GenericDataRecordAnyValueResolverCache<T> {
             .entry(path.clone())
             .or_insert(T::get_any_value_resolver_for_path(path));
 
-        return action(resolver, data_record);
+        action(resolver, data_record)
     }
 }
 
@@ -154,7 +154,7 @@ impl<T: DataRecord> DynamicDataRecordAnyValueResolver
         {
             let cache_read_borrow = self.cache.borrow();
             let resolver = cache_read_borrow.get(path);
-            if !resolver.is_none() {
+            if resolver.is_some() {
                 execution_context.add_message_for_expression_id(
                     expression_id,
                     ExpressionMessage::info(format!(
@@ -188,12 +188,12 @@ impl<T: DataRecord> DynamicDataRecordAnyValueResolver
         match (data_record as &dyn Any).downcast_ref::<T>() {
             Some(typed_data_record) => {
                 resolver.read_value_direct(typed_data_record, |r| action.invoke_once(r));
-                return Ok(());
+                Ok(())
             }
             None => {
-                return Err(Error::RegistrationError(
+                Err(Error::RegistrationError(
                     "DataRecord registration type mismatch",
-                ));
+                ))
             }
         }
     }

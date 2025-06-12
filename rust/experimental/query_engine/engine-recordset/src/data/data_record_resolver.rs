@@ -1,4 +1,4 @@
-use std::{any::Any, cell::RefCell, mem::replace};
+use std::{any::Any, cell::RefCell};
 
 use crate::{Error, ValuePath, execution_context::ExecutionContext, primitives::AnyValue};
 
@@ -75,13 +75,13 @@ impl<T: DataRecord> DataRecordAnyValueResolver<T> {
     ) -> DataRecordSetAnyValueResult {
         let mut borrow = data_record.borrow_mut();
 
-        return (self.set_value_fn)(&self.path, &mut borrow, value);
+        (self.set_value_fn)(&self.path, &mut borrow, value)
     }
 
     pub(crate) fn remove_value(&self, data_record: &RefCell<T>) -> DataRecordRemoveAnyValueResult {
         let mut borrow = data_record.borrow_mut();
 
-        return (self.remove_value_fn)(&self.path, &mut borrow);
+        (self.remove_value_fn)(&self.path, &mut borrow)
     }
 }
 
@@ -140,8 +140,8 @@ where
     F: FnOnce(DataRecordReadAnyValueResult),
 {
     fn invoke_once(&mut self, result: DataRecordReadAnyValueResult) {
-        let callback = replace(&mut self.callback, None);
-        if !callback.is_none() {
+        let callback = self.callback.take();
+        if callback.is_some() {
             (callback.unwrap())(result);
         }
     }

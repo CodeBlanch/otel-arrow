@@ -38,7 +38,7 @@ where
         return DataRecordAnyValueResolver::new_no_op();
     }
 
-    return DataRecordAnyValueResolver::new(
+    DataRecordAnyValueResolver::new(
         path.clone(),
         |_, data_record| {
             let root = read_action(data_record);
@@ -66,7 +66,7 @@ where
                 return DataRecordSetAnyValueResult::Updated(old_value.unwrap());
             }
 
-            return DataRecordSetAnyValueResult::NotSupported("Value was not a String");
+            DataRecordSetAnyValueResult::NotSupported("Value was not a String")
         },
         move |_, data_record| {
             let old_value = set_action(data_record, None);
@@ -75,9 +75,9 @@ where
                 return DataRecordRemoveAnyValueResult::NotFound;
             }
 
-            return DataRecordRemoveAnyValueResult::Removed(old_value.unwrap());
+            DataRecordRemoveAnyValueResult::Removed(old_value.unwrap())
         },
-    );
+    )
 }
 
 pub fn create_map_value_resolver<T: DataRecord, R, M, S>(
@@ -91,7 +91,7 @@ where
     M: Fn(&mut T) -> Option<&mut AnyValue>,
     S: Fn(&mut T, Option<AnyValue>) -> Option<AnyValue>,
 {
-    return DataRecordAnyValueResolver::new(
+    DataRecordAnyValueResolver::new(
         path.clone(),
         |path, data_record| {
             let root = read_action(data_record);
@@ -120,7 +120,7 @@ where
                     return DataRecordSetAnyValueResult::Updated(old_value.unwrap());
                 }
 
-                return DataRecordSetAnyValueResult::NotSupported("Value was not a Map");
+                DataRecordSetAnyValueResult::NotSupported("Value was not a Map")
             } else {
                 let root = read_mut_action(data_record);
                 match root {
@@ -137,7 +137,7 @@ where
                     return DataRecordRemoveAnyValueResult::NotFound;
                 }
 
-                return DataRecordRemoveAnyValueResult::Removed(old_value.unwrap());
+                DataRecordRemoveAnyValueResult::Removed(old_value.unwrap())
             } else {
                 let root = read_mut_action(data_record);
                 match root {
@@ -146,5 +146,5 @@ where
                 }
             }
         },
-    );
+    )
 }
