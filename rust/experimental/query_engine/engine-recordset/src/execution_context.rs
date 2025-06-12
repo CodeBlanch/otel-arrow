@@ -281,9 +281,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             self,
             resolve_value_expr.get_path(),
             self.data_record,
-            |resolver, data_record| {
-                resolver.set_value(data_record, value)
-            },
+            |resolver, data_record| resolver.set_value(data_record, value),
         );
 
         if r.is_err() {
@@ -314,9 +312,7 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
             self,
             resolve_value_expr.get_path(),
             self.data_record,
-            |resolver, data_record| {
-                resolver.remove_value(data_record)
-            },
+            |resolver, data_record| resolver.remove_value(data_record),
         );
 
         if r.is_err() {

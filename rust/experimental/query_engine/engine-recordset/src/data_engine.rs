@@ -210,9 +210,7 @@ pub struct DataEngineBatch<'a, 'b, TRecord: DataRecord, TItem: DataEngineItem<TR
     marker: PhantomData<TRecord>,
 }
 
-impl<TRecord: DataRecord, TItem: DataEngineItem<TRecord>>
-    DataEngineBatch<'_, '_, TRecord, TItem>
-{
+impl<TRecord: DataRecord, TItem: DataEngineItem<TRecord>> DataEngineBatch<'_, '_, TRecord, TItem> {
     pub fn register_summary(&mut self, summary: Summary) {
         self.state.register_summary(summary);
     }

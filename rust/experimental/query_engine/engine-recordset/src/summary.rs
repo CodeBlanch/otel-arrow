@@ -93,7 +93,6 @@ impl Summaries {
                 existed: true,
             };
 
-            
             let reservoir_size = match &summary_lookup.reservoir_type {
                 SummaryReservoir::SimpleReservoir(s) => *s as usize,
             };
@@ -122,7 +121,6 @@ impl Summaries {
 
         let mut summary_data = self.summary_data.borrow_mut();
 
-        
         let reservoir_size = match &summary_lookup.reservoir_type {
             SummaryReservoir::SimpleReservoir(s) => *s,
         };
@@ -518,7 +516,11 @@ impl SummaryGroupValue {
         } else {
             let mut group = SummaryGroupValue::NullValue;
 
-            any_value.as_string_value(|r| if let Some(string_value) = r { group = SummaryGroupValue::StringValue(string_value.into()) });
+            any_value.as_string_value(|r| {
+                if let Some(string_value) = r {
+                    group = SummaryGroupValue::StringValue(string_value.into())
+                }
+            });
 
             return group;
         }

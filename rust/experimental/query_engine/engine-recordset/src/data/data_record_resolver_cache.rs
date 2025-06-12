@@ -14,8 +14,6 @@ pub(crate) struct DataRecordAnyValueResolverCache {
 
 impl DataRecordAnyValueResolverCache {
     pub fn new() -> DataRecordAnyValueResolverCache {
-        
-
         Self {
             cache: HashMap::new(),
         }
@@ -23,9 +21,7 @@ impl DataRecordAnyValueResolverCache {
 
     pub fn register<T: DataRecord>(&mut self) -> Result<(), Error> {
         match self.cache.entry(TypeId::of::<T>()) {
-            Entry::Occupied(_) => {
-                Err(Error::RegistrationError("DataRecord already registered"))
-            }
+            Entry::Occupied(_) => Err(Error::RegistrationError("DataRecord already registered")),
             Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(Box::new(GenericDataRecordAnyValueResolverCache::<T>::new()));
                 Ok(())
@@ -190,11 +186,9 @@ impl<T: DataRecord> DynamicDataRecordAnyValueResolver
                 resolver.read_value_direct(typed_data_record, |r| action.invoke_once(r));
                 Ok(())
             }
-            None => {
-                Err(Error::RegistrationError(
-                    "DataRecord registration type mismatch",
-                ))
-            }
+            None => Err(Error::RegistrationError(
+                "DataRecord registration type mismatch",
+            )),
         }
     }
 }

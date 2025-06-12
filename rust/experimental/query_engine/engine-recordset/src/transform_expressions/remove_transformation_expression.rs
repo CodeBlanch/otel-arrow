@@ -75,11 +75,13 @@ impl TransformationExpressionInternal for RemoveTransformationExpression {
     where
         'a: 'b,
     {
-        if self.predicate.is_some() && !self
+        if self.predicate.is_some()
+            && !self
                 .predicate
                 .as_ref()
                 .unwrap()
-                .evaluate(execution_context)? {
+                .evaluate(execution_context)?
+        {
             execution_context.add_message_for_expression(
                 self,
                 ExpressionMessage::info(

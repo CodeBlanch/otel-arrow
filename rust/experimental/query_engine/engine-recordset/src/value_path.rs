@@ -260,9 +260,7 @@ impl ValuePath {
                                     let old_value = values.remove(k);
                                     match old_value {
                                         Some(old_value) => {
-                                            return DataRecordSetAnyValueResult::Updated(
-                                                old_value,
-                                            );
+                                            return DataRecordSetAnyValueResult::Updated(old_value);
                                         }
                                         None => return DataRecordSetAnyValueResult::NotFound,
                                     }
@@ -270,9 +268,7 @@ impl ValuePath {
                                     let old_value = values.insert(k.into(), any_value_to_set);
                                     match old_value {
                                         Some(old_value) => {
-                                            return DataRecordSetAnyValueResult::Updated(
-                                                old_value,
-                                            );
+                                            return DataRecordSetAnyValueResult::Updated(old_value);
                                         }
                                         None => return DataRecordSetAnyValueResult::Created,
                                     }
