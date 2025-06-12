@@ -19,8 +19,6 @@ pub struct DataRecordAnyValueResolver<T: DataRecord> {
     path: ValuePath,
     read_value_fn:
         Box<dyn for<'a, 'b> Fn(&'a ValuePath, &'b T) -> DataRecordReadAnyValueResult<'b>>,
-    read_value_mut_fn:
-        Box<dyn for<'a, 'b> Fn(&'a ValuePath, &'b mut T) -> DataRecordReadMutAnyValueResult<'b>>,
     set_value_fn: Box<dyn Fn(&ValuePath, &mut T, AnyValue) -> DataRecordSetAnyValueResult>,
     remove_value_fn: Box<dyn Fn(&ValuePath, &mut T) -> DataRecordRemoveAnyValueResult>,
 }
@@ -30,18 +28,12 @@ impl<T: DataRecord> DataRecordAnyValueResolver<T> {
         path: ValuePath,
         read_value: impl for<'a, 'b> Fn(&'a ValuePath, &'b T) -> DataRecordReadAnyValueResult<'b>
         + 'static,
-        read_value_mut: impl for<'a, 'b> Fn(
-            &'a ValuePath,
-            &'b mut T,
-        ) -> DataRecordReadMutAnyValueResult<'b>
-        + 'static,
         set_value: impl Fn(&ValuePath, &mut T, AnyValue) -> DataRecordSetAnyValueResult + 'static,
         remove_value: impl Fn(&ValuePath, &mut T) -> DataRecordRemoveAnyValueResult + 'static,
     ) -> DataRecordAnyValueResolver<T> {
         Self {
             path,
             read_value_fn: Box::new(read_value),
-            read_value_mut_fn: Box::new(read_value_mut),
             set_value_fn: Box::new(set_value),
             remove_value_fn: Box::new(remove_value),
         }
@@ -51,7 +43,6 @@ impl<T: DataRecord> DataRecordAnyValueResolver<T> {
         DataRecordAnyValueResolver::new(
             ValuePath::new("").unwrap(),
             |_, _| DataRecordReadAnyValueResult::NotFound,
-            |_, _| DataRecordReadMutAnyValueResult::NotFound,
             |_, _, _| DataRecordSetAnyValueResult::NotFound,
             |_, _| DataRecordRemoveAnyValueResult::NotFound,
         )
@@ -73,17 +64,6 @@ impl<T: DataRecord> DataRecordAnyValueResolver<T> {
         F: FnOnce(DataRecordReadAnyValueResult),
     {
         let result = (self.read_value_fn)(&self.path, data_record);
-
-        action(result);
-    }
-
-    pub(crate) fn read_value_mut<F>(&self, data_record: &RefCell<T>, action: F)
-    where
-        F: FnOnce(DataRecordReadMutAnyValueResult),
-    {
-        let mut borrow = data_record.borrow_mut();
-
-        let result = (self.read_value_mut_fn)(&self.path, &mut borrow);
 
         action(result);
     }
@@ -160,40 +140,6 @@ where
     F: FnOnce(DataRecordReadAnyValueResult),
 {
     fn invoke_once(&mut self, result: DataRecordReadAnyValueResult) {
-        let callback = replace(&mut self.callback, None);
-        if !callback.is_none() {
-            (callback.unwrap())(result);
-        }
-    }
-}
-
-pub(crate) trait DataRecordAnyValueReadMutCallback {
-    fn invoke_once(&mut self, result: DataRecordReadMutAnyValueResult);
-}
-
-pub(crate) struct DataRecordAnyValueReadMutClosureCallback<F>
-where
-    F: FnOnce(DataRecordReadMutAnyValueResult),
-{
-    callback: Option<F>,
-}
-
-impl<F> DataRecordAnyValueReadMutClosureCallback<F>
-where
-    F: FnOnce(DataRecordReadMutAnyValueResult),
-{
-    pub fn new(callback: F) -> DataRecordAnyValueReadMutClosureCallback<F> {
-        Self {
-            callback: Some(callback),
-        }
-    }
-}
-
-impl<F> DataRecordAnyValueReadMutCallback for DataRecordAnyValueReadMutClosureCallback<F>
-where
-    F: FnOnce(DataRecordReadMutAnyValueResult),
-{
-    fn invoke_once(&mut self, result: DataRecordReadMutAnyValueResult) {
         let callback = replace(&mut self.callback, None);
         if !callback.is_none() {
             (callback.unwrap())(result);

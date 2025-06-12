@@ -155,9 +155,9 @@ impl ExpressionMessage {
                 result.1.as_ref().unwrap(),
                 result.0,
                 result.2
-            );
+            ).expect("debug comments could not be written");
         } else {
-            write!(output, "// {}: {}\n", result.0, result.2);
+            write!(output, "// {}: {}\n", result.0, result.2).expect("debug comments could not be written");
         }
     }
 }

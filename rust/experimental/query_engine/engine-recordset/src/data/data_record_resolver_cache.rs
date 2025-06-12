@@ -6,10 +6,7 @@ use std::{
 
 use crate::{Error, ValuePath, execution_context::*, expression::ExpressionMessage};
 
-use super::{
-    DataRecord, array_data_record::ArrayDataRecord, data_record_resolver::*,
-    key_value_data_record::KeyValueDataRecord,
-};
+use super::{DataRecord, data_record_resolver::*};
 
 pub(crate) struct DataRecordAnyValueResolverCache {
     cache: HashMap<TypeId, Box<dyn DynamicDataRecordAnyValueResolver>>,
@@ -17,15 +14,9 @@ pub(crate) struct DataRecordAnyValueResolverCache {
 
 impl DataRecordAnyValueResolverCache {
     pub fn new() -> DataRecordAnyValueResolverCache {
-        let mut cache = Self {
+        let cache = Self {
             cache: HashMap::new(),
         };
-
-        if cache.register::<ArrayDataRecord>().is_err()
-            || cache.register::<KeyValueDataRecord>().is_err()
-        {
-            panic!("DataRecordAnyValueResolverCache default registration failure")
-        }
 
         return cache;
     }

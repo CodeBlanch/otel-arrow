@@ -45,14 +45,6 @@ pub(crate) trait ExecutionContext<'a> {
     ) where
         'b: 'a;
 
-    fn read_any_value_mut<'b>(
-        &self,
-        expression_id: usize,
-        resolve_value_expr: &'b ResolveValueExpression,
-        action: &mut dyn DataRecordAnyValueReadMutCallback,
-    ) where
-        'b: 'a;
-
     fn set_any_value<'b>(
         &self,
         expression_id: usize,
@@ -78,8 +70,6 @@ pub(crate) trait ExecutionContext<'a> {
 
     fn get_observed_timestamp(&self) -> Option<SystemTime>;
 
-    fn get_messages(&self) -> &RefCell<HashMap<usize, Vec<ExpressionMessage>>>;
-
     fn get_summaries(&self) -> &Summaries;
 
     fn get_external_summary_index(&self) -> Result<Option<usize>, Error>;
@@ -87,8 +77,6 @@ pub(crate) trait ExecutionContext<'a> {
     fn get_summary_index(&self) -> Option<usize>;
 
     fn set_summary_index(&self, index: usize);
-
-    fn get_resolver_cache(&self) -> &DataRecordAnyValueResolverCache;
 
     fn get_variables(&self) -> &RefCell<HashMap<String, AnyValue>>;
 
@@ -279,37 +267,6 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
         }
     }
 
-    fn read_any_value_mut<'b>(
-        &self,
-        expression_id: usize,
-        resolve_value_expr: &'b ResolveValueExpression,
-        action: &mut dyn DataRecordAnyValueReadMutCallback,
-    ) where
-        'b: 'a,
-    {
-        let r = self.resolver_cache.invoke_resolver(
-            expression_id,
-            self,
-            resolve_value_expr.get_path(),
-            self.data_record,
-            |resolver, data_record| {
-                resolver.read_value_mut(data_record, |r| action.invoke_once(r));
-            },
-        );
-
-        if r.is_err() {
-            self.add_message_for_expression_id(
-                expression_id,
-                ExpressionMessage::err(format!(
-                    "ExecutionContext read_mut operation returned an error: {}",
-                    r.unwrap_err()
-                )),
-            );
-
-            action.invoke_once(DataRecordReadMutAnyValueResult::NotFound);
-        }
-    }
-
     fn set_any_value<'b>(
         &self,
         expression_id: usize,
@@ -393,10 +350,6 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
         self.data_record.borrow().get_observed_timestamp()
     }
 
-    fn get_messages(&self) -> &RefCell<HashMap<usize, Vec<ExpressionMessage>>> {
-        self.messages
-    }
-
     fn get_summaries(&self) -> &Summaries {
         self.summaries
     }
@@ -430,10 +383,6 @@ impl<'a, T: DataRecord> ExecutionContext<'a> for DataRecordExecutionContext<'a, 
 
     fn set_summary_index(&self, index: usize) {
         *self.summary_index.borrow_mut() = Some(index);
-    }
-
-    fn get_resolver_cache(&self) -> &DataRecordAnyValueResolverCache {
-        self.resolver_cache
     }
 
     fn get_variables(&self) -> &RefCell<HashMap<String, AnyValue>> {
