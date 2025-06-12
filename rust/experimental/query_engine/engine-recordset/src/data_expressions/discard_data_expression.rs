@@ -21,13 +21,13 @@ impl Expression for DiscardDataExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"discard");
-                if !self.predicate.is_none() {
+                if self.predicate.is_some() {
                     h.add_bytes(b"predicate:");
                     h.add_bytes(self.predicate.as_ref().unwrap().get_hash().get_bytes());
                 }
-            });
+            })
         })
     }
 
@@ -44,7 +44,7 @@ impl Expression for DiscardDataExpression {
         output.push_str(heading);
         output.push_str("discard (\n");
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             self.predicate.as_ref().unwrap().write_debug(
                 execution_context,
                 "predicate: ",
@@ -69,7 +69,7 @@ impl DataExpressionInternal for DiscardDataExpression {
         'a: 'b,
     {
         let summary_index = execution_context.get_summary_index();
-        if !summary_index.is_none() {
+        if summary_index.is_some() {
             execution_context.add_message_for_expression(
                 self,
                 ExpressionMessage::info("DiscardDataExpression evaluation skipped because the current record has been included in a summary".to_string()));
@@ -77,7 +77,7 @@ impl DataExpressionInternal for DiscardDataExpression {
             return Ok(DataExpressionResult::None);
         }
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             let result = self
                 .predicate
                 .as_ref()
@@ -98,7 +98,13 @@ impl DataExpressionInternal for DiscardDataExpression {
             ExpressionMessage::info("DiscardDataExpression evaluated".to_string()),
         );
 
-        return Ok(DataExpressionResult::Drop(self.get_id()));
+        Ok(DataExpressionResult::Drop(self.get_id()))
+    }
+}
+
+impl Default for DiscardDataExpression {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -23,9 +23,9 @@ impl Expression for TransformDataExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"transform");
-                if !self.predicate.is_none() {
+                if self.predicate.is_some() {
                     h.add_bytes(b"predicate:");
                     h.add_bytes(self.predicate.as_ref().unwrap().get_hash().get_bytes());
                 }
@@ -33,7 +33,7 @@ impl Expression for TransformDataExpression {
                 for transformation_expr in self.transformations.iter() {
                     h.add_bytes(transformation_expr.get_hash().get_bytes());
                 }
-            });
+            })
         })
     }
 
@@ -50,7 +50,7 @@ impl Expression for TransformDataExpression {
         output.push_str(heading);
         output.push_str("transform (\n");
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             self.predicate.as_ref().unwrap().write_debug(
                 execution_context,
                 "predicate: ",
@@ -94,22 +94,19 @@ impl DataExpressionInternal for TransformDataExpression {
     where
         'a: 'b,
     {
-        if !self.predicate.is_none() {
-            if !self
+        if self.predicate.is_some() && !self
                 .predicate
                 .as_ref()
                 .unwrap()
-                .evaluate(execution_context)?
-            {
-                execution_context.add_message_for_expression(
-                    self,
-                    ExpressionMessage::info(
-                        "TransformDataExpression evaluation skipped".to_string(),
-                    ),
-                );
+                .evaluate(execution_context)? {
+            execution_context.add_message_for_expression(
+                self,
+                ExpressionMessage::info(
+                    "TransformDataExpression evaluation skipped".to_string(),
+                ),
+            );
 
-                return Ok(DataExpressionResult::None);
-            }
+            return Ok(DataExpressionResult::None);
         }
 
         for transformation_expr in self.transformations.iter() {
@@ -121,7 +118,13 @@ impl DataExpressionInternal for TransformDataExpression {
             ExpressionMessage::info("TransformDataExpression evaluated".to_string()),
         );
 
-        return Ok(DataExpressionResult::None);
+        Ok(DataExpressionResult::None)
+    }
+}
+
+impl Default for TransformDataExpression {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

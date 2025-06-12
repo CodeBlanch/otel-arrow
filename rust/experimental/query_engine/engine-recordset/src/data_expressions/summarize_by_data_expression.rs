@@ -83,9 +83,9 @@ impl Expression for SummarizeByDataExpression {
 
     fn get_hash(&self) -> &ExpressionHash {
         self.hash.get_or_init(|| {
-            return ExpressionHash::new(|h| {
+            ExpressionHash::new(|h| {
                 h.add_bytes(b"summarize_by");
-                if !self.predicate.is_none() {
+                if self.predicate.is_some() {
                     h.add_bytes(b"predicate:");
                     h.add_bytes(self.predicate.as_ref().unwrap().get_hash().get_bytes());
                 }
@@ -93,13 +93,13 @@ impl Expression for SummarizeByDataExpression {
                 self.window.add_hash_bytes(h);
                 h.add_bytes(b"reservoir:");
                 self.reservoir.add_hash_bytes(h);
-                if self.values.len() > 0 {
+                if !self.values.is_empty() {
                     h.add_bytes(b"values:");
                     for value_expr in self.values.iter() {
                         h.add_bytes(value_expr.get_hash().get_bytes());
                     }
                 }
-            });
+            })
         })
     }
 
@@ -116,7 +116,7 @@ impl Expression for SummarizeByDataExpression {
         output.push_str(heading);
         output.push_str("summarize_by (\n");
 
-        if !self.predicate.is_none() {
+        if self.predicate.is_some() {
             self.predicate.as_ref().unwrap().write_debug(
                 execution_context,
                 "predicate: ",
@@ -137,7 +137,7 @@ impl Expression for SummarizeByDataExpression {
         output.push_str(&padding);
         output.push_str(format!("\treservoir: {:?}\n", &self.reservoir).as_str());
 
-        if self.values.len() > 0 {
+        if !self.values.is_empty() {
             output.push_str(&padding);
             output.push_str(" ,\n");
 
@@ -175,7 +175,7 @@ impl DataExpressionInternal for SummarizeByDataExpression {
         'a: 'b,
     {
         let summary_index = execution_context.get_summary_index();
-        if !summary_index.is_none() {
+        if summary_index.is_some() {
             execution_context.add_message_for_expression(
                 self,
                 ExpressionMessage::info("SummarizeByDataExpression evaluation skipped because the current record has already been summarized".to_string()));
@@ -183,22 +183,19 @@ impl DataExpressionInternal for SummarizeByDataExpression {
             return Ok(DataExpressionResult::None);
         }
 
-        if !self.predicate.is_none() {
-            if !self
+        if self.predicate.is_some() && !self
                 .predicate
                 .as_ref()
                 .unwrap()
-                .evaluate(execution_context)?
-            {
-                execution_context.add_message_for_expression(
-                    self,
-                    ExpressionMessage::info(
-                        "SummarizeByDataExpression evaluation skipped".to_string(),
-                    ),
-                );
+                .evaluate(execution_context)? {
+            execution_context.add_message_for_expression(
+                self,
+                ExpressionMessage::info(
+                    "SummarizeByDataExpression evaluation skipped".to_string(),
+                ),
+            );
 
-                return Ok(DataExpressionResult::None);
-            }
+            return Ok(DataExpressionResult::None);
         }
 
         let i = execution_context.get_data_record_index();
@@ -352,14 +349,14 @@ impl DataExpressionInternal for SummarizeByDataExpression {
             SummaryResult::Include(summary_info) => {
                 self.complete_summary_update(execution_context, &summary_info);
 
-                return Ok(DataExpressionResult::None);
+                Ok(DataExpressionResult::None)
             }
             SummaryResult::Drop(summary_info) => {
                 self.complete_summary_update(execution_context, &summary_info);
 
-                return Ok(DataExpressionResult::Drop(self.get_id()));
+                Ok(DataExpressionResult::Drop(self.get_id()))
             }
-        };
+        }
     }
 }
 
