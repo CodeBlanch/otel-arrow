@@ -102,8 +102,16 @@ impl SetTransformExpression {
         &self.source
     }
 
+    pub fn get_source_mut(&mut self) -> &mut ScalarExpression {
+        &mut self.source
+    }
+
     pub fn get_destination(&self) -> &MutableValueExpression {
         &self.destination
+    }
+
+    pub fn get_destination_mut(&mut self) -> &mut MutableValueExpression {
+        &mut self.destination
     }
 
     pub(crate) fn try_fold(

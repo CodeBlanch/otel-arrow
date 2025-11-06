@@ -16,6 +16,72 @@ pub trait Parser {
         query: &str,
         options: ParserOptions,
     ) -> Result<PipelineExpression, Vec<ParserError>>;
+
+    fn parse_with_options_and_output_schema(
+        query: &str,
+        options: ParserOptions,
+    ) -> Result<(PipelineExpression, ParserMapSchema), Vec<ParserError>> {
+        let source_schema = match &options.source_map_schema {
+            Some(s) => s,
+            None => return Err(vec![/*todo*/])
+        };
+
+        let mut output_schema = ParserMapKeySchema::Map(Some(source_schema.clone()));
+
+        let mut pipeline = Self::parse_with_options(query, options)?;
+
+        for expression in pipeline.get_expressions_mut() {
+            match expression {
+                DataExpression::Discard(_) => { },
+                DataExpression::Summary(s) => todo!(),
+                DataExpression::Transform(t) => {
+                    match t {
+                        TransformExpression::Move(m) => todo!(),
+                        TransformExpression::ReduceMap(r) => todo!(),
+                        TransformExpression::Remove(r) => todo!(),
+                        TransformExpression::RemoveMapKeys(r) => todo!(),
+                        TransformExpression::RenameMapKeys(r) => todo!(),
+                        TransformExpression::Set(s) => {
+                            {
+                                let source = s.get_source_mut();
+                                source.try_resolve_value_type(&scope);
+                            }
+
+                            if let MutableValueExpression::Source(destination) = s.get_destination_mut() {
+                                let mut current_map = &mut output_schema;
+
+                                for selector in destination.get_value_accessor_mut().get_selectors_mut() {
+                                    match selector.try_resolve_static(&scope) {
+                                        Ok(Some(s)) => {
+                                            let value = s.to_value();
+                                            if let Value::String(s) = value {
+                                                if let ParserMapKeySchema::Map(schema) = &mut current_map {
+                                                    if schema.is_none() {
+                                                        *schema = Some(ParserMapSchema::new());
+                                                    }
+
+                                                    let key = schema.as_mut().unwrap().get_schema_for_key(s.get_value());
+                                                }
+
+                                            } else if let Value::Integer(i) = value {
+
+                                            }
+                                            else {
+                                                todo!()
+                                            }
+                                        }
+                                        Ok(None) | Err(_) => todo!(),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+
+        todo!()
+    }
 }
 
 pub struct ParserOptions {
