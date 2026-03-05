@@ -1,0 +1,92 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+use std::cell::RefCell;
+
+use data_engine_expressions::*;
+
+use crate::{engine_diagnostic::*, *};
+
+pub struct ExecutionContext<'a, 'pipeline, TRecords: ColumnarRecords> {
+    diagnostic_level: ColumnarEngineDiagnosticLevel,
+    diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,
+    pipeline: &'pipeline PipelineExpression,
+    records: Option<TRecords>,
+}
+
+impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, TRecords> {
+    pub(crate) fn new(
+        diagnostic_level: ColumnarEngineDiagnosticLevel,
+        diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,
+        pipeline: &'pipeline PipelineExpression,
+        //global_variables: &'b RefCell<MapValueStorage<OwnedValue>>,
+        //summaries: &'b Summaries<'a>,
+        //attached_records: Option<&'b dyn AttachedRecords>,
+        records: Option<TRecords>,
+        //arguments: Option<&'b dyn ExecutionContextArguments>,
+    ) -> ExecutionContext<'a, 'pipeline, TRecords> {
+        Self {
+            diagnostic_level,
+            diagnostics,
+            pipeline,
+            //attached_records,
+            records,
+            //variables: ExecutionContextVariables::new(global_variables),
+            //summaries,
+            //arguments,
+        }
+    }
+
+    pub fn is_diagnostic_level_enabled(
+        &self,
+        diagnostic_level: ColumnarEngineDiagnosticLevel,
+    ) -> bool {
+        diagnostic_level >= self.diagnostic_level
+    }
+
+    pub fn add_diagnostic_if_enabled<F>(
+        &self,
+        diagnostic_level: ColumnarEngineDiagnosticLevel,
+        expression: &'pipeline dyn Expression,
+        generate_message: F,
+    ) where
+        F: FnOnce() -> String,
+    {
+        if diagnostic_level >= self.diagnostic_level {
+            self.diagnostics
+                .borrow_mut()
+                .push(ColumnarEngineDiagnostic::new(
+                    diagnostic_level,
+                    expression,
+                    (generate_message)(),
+                ));
+        }
+    }
+
+    pub fn add_diagnostic(&self, diagnostic: ColumnarEngineDiagnostic<'pipeline>) {
+        self.diagnostics.borrow_mut().push(diagnostic);
+    }
+
+    pub fn get_pipeline(&self) -> &'pipeline PipelineExpression {
+        self.pipeline
+    }
+
+    pub fn get_records(&self) -> Option<&TRecords> {
+        self.records.as_ref()
+    }
+
+    /*pub fn set_records(&mut self, records: TRecords) {
+        self.records = Some(records)
+    }*/
+
+    /*pub(crate) fn take_diagnostics(self) -> Vec<ColumnarEngineDiagnostic<'pipeline>> {
+        self.diagnostics.take()
+    }*/
+
+    pub(crate) fn create_diagnostic_receiver_for_expression(
+        &self,
+        expression: &'pipeline dyn Expression,
+    ) -> ExecutionContextDiagnosticReceiver<'_, 'pipeline, TRecords> {
+        ExecutionContextDiagnosticReceiver::new(self, expression)
+    }
+}

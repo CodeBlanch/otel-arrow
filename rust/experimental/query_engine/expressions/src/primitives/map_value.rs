@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Debug;
+use std::{borrow::Borrow, collections::HashMap, fmt::Debug, hash::Hash};
 
 use crate::*;
 
@@ -34,6 +34,22 @@ pub trait MapValue: Debug {
     }
 }
 
+impl<T> From<&dyn MapValue> for HashMap<Box<str>, T>
+where
+    T: for<'a> From<Value<'a>>,
+{
+    fn from(value: &dyn MapValue) -> Self {
+        let mut values: HashMap<Box<str>, _> = HashMap::new();
+
+        value.get_items(&mut KeyValueClosureCallback::new(|k, v| {
+            values.insert(k.into(), v.into());
+            true
+        }));
+
+        values
+    }
+}
+
 pub trait KeyValueCallback {
     fn next(&mut self, key: &str, value: Value) -> bool;
 }
@@ -60,6 +76,51 @@ where
 {
     fn next(&mut self, key: &str, value: Value) -> bool {
         (self.callback)(key, value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HashMapValue<TKey: Borrow<str> + Debug, TValue: AsStaticValue + 'static> {
+    values: HashMap<TKey, TValue>,
+}
+
+impl<TKey: Borrow<str> + Debug, TValue: AsStaticValue + 'static> HashMapValue<TKey, TValue> {
+    pub fn new(values: HashMap<TKey, TValue>) -> HashMapValue<TKey, TValue> {
+        Self { values }
+    }
+}
+
+impl<TKey: Borrow<str> + Hash + Eq + Debug, TValue: AsStaticValue + 'static> MapValue
+    for HashMapValue<TKey, TValue>
+{
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
+    fn get(&self, key: &str) -> Option<&(dyn AsValue + 'static)> {
+        self.values.get(key).map(|v| v as &dyn AsValue)
+    }
+
+    fn get_static(&self, key: &str) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        Ok(self.values.get(key).map(|v| v as &dyn AsStaticValue))
+    }
+
+    fn get_items(&self, item_callback: &mut dyn KeyValueCallback) -> bool {
+        for (key, value) in self.values.iter() {
+            if !item_callback.next(key.borrow(), value.to_value()) {
+                return false;
+            }
+        }
+
+        true
     }
 }
 

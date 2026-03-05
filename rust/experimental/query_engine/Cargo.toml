@@ -6,6 +6,8 @@ members = [
     "ottl-parser",
     "engine-recordset",
     "engine-recordset-otlp-bridge",
+    "engine-columnar",
+    "engine-columnar-otap-bridge",
 ]
 resolver = "2"
 
@@ -19,10 +21,13 @@ publish = false
 rust-version = "1.86.0"
 
 [workspace.dependencies]
+arrow = "57.1.0"
 bytes = "1.10.1"
 caseless = "0.2.2"
 chrono = "0.4.41"
+half = "2.7.1"
 hex = "0.4.3"
+indexmap = "2.13.0"
 opentelemetry-proto = "0.31.0"
 pest = "2.8"
 pest_derive = "2.8"

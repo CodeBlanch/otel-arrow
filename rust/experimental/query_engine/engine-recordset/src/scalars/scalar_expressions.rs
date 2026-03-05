@@ -185,7 +185,7 @@ where
                         l,
                         || {
                             format!(
-                                "Cannot calculate the length of '{:?}' input",
+                                "Cannot calculate the length of '{}' input",
                                 value.get_value_type()
                             )
                         },
