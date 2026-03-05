@@ -39,7 +39,7 @@ use otap_df_pdata::otlp::{ProtoBuffer, ProtoBytesEncoder};
 use otap_df_pdata::{OtapArrowRecords, OtapPayload, OtapPayloadHelpers, OtlpProtoBytes};
 use otap_df_telemetry::instrument::Counter;
 use otap_df_telemetry::metrics::MetricSet;
-use otap_df_telemetry::otel_info;
+use otap_df_telemetry::{otel_debug, otel_info};
 use serde::Deserialize;
 use std::future::Future;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 /// The URN for the OTLP exporter
-pub const OTLP_EXPORTER_URN: &str = "urn:otel:otlp:exporter";
+pub const OTLP_EXPORTER_URN: &str = "urn:otel:exporter:otlp";
 
 /// Configuration for the OTLP Exporter
 #[derive(Debug, Deserialize)]
@@ -62,7 +62,7 @@ pub struct Config {
     pub max_in_flight: usize,
 }
 
-const fn default_max_in_flight() -> usize {
+pub(crate) const fn default_max_in_flight() -> usize {
     5
 }
 
@@ -88,6 +88,8 @@ pub static OTLP_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
             exporter_config,
         ))
     },
+    wiring_contract: otap_df_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otap_df_config::validation::validate_typed_config::<Config>,
 };
 
 impl OTLPExporter {
@@ -119,20 +121,21 @@ impl Exporter<OtapPdata> for OTLPExporter {
         effect_handler: EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, Error> {
         otel_info!(
-            "Exporter.Start",
-            grpc_endpoint = self.config.grpc.grpc_endpoint.as_str(),
-            message = "Starting OTLP Exporter"
+            "otlp.exporter.grpc.start",
+            grpc_endpoint = self.config.grpc.grpc_endpoint.as_str()
         );
+
+        self.config.grpc.log_proxy_info();
 
         let exporter_id = effect_handler.exporter_id();
         let timer_cancel_handle = effect_handler
             .start_periodic_telemetry(Duration::from_secs(1))
             .await?;
 
-        let endpoint = self
+        let channel = self
             .config
             .grpc
-            .build_endpoint_with_tls()
+            .connect_channel_lazy(None)
             .await
             .map_err(|e| {
                 let source_detail = format_error_sources(&e);
@@ -143,8 +146,6 @@ impl Exporter<OtapPdata> for OTLPExporter {
                     source_detail,
                 }
             })?;
-
-        let channel = endpoint.connect_lazy();
 
         let compression = self.config.grpc.compression_encoding();
         let max_in_flight = self.config.max_in_flight.max(1);
@@ -194,7 +195,9 @@ impl Exporter<OtapPdata> for OTLPExporter {
             let msg = if let Some(msg) = pending_msg.take() {
                 msg
             } else if inflight_exports.is_empty() {
-                msg_chan.recv().await?
+                let msg = msg_chan.recv().await?;
+                otel_debug!("otlp.exporter.grpc.receive");
+                msg
             } else {
                 let completion_fut = inflight_exports.next_completion().fuse();
                 let recv_fut = msg_chan.recv().fuse();
@@ -213,12 +216,17 @@ impl Exporter<OtapPdata> for OTLPExporter {
                         }
                         continue;
                     }
-                    msg = recv_fut => msg?,
+                    msg = recv_fut => {
+                        let msg = msg?;
+                        otel_debug!("otlp.exporter.grpc.receive");
+                        msg
+                    },
                 }
             };
 
             match msg {
                 Message::Control(NodeControlMsg::Shutdown { deadline, .. }) => {
+                    otel_info!("otlp.exporter.grpc.shutdown");
                     debug_assert!(
                         pending_msg.is_none(),
                         "pending message should have been drained before shutdown"
@@ -473,7 +481,7 @@ async fn dispatch_otap_export<Enc, Fut, MakeFuture>(
     proto_buffer: &mut ProtoBuffer,
     encoder: &mut Enc,
     make_future: MakeFuture,
-    inflight: &mut InFlightExports<Fut>,
+    inflight: &mut InFlightExports<Fut, CompletedExport>,
     failed_counter: &mut Counter<u64>,
     effect_handler: &EffectHandler<OtapPdata>,
 ) where
@@ -590,37 +598,37 @@ fn make_export_future(
 }
 
 /// FIFO-ish wrapper around the in-flight export RPCs.
-struct InFlightExports<Fut>
+pub(crate) struct InFlightExports<Fut, Output>
 where
-    Fut: Future<Output = CompletedExport>,
+    Fut: Future<Output = Output>,
 {
     futures: FuturesUnordered<Fut>,
 }
 
-impl<Fut> InFlightExports<Fut>
+impl<Fut, Output> InFlightExports<Fut, Output>
 where
-    Fut: Future<Output = CompletedExport>,
+    Fut: Future<Output = Output>,
 {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             futures: FuturesUnordered::new(),
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.futures.len()
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.futures.is_empty()
     }
 
-    fn push(&mut self, future: Fut) {
+    pub(crate) fn push(&mut self, future: Fut) {
         self.futures.push(future);
     }
 
     /// Returns a future that resolves once the next export finishes.
-    fn next_completion(&mut self) -> impl Future<Output = Option<CompletedExport>> + '_ {
+    pub(crate) fn next_completion(&mut self) -> impl Future<Output = Option<Output>> + '_ {
         self.futures.next()
     }
 }
@@ -742,17 +750,13 @@ mod tests {
 
     use crate::otlp_grpc::OTLPData;
     use crate::otlp_mock::{LogsServiceMock, MetricsServiceMock, TraceServiceMock};
-    use crate::testing::TestCallData;
+    use crate::pdata::OtapPdata;
+    use crate::testing::{TestCallData, next_ack, next_nack};
     use otap_df_config::node::NodeUserConfig;
     use otap_df_engine::Interests;
     use otap_df_engine::context::ControllerContext;
-    use otap_df_engine::control::{Controllable, PipelineCtrlMsgSender, pipeline_ctrl_msg_channel};
     use otap_df_engine::error::Error;
     use otap_df_engine::exporter::ExporterWrapper;
-    use otap_df_engine::local::message::{LocalReceiver, LocalSender};
-    use otap_df_engine::message::{Receiver, Sender};
-    use otap_df_engine::node::NodeWithPDataReceiver;
-    use otap_df_engine::testing::create_not_send_channel;
     use otap_df_engine::testing::{
         exporter::{TestContext, TestRuntime},
         test_node,
@@ -763,9 +767,7 @@ mod tests {
     use otap_df_pdata::proto::opentelemetry::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
     use otap_df_pdata::proto::opentelemetry::collector::trace::v1::ExportTraceServiceRequest;
     use otap_df_pdata::proto::opentelemetry::collector::trace::v1::trace_service_server::TraceServiceServer;
-    use otap_df_telemetry::metrics::MetricSetSnapshot;
-    use otap_df_telemetry::registry::MetricsRegistryHandle;
-    use otap_df_telemetry::reporter::MetricsReporter;
+    use otap_df_telemetry::registry::TelemetryRegistryHandle;
     use prost::Message;
     use std::net::SocketAddr;
     use std::pin::Pin;
@@ -775,6 +777,18 @@ mod tests {
     use tokio::time::{Duration, timeout};
     use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
+
+    // Imports only used by tests that are skipped on Windows
+    #[cfg(not(windows))]
+    use {
+        otap_df_engine::control::{Controllable, PipelineCtrlMsgSender, pipeline_ctrl_msg_channel},
+        otap_df_engine::local::message::{LocalReceiver, LocalSender},
+        otap_df_engine::message::{Receiver, Sender},
+        otap_df_engine::node::NodeWithPDataReceiver,
+        otap_df_engine::testing::create_not_send_channel,
+        otap_df_telemetry::metrics::MetricSetSnapshot,
+        otap_df_telemetry::reporter::MetricsReporter,
+    };
 
     /// Helper function to wait for and validate an Ack or Nack message with the expected node_id
     async fn wait_for_ack_or_nack(
@@ -786,12 +800,12 @@ mod tests {
         let result = timeout(Duration::from_secs(1), async {
             loop {
                 match pipeline_ctrl_rx.recv().await {
-                    Ok(otap_df_engine::control::PipelineControlMsg::DeliverAck {
-                        node_id, ..
-                    }) => {
+                    Ok(otap_df_engine::control::PipelineControlMsg::DeliverAck { ack }) => {
                         if !expect_ack {
                             return Err(format!("Got Ack but expected Nack {}", context));
                         }
+                        let (node_id, _ack) = next_ack(ack)
+                            .ok_or_else(|| format!("No ack subscriber found {}", context))?;
                         if node_id != expected_node_id {
                             return Err(format!(
                                 "Expected node_id {} but got {} {}",
@@ -800,13 +814,12 @@ mod tests {
                         }
                         return Ok(());
                     }
-                    Ok(otap_df_engine::control::PipelineControlMsg::DeliverNack {
-                        node_id,
-                        ..
-                    }) => {
+                    Ok(otap_df_engine::control::PipelineControlMsg::DeliverNack { nack }) => {
                         if expect_ack {
                             return Err(format!("Got Nack but expected Ack {}", context));
                         }
+                        let (node_id, _nack) = next_nack(nack)
+                            .ok_or_else(|| format!("No nack subscriber found {}", context))?;
                         if node_id != expected_node_id {
                             return Err(format!(
                                 "Expected node_id {} but got {} {}",
@@ -895,7 +908,7 @@ mod tests {
     {
         |_, exporter_result| {
             Box::pin(async move {
-                assert!(exporter_result.is_ok());
+                exporter_result.unwrap();
 
                 // check that the message was properly sent from the exporter
                 let logs_received = timeout(Duration::from_secs(3), receiver.recv())
@@ -966,10 +979,10 @@ mod tests {
         let node_config = Arc::new(NodeUserConfig::new_exporter_config(OTLP_EXPORTER_URN));
 
         // Create a proper pipeline context for the test
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
 
         let exporter = ExporterWrapper::local(
             OTLPExporter {
@@ -1035,11 +1048,11 @@ mod tests {
         let test_runtime = TestRuntime::<OtapPdata>::new();
         let node_config = Arc::new(NodeUserConfig::new_exporter_config(OTLP_EXPORTER_URN));
 
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle.clone());
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle.clone());
         let node_id = test_node(test_runtime.config().name.clone());
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let mut exporter = ExporterWrapper::local(
             OTLPExporter {
                 config: Config {
@@ -1058,8 +1071,8 @@ mod tests {
 
         let control_sender = exporter.control_sender();
         let (pdata_tx, pdata_rx) = create_not_send_channel::<OtapPdata>(1);
-        let pdata_tx = Sender::Local(LocalSender::MpscSender(pdata_tx));
-        let pdata_rx = Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx));
+        let pdata_tx = Sender::Local(LocalSender::mpsc(pdata_tx));
+        let pdata_rx = Receiver::Local(LocalReceiver::mpsc(pdata_rx));
         let (pipeline_ctrl_msg_tx, pipeline_ctrl_msg_rx) = pipeline_ctrl_msg_channel(2);
         exporter
             .set_pdata_receiver(node_id.clone(), pdata_rx)
@@ -1080,7 +1093,7 @@ mod tests {
             metrics_reporter: MetricsReporter,
         ) -> Result<(), Error> {
             exporter
-                .start(pipeline_ctrl_msg_tx, metrics_reporter)
+                .start(pipeline_ctrl_msg_tx, metrics_reporter, Interests::empty())
                 .await
                 .map(|_| ())
         }

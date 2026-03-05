@@ -6,6 +6,7 @@
 use crate::control::{AckMsg, NackMsg, NodeControlMsg};
 use crate::local::message::{LocalReceiver, LocalSender};
 use crate::shared::message::{SharedReceiver, SharedSender};
+use crate::{Interests, ReceivedAtNode};
 use otap_df_channel::error::{RecvError, SendError};
 use otap_df_channel::mpsc;
 use std::ops::Add;
@@ -29,31 +30,31 @@ pub enum Message<PData> {
 impl<Data> Message<Data> {
     /// Create a data message with the given payload.
     #[must_use]
-    pub fn data_msg(data: Data) -> Self {
+    pub const fn data_msg(data: Data) -> Self {
         Message::PData(data)
     }
 
     /// Create a ACK control message with the given ID.
     #[must_use]
-    pub fn ack_ctrl_msg(ack: AckMsg<Data>) -> Self {
+    pub const fn ack_ctrl_msg(ack: AckMsg<Data>) -> Self {
         Message::Control(NodeControlMsg::Ack(ack))
     }
 
     /// Create a NACK control message with the given ID and reason.
     #[must_use]
-    pub fn nack_ctrl_msg(nack: NackMsg<Data>) -> Self {
+    pub const fn nack_ctrl_msg(nack: NackMsg<Data>) -> Self {
         Message::Control(NodeControlMsg::Nack(nack))
     }
 
     /// Creates a config control message with the given configuration.
     #[must_use]
-    pub fn config_ctrl_msg(config: serde_json::Value) -> Self {
+    pub const fn config_ctrl_msg(config: serde_json::Value) -> Self {
         Message::Control(NodeControlMsg::Config { config })
     }
 
     /// Creates a timer tick control message.
     #[must_use]
-    pub fn timer_tick_ctrl_msg() -> Self {
+    pub const fn timer_tick_ctrl_msg() -> Self {
         Message::Control(NodeControlMsg::TimerTick {})
     }
 
@@ -86,6 +87,14 @@ impl<Data> Message<Data> {
 }
 
 /// A generic channel Sender supporting both local and shared semantic (i.e. !Send and Send).
+///
+/// Rationale:
+/// - Local nodes run on a single-threaded `LocalSet`, so it is safe for them to hold either a
+///   local sender or a shared sender. This lets the engine select shared channels when any edge
+///   requires `Send` (e.g. mixed local/shared fan-in) without extra wiring paths.
+/// - Shared nodes keep `SharedSender` directly because their effect handlers must be `Send` to run
+///   on multi-threaded executors (`tokio::spawn`). Wrapping in this enum would make them `!Send`
+///   and introduce unnecessary branching on hot paths.
 #[must_use = "A `Sender` is requested but not used."]
 pub enum Sender<T> {
     /// Sender of a local channel.
@@ -105,8 +114,8 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Sender<T> {
     /// Creates a new local MPSC sender.
-    pub fn new_local_mpsc_sender(mpsc_sender: mpsc::Sender<T>) -> Self {
-        Sender::Local(LocalSender::MpscSender(mpsc_sender))
+    pub const fn new_local_mpsc_sender(mpsc_sender: mpsc::Sender<T>) -> Self {
+        Sender::Local(LocalSender::mpsc(mpsc_sender))
     }
 
     /// Sends a message to the channel.
@@ -127,6 +136,9 @@ impl<T> Sender<T> {
 }
 
 /// A generic channel Receiver supporting both local and shared semantic (i.e. !Send and Send).
+///
+/// See [`Sender`] for the rationale behind using the enum in local contexts while keeping shared
+/// nodes on `SharedReceiver` directly.
 pub enum Receiver<T> {
     /// Receiver of a local channel.
     Local(LocalReceiver<T>),
@@ -137,8 +149,8 @@ pub enum Receiver<T> {
 impl<T> Receiver<T> {
     /// Creates a new local MPMC receiver.
     #[must_use]
-    pub fn new_local_mpsc_receiver(mpsc_receiver: mpsc::Receiver<T>) -> Self {
-        Receiver::Local(LocalReceiver::MpscReceiver(mpsc_receiver))
+    pub const fn new_local_mpsc_receiver(mpsc_receiver: mpsc::Receiver<T>) -> Self {
+        Receiver::Local(LocalReceiver::mpsc(mpsc_receiver))
     }
 
     /// Receives a message from the channel.
@@ -183,20 +195,33 @@ pub struct MessageChannel<PData> {
     shutting_down_deadline: Option<Instant>,
     /// Holds the ControlMsg::Shutdown until after we’ve drained pdata.
     pending_shutdown: Option<NodeControlMsg<PData>>,
+    /// Node ID for entry-frame stamping via `ReceivedAtNode`.
+    node_id: usize,
+    /// Node interests for entry-frame stamping via `ReceivedAtNode`.
+    interests: Interests,
 }
 
 impl<PData> MessageChannel<PData> {
     /// Creates a new `MessageChannel` with the given control and data receivers.
     #[must_use]
-    pub fn new(control_rx: Receiver<NodeControlMsg<PData>>, pdata_rx: Receiver<PData>) -> Self {
+    pub fn new(
+        control_rx: Receiver<NodeControlMsg<PData>>,
+        pdata_rx: Receiver<PData>,
+        node_id: usize,
+        interests: Interests,
+    ) -> Self {
         MessageChannel {
             control_rx: Some(control_rx),
             pdata_rx: Some(pdata_rx),
             shutting_down_deadline: None,
             pending_shutdown: None,
+            node_id,
+            interests,
         }
     }
+}
 
+impl<PData: ReceivedAtNode> MessageChannel<PData> {
     /// Asynchronously receives the next message to process.
     ///
     /// Order of precedence:
@@ -214,6 +239,24 @@ impl<PData> MessageChannel<PData> {
     /// Returns a [`RecvError`] if both channels are closed, or if the
     /// shutdown deadline has passed.
     pub async fn recv(&mut self) -> Result<Message<PData>, RecvError> {
+        self.recv_when(true).await
+    }
+
+    /// Like [`recv()`](Self::recv), but with an `accept_pdata` guard.
+    ///
+    /// When `accept_pdata` is `false`, only control messages are
+    /// returned. Pipeline data stays in the channel, providing
+    /// natural backpressure to upstream nodes.
+    ///
+    /// During shutdown draining the guard is ignored — pdata is
+    /// always drained until the deadline, regardless of
+    /// `accept_pdata`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`RecvError`] if both channels are closed, or if the
+    /// shutdown deadline has passed.
+    pub async fn recv_when(&mut self, accept_pdata: bool) -> Result<Message<PData>, RecvError> {
         let mut sleep_until_deadline: Option<Pin<Box<Sleep>>> = None;
 
         loop {
@@ -222,13 +265,38 @@ impl<PData> MessageChannel<PData> {
                 return Err(RecvError::Closed);
             }
 
+            // When pdata is guarded (!accept_pdata), detect a closed pdata
+            // channel eagerly so we don't block forever on control-only select.
+            // We only probe when the buffer is empty — try_recv on an empty
+            // channel distinguishes Closed from Empty without consuming data.
+            if !accept_pdata
+                && self
+                    .pdata_rx
+                    .as_ref()
+                    .expect("pdata_rx must exist")
+                    .is_empty()
+            {
+                if let Err(RecvError::Closed) = self
+                    .pdata_rx
+                    .as_mut()
+                    .expect("pdata_rx must exist")
+                    .try_recv()
+                {
+                    self.shutdown();
+                    return Ok(Message::Control(NodeControlMsg::Shutdown {
+                        deadline: Instant::now().add(Duration::from_secs(1)),
+                        reason: "pdata channel closed".to_owned(),
+                    }));
+                }
+            }
+
             // Draining mode: Shutdown pending
             if let Some(dl) = self.shutting_down_deadline {
                 // If shutdown pending and no pdata left, return Shutdown immediately
                 if self
                     .pdata_rx
                     .as_ref()
-                    .expect("pdata_rs must exist")
+                    .expect("pdata_rx must exist")
                     .is_empty()
                 {
                     let shutdown = self
@@ -259,7 +327,10 @@ impl<PData> MessageChannel<PData> {
 
                     // 2) Any pdata?
                     pdata = self.pdata_rx.as_mut().expect("pdata_rx must exist").recv() => match pdata {
-                        Ok(pdata) => return Ok(Message::PData(pdata)),
+                        Ok(mut pdata) => {
+                            pdata.received_at_node(self.node_id, self.interests);
+                            return Ok(Message::PData(pdata));
+                        }
                         Err(_) => {
                             // pdata channel closed → emit Shutdown
                             let shutdown = self.pending_shutdown
@@ -292,14 +363,17 @@ impl<PData> MessageChannel<PData> {
                         self.pending_shutdown = Some(NodeControlMsg::Shutdown { deadline, reason });
                         continue; // re-enter the loop into draining mode
                     }
-                    Ok(msg) => return Ok(Message::Control(msg)),
+                    Ok(msg) => {
+                        return Ok(Message::Control(msg));
+                    }
                     Err(e)  => return Err(e),
                 },
 
-                // B) Then pdata
-                pdata = self.pdata_rx.as_mut().expect("pdata_rx must exist").recv() => {
+                // B) Then pdata (guarded by accept_pdata)
+                pdata = self.pdata_rx.as_mut().expect("pdata_rx must exist").recv(), if accept_pdata => {
                     match pdata {
-                        Ok(pdata) => {
+                        Ok(mut pdata) => {
+                            pdata.received_at_node(self.node_id, self.interests);
                             return Ok(Message::PData(pdata));
                         }
                         Err(RecvError::Closed) => {

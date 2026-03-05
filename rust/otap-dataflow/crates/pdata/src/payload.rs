@@ -92,7 +92,7 @@ use crate::otlp::{OtlpProtoBytes, ProtoBuffer, ProtoBytesEncoder};
 use crate::views::otlp::bytes::logs::RawLogsData;
 use crate::views::otlp::bytes::metrics::RawMetricsData;
 use crate::views::otlp::bytes::traces::RawTraceData;
-use otap_df_config::SignalType;
+use otap_df_config::{SignalFormat, SignalType};
 
 /// Container for the various representations of the telemetry data
 #[derive(Clone, Debug)]
@@ -102,6 +102,7 @@ pub enum OtapPayload {
     OtlpBytes(OtlpProtoBytes),
 
     /// data is contained in `OtapBatch` which contains Arrow `RecordBatches` for OTAP payload type
+    /// TODO: Remove "Arrow" from this case name, it stutters; follow SignalFormat.
     OtapArrowRecords(OtapArrowRecords),
 }
 
@@ -112,6 +113,15 @@ impl OtapPayload {
         match self {
             Self::OtlpBytes(value) => value.signal_type(),
             Self::OtapArrowRecords(value) => value.signal_type(),
+        }
+    }
+
+    /// Returns the signal format.
+    #[must_use]
+    pub const fn signal_format(&self) -> SignalFormat {
+        match self {
+            Self::OtapArrowRecords(_) => SignalFormat::OtapRecords,
+            Self::OtlpBytes(_) => SignalFormat::OtlpBytes,
         }
     }
 
@@ -144,9 +154,18 @@ impl OtapPayload {
         }
     }
 
+    /// Returns the number of encoded bytes, if known.
+    #[must_use]
+    pub fn num_bytes(&self) -> Option<usize> {
+        match self {
+            Self::OtlpBytes(value) => Some(value.num_bytes()),
+            Self::OtapArrowRecords(value) => value.num_bytes(),
+        }
+    }
+
     /// Return an empty payload of a certain type.
     #[must_use]
-    pub fn empty(signal: SignalType) -> Self {
+    pub const fn empty(signal: SignalType) -> Self {
         Self::OtlpBytes(OtlpProtoBytes::empty(signal))
     }
 }
@@ -154,12 +173,15 @@ impl OtapPayload {
 /* -------- Trait implementations -------- */
 
 /// Helper methods that internal representations of OTAP PData should implement
-pub trait OtapPayloadHelpers {
+pub trait OtapPayloadHelpers: Into<OtapPayload> {
     /// Returns the type of signal represented by this `OtapPdata` instance.
     fn signal_type(&self) -> SignalType;
 
     /// Number of items.
     fn num_items(&self) -> usize;
+
+    /// Number of bytes, if known.
+    fn num_bytes(&self) -> Option<usize>;
 
     /// Return true if there is no data.
     fn is_empty(&self) -> bool;
@@ -175,6 +197,10 @@ impl OtapPayloadHelpers for OtapArrowRecords {
             Self::Metrics(_) => SignalType::Metrics,
             Self::Traces(_) => SignalType::Traces,
         }
+    }
+
+    fn num_bytes(&self) -> Option<usize> {
+        None
     }
 
     fn take_payload(&mut self) -> Self {
@@ -217,6 +243,10 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
         }
     }
 
+    fn num_bytes(&self) -> Option<usize> {
+        Some(self.num_bytes())
+    }
+
     fn is_empty(&self) -> bool {
         match self {
             Self::ExportLogsRequest(bytes) => bytes.is_empty(),
@@ -237,7 +267,9 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
         match self {
             Self::ExportLogsRequest(bytes) => {
                 let logs_data_view = RawLogsData::new(bytes.as_ref());
-                use crate::views::logs::{LogsDataView, ResourceLogsView, ScopeLogsView};
+                use otap_df_pdata_views::views::logs::{
+                    LogsDataView, ResourceLogsView, ScopeLogsView,
+                };
                 logs_data_view
                     .resources()
                     .map(|rl| {
@@ -249,15 +281,54 @@ impl OtapPayloadHelpers for OtlpProtoBytes {
             }
             Self::ExportTracesRequest(bytes) => {
                 let traces_data_view = RawTraceData::new(bytes.as_ref());
-                use crate::views::trace::{ResourceSpansView, ScopeSpansView, TracesView};
+                use otap_df_pdata_views::views::trace::{
+                    ResourceSpansView, ScopeSpansView, TracesView,
+                };
                 traces_data_view
                     .resources()
                     .map(|rs| rs.scopes().map(|ss| ss.spans().count()).sum::<usize>())
                     .sum()
             }
-            Self::ExportMetricsRequest(_bytes) => {
-                // Metrics view is not implemented yet
-                panic!("ToDo")
+            Self::ExportMetricsRequest(bytes) => {
+                let metrics_data_view = RawMetricsData::new(bytes.as_ref());
+                use crate::views::metrics::{
+                    DataView, ExponentialHistogramView, GaugeView, HistogramView, MetricView,
+                    MetricsView, ResourceMetricsView, ScopeMetricsView, SumView, SummaryView,
+                };
+                metrics_data_view
+                    .resources()
+                    .map(|rm| {
+                        rm.scopes()
+                            .map(|sm| {
+                                sm.metrics()
+                                    .map(|metric| {
+                                        metric
+                                            .data()
+                                            .map(|data| {
+                                                let mut count = 0;
+                                                if let Some(gauge) = data.as_gauge() {
+                                                    count += gauge.data_points().count();
+                                                } else if let Some(sum) = data.as_sum() {
+                                                    count += sum.data_points().count();
+                                                } else if let Some(histogram) = data.as_histogram()
+                                                {
+                                                    count += histogram.data_points().count();
+                                                } else if let Some(exp_histogram) =
+                                                    data.as_exponential_histogram()
+                                                {
+                                                    count += exp_histogram.data_points().count();
+                                                } else if let Some(summary) = data.as_summary() {
+                                                    count += summary.data_points().count();
+                                                }
+                                                count
+                                            })
+                                            .unwrap_or(0)
+                                    })
+                                    .sum::<usize>()
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum()
             }
         }
     }
@@ -1234,5 +1305,184 @@ mod test {
         let pdata_metrics: OtapPayload = OtapArrowRecords::Metrics(Default::default()).into();
         assert_eq!(pdata_logs.signal_type(), SignalType::Logs);
         assert_eq!(pdata_metrics.signal_type(), SignalType::Metrics);
+    }
+
+    #[test]
+    fn test_otlp_proto_bytes_metrics_num_items() {
+        use crate::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+        use crate::proto::opentelemetry::common::v1::InstrumentationScope;
+        use crate::proto::opentelemetry::metrics::v1::exponential_histogram_data_point::Buckets;
+        use crate::proto::opentelemetry::metrics::v1::number_data_point::Value;
+        use crate::proto::opentelemetry::metrics::v1::summary_data_point::ValueAtQuantile;
+        use crate::proto::opentelemetry::metrics::v1::{
+            AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge,
+            Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+            Sum, Summary, SummaryDataPoint, metric::Data,
+        };
+        use crate::proto::opentelemetry::resource::v1::Resource;
+        use prost::Message;
+
+        let metrics = ExportMetricsServiceRequest {
+            resource_metrics: vec![
+                ResourceMetrics {
+                    resource: Some(Resource::default()),
+                    scope_metrics: vec![ScopeMetrics {
+                        scope: Some(InstrumentationScope::default()),
+                        metrics: vec![
+                            Metric {
+                                name: "gauge_metric".into(),
+                                data: Some(Data::Gauge(Gauge {
+                                    data_points: vec![
+                                        NumberDataPoint {
+                                            value: Some(Value::AsDouble(1.0)),
+                                            ..Default::default()
+                                        },
+                                        NumberDataPoint {
+                                            value: Some(Value::AsDouble(2.0)),
+                                            ..Default::default()
+                                        },
+                                    ],
+                                })),
+                                ..Default::default()
+                            },
+                            Metric {
+                                name: "sum_metric".into(),
+                                data: Some(Data::Sum(Sum {
+                                    data_points: vec![
+                                        NumberDataPoint {
+                                            value: Some(Value::AsInt(100)),
+                                            ..Default::default()
+                                        },
+                                        NumberDataPoint {
+                                            value: Some(Value::AsInt(200)),
+                                            ..Default::default()
+                                        },
+                                        NumberDataPoint {
+                                            value: Some(Value::AsInt(300)),
+                                            ..Default::default()
+                                        },
+                                    ],
+                                    aggregation_temporality: AggregationTemporality::Cumulative
+                                        .into(),
+                                    is_monotonic: true,
+                                })),
+                                ..Default::default()
+                            },
+                            Metric {
+                                name: "histogram_metric".into(),
+                                data: Some(Data::Histogram(Histogram {
+                                    data_points: vec![
+                                        HistogramDataPoint {
+                                            count: 10,
+                                            sum: Some(100.0),
+                                            bucket_counts: vec![2, 5, 3],
+                                            explicit_bounds: vec![10.0, 50.0],
+                                            ..Default::default()
+                                        },
+                                        HistogramDataPoint {
+                                            count: 20,
+                                            sum: Some(200.0),
+                                            bucket_counts: vec![5, 10, 5],
+                                            explicit_bounds: vec![10.0, 50.0],
+                                            ..Default::default()
+                                        },
+                                    ],
+                                    aggregation_temporality: AggregationTemporality::Cumulative
+                                        .into(),
+                                })),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ResourceMetrics {
+                    resource: Some(Resource::default()),
+                    scope_metrics: vec![ScopeMetrics {
+                        scope: Some(InstrumentationScope::default()),
+                        metrics: vec![
+                            Metric {
+                                name: "exp_histogram_metric".into(),
+                                data: Some(Data::ExponentialHistogram(ExponentialHistogram {
+                                    data_points: vec![
+                                        ExponentialHistogramDataPoint {
+                                            count: 15,
+                                            sum: Some(150.0),
+                                            scale: 1,
+                                            zero_count: 1,
+                                            positive: Some(Buckets {
+                                                offset: 0,
+                                                bucket_counts: vec![3, 5, 7],
+                                            }),
+                                            negative: Some(Buckets {
+                                                offset: 0,
+                                                bucket_counts: vec![1, 2],
+                                            }),
+                                            ..Default::default()
+                                        },
+                                        ExponentialHistogramDataPoint {
+                                            count: 25,
+                                            sum: Some(250.0),
+                                            scale: 1,
+                                            zero_count: 2,
+                                            positive: Some(Buckets {
+                                                offset: 0,
+                                                bucket_counts: vec![5, 10, 8],
+                                            }),
+                                            ..Default::default()
+                                        },
+                                    ],
+                                    aggregation_temporality: AggregationTemporality::Cumulative
+                                        .into(),
+                                })),
+                                ..Default::default()
+                            },
+                            Metric {
+                                name: "summary_metric".into(),
+                                data: Some(Data::Summary(Summary {
+                                    data_points: vec![
+                                        SummaryDataPoint {
+                                            count: 100,
+                                            sum: 1000.0,
+                                            quantile_values: vec![
+                                                ValueAtQuantile {
+                                                    quantile: 0.5,
+                                                    value: 10.0,
+                                                },
+                                                ValueAtQuantile {
+                                                    quantile: 0.95,
+                                                    value: 50.0,
+                                                },
+                                            ],
+                                            ..Default::default()
+                                        },
+                                        SummaryDataPoint {
+                                            count: 200,
+                                            sum: 2000.0,
+                                            quantile_values: vec![ValueAtQuantile {
+                                                quantile: 0.5,
+                                                value: 20.0,
+                                            }],
+                                            ..Default::default()
+                                        },
+                                    ],
+                                })),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let mut buf = Vec::new();
+        metrics.encode(&mut buf).unwrap();
+
+        let otlp_bytes = OtlpProtoBytes::ExportMetricsRequest(Bytes::from(buf));
+
+        assert_eq!(otlp_bytes.num_items(), 11);
     }
 }

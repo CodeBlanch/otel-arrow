@@ -9,12 +9,16 @@ use crate::{error::Result, otap::OtapArrowRecords};
 use bytes::Bytes;
 use otap_df_config::SignalType;
 
-pub use common::ProtoBuffer;
+pub use common::{ProtoBuffer, encode_len_placeholder, patch_len_placeholder};
 pub use otap_df_pdata_otlp_macros::Message; // Required for derived code
 pub use otap_df_pdata_otlp_macros::qualified; // Required for derived code
 
 /// Common methods for OTLP/OTAP attributes.
 pub mod attributes;
+/// Common methods for batching.
+pub mod batching;
+/// Common utilities for protobuf encoding.
+pub mod common;
 /// Common methods for OTLP/OTAP logs.
 pub mod logs;
 /// Common methods for OTLP/OTAP metrics.
@@ -22,7 +26,9 @@ pub mod metrics;
 /// Common methods for OTLP/OTAP traces.
 pub mod traces;
 
-mod common;
+#[cfg(test)]
+mod batching_tests;
+
 #[cfg(test)]
 mod tests;
 
@@ -38,9 +44,23 @@ pub enum OtlpProtoBytes {
 }
 
 impl OtlpProtoBytes {
+    /// Constructs a new message from bytes and signal type.
+    #[must_use]
+    pub fn new_from_bytes<B>(signal: SignalType, b: B) -> Self
+    where
+        B: Into<Vec<u8>>,
+    {
+        let bytes: Bytes = b.into().into();
+        match signal {
+            SignalType::Logs => Self::ExportLogsRequest(bytes),
+            SignalType::Metrics => Self::ExportMetricsRequest(bytes),
+            SignalType::Traces => Self::ExportTracesRequest(bytes),
+        }
+    }
+
     /// Create a new empty request object of a certain signal type.
     #[must_use]
-    pub fn empty(signal: SignalType) -> Self {
+    pub const fn empty(signal: SignalType) -> Self {
         let b = Bytes::new();
         match signal {
             SignalType::Logs => Self::ExportLogsRequest(b),
@@ -57,6 +77,31 @@ impl OtlpProtoBytes {
             | OtlpProtoBytes::ExportMetricsRequest(bytes)
             | OtlpProtoBytes::ExportTracesRequest(bytes) => bytes.as_ref(),
         }
+    }
+
+    /// Replaces the internal bytes with new bytes and returns the old bytes.
+    pub fn replace_bytes(&mut self, new_bytes: Bytes) -> Bytes {
+        match self {
+            OtlpProtoBytes::ExportLogsRequest(bytes) => std::mem::replace(bytes, new_bytes),
+            OtlpProtoBytes::ExportMetricsRequest(bytes) => std::mem::replace(bytes, new_bytes),
+            OtlpProtoBytes::ExportTracesRequest(bytes) => std::mem::replace(bytes, new_bytes),
+        }
+    }
+
+    /// Get a cloned reference-counted view of the serialized proto bytes.
+    #[must_use]
+    pub fn clone_bytes(&self) -> Bytes {
+        match self {
+            OtlpProtoBytes::ExportLogsRequest(bytes)
+            | OtlpProtoBytes::ExportMetricsRequest(bytes)
+            | OtlpProtoBytes::ExportTracesRequest(bytes) => bytes.clone(),
+        }
+    }
+
+    /// Return the byte-size of this message.
+    #[must_use]
+    pub fn num_bytes(&self) -> usize {
+        self.as_bytes().len()
     }
 }
 

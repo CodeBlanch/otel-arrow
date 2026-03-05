@@ -7,6 +7,8 @@
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 
+use crate::OtlpProtoBytes;
+use crate::error::Error;
 use crate::proto::consts::field_num::logs::{
     LOG_RECORD_ATTRIBUTES, LOG_RECORD_BODY, LOG_RECORD_DROPPED_ATTRIBUTES_COUNT,
     LOG_RECORD_EVENT_NAME, LOG_RECORD_FLAGS, LOG_RECORD_OBSERVED_TIME_UNIX_NANO,
@@ -17,8 +19,6 @@ use crate::proto::consts::field_num::logs::{
 };
 use crate::proto::consts::wire_types;
 use crate::schema::{SpanId, TraceId};
-
-use crate::views::logs::{LogRecordView, LogsDataView, ResourceLogsView, ScopeLogsView};
 use crate::views::otlp::bytes::common::{
     KeyValueIter, RawAnyValue, RawInstrumentationScope, RawKeyValue,
 };
@@ -28,8 +28,13 @@ use crate::views::otlp::bytes::decode::{
     to_nonzero_range,
 };
 use crate::views::otlp::bytes::resource::RawResource;
+use otap_df_pdata_views::views::logs::{
+    LogRecordView, LogsDataView, ResourceLogsView, ScopeLogsView,
+};
 
 /// Implementation of `LogsDataView` backed by protobuf serialized `LogsData` message
+///
+/// TODO: Rename OtlpLogsView similar to OtapLogsView for consistency?
 pub struct RawLogsData<'a> {
     /// bytes of the serialized message
     buf: &'a [u8],
@@ -38,8 +43,19 @@ pub struct RawLogsData<'a> {
 impl<'a> RawLogsData<'a> {
     /// Create a new instance of `RawLogsData`
     #[must_use]
-    pub fn new(buf: &'a [u8]) -> Self {
+    pub const fn new(buf: &'a [u8]) -> Self {
         Self { buf }
+    }
+}
+
+impl<'a> TryFrom<&'a OtlpProtoBytes> for RawLogsData<'a> {
+    type Error = Error;
+
+    fn try_from(bytes: &'a OtlpProtoBytes) -> Result<Self, Self::Error> {
+        match bytes {
+            OtlpProtoBytes::ExportLogsRequest(bytes) => Ok(Self::new(bytes)),
+            _ => Err(Error::LogRecordNotFound),
+        }
     }
 }
 
@@ -151,6 +167,18 @@ impl FieldRanges for ScopeLogsFieldOffsets {
 /// Implementation of `LogRecordView` backed by protobuf serialized `LogRecord` message
 pub struct RawLogRecord<'a> {
     bytes_parser: ProtoBytesParser<'a, LogFieldOffsets>,
+}
+
+impl<'a> RawLogRecord<'a> {
+    /// Create a new instance of `RawLogRecord`. This is exposed
+    /// specifically for interpreting internally generated log records
+    /// which encode body and attributes as OTLP bytes.
+    #[must_use]
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self {
+            bytes_parser: ProtoBytesParser::new(buf),
+        }
+    }
 }
 
 /// Known field offsets within byte buffer for fields in ResourceLogs message
@@ -274,11 +302,7 @@ impl<'a> Iterator for LogRecordsIter<'a> {
     type Item = RawLogRecord<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let slice = self.byte_parser.next()?;
-
-        Some(RawLogRecord {
-            bytes_parser: ProtoBytesParser::new(slice),
-        })
+        Some(RawLogRecord::new(self.byte_parser.next()?))
     }
 }
 
@@ -328,7 +352,7 @@ impl ResourceLogsView for RawResourceLogs<'_> {
     }
 
     #[inline]
-    fn schema_url(&self) -> Option<crate::views::common::Str<'_>> {
+    fn schema_url(&self) -> Option<otap_df_pdata_views::views::common::Str<'_>> {
         self.byte_parser
             .advance_to_find_field(RESOURCE_LOGS_SCHEMA_URL)
     }
@@ -371,7 +395,7 @@ impl ScopeLogsView for RawScopeLogs<'_> {
     }
 
     #[inline]
-    fn schema_url(&self) -> Option<crate::views::common::Str<'_>> {
+    fn schema_url(&self) -> Option<otap_df_pdata_views::views::common::Str<'_>> {
         self.byte_parser
             .advance_to_find_field(SCOPE_LOGS_SCHEMA_URL)
     }
@@ -449,7 +473,7 @@ impl LogRecordView for RawLogRecord<'_> {
     }
 
     #[inline]
-    fn severity_text(&self) -> Option<crate::views::common::Str<'_>> {
+    fn severity_text(&self) -> Option<otap_df_pdata_views::views::common::Str<'_>> {
         self.bytes_parser
             .advance_to_find_field(LOG_RECORD_SEVERITY_TEXT)
     }
@@ -478,7 +502,7 @@ impl LogRecordView for RawLogRecord<'_> {
     }
 
     #[inline]
-    fn event_name(&self) -> Option<crate::views::common::Str<'_>> {
+    fn event_name(&self) -> Option<otap_df_pdata_views::views::common::Str<'_>> {
         self.bytes_parser
             .advance_to_find_field(LOG_RECORD_EVENT_NAME)
     }

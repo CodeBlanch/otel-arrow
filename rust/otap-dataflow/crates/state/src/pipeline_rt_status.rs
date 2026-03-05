@@ -3,15 +3,18 @@
 
 //! Observed per-core pipeline runtime status and phase transition logic.
 
+use crate::ObservedEventRingBuffer;
 use crate::conditions::{
     Condition, ConditionKind, ConditionReason, ConditionState, ConditionStatus,
 };
 use crate::error::Error;
 use crate::error::Error::InvalidTransition;
-use crate::event::{ErrorEvent as ErrEv, RequestEvent as Req, SuccessEvent as OkEv};
-use crate::event::{ErrorSummary, EventType, ObservedEvent, ObservedEventRingBuffer};
 use crate::phase::{DeletionMode, FailReason, PipelinePhase};
 use chrono::{DateTime, Utc};
+use otap_df_telemetry::event::{
+    EngineEvent, ErrorEvent as ErrEv, ErrorSummary, EventType, ObservedEvent, RequestEvent as Req,
+    SuccessEvent as OkEv,
+};
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 use std::time::SystemTime;
@@ -80,22 +83,22 @@ impl Default for PipelineRuntimeStatus {
 }
 
 impl PipelineRuntimeStatus {
-    pub(crate) fn apply_event(&mut self, event: ObservedEvent) -> Result<ApplyOutcome, Error> {
+    pub(crate) fn apply_event(&mut self, event: EngineEvent) -> Result<ApplyOutcome, Error> {
         let timestamp = event.time;
         let outcome = self.apply(event.r#type.clone());
         self.last_heartbeat_time = timestamp;
         if outcome.is_ok() {
             self.refresh_conditions(&event);
         }
-        self.recent_events.push(event);
+        self.recent_events.push(ObservedEvent::Engine(event));
         outcome
     }
 
-    fn refresh_conditions(&mut self, event: &ObservedEvent) {
+    fn refresh_conditions(&mut self, event: &EngineEvent) {
         let timestamp = event.time;
         match &event.r#type {
             EventType::Success(OkEv::Admitted) => {
-                let message = event_message(event).or_else(|| {
+                let message = event.message.clone().or_else(|| {
                     Some(
                         "Pipeline runtime (core) configuration validated and accepted.".to_string(),
                     )
@@ -108,7 +111,7 @@ impl PipelineRuntimeStatus {
                 );
             }
             EventType::Success(OkEv::Ready) => {
-                let message = event_message(event).or_else(|| {
+                let message = event.message.clone().or_else(|| {
                     Some(
                         "Pipeline runtime (core) is running and ready to process data.".to_string(),
                     )
@@ -121,7 +124,7 @@ impl PipelineRuntimeStatus {
                 );
             }
             EventType::Success(OkEv::UpdateApplied) => {
-                let message = event_message(event).or_else(|| {
+                let message = event.message.clone().or_else(|| {
                     Some("Pipeline update applied; core is serving traffic.".to_string())
                 });
                 _ = self.ready_condition.update(
@@ -132,7 +135,7 @@ impl PipelineRuntimeStatus {
                 );
             }
             EventType::Success(OkEv::RollbackComplete) => {
-                let message = event_message(event).or_else(|| {
+                let message = event.message.clone().or_else(|| {
                     Some("Rollback complete; core restored to last known good.".to_string())
                 });
                 _ = self.ready_condition.update(
@@ -143,7 +146,7 @@ impl PipelineRuntimeStatus {
                 );
             }
             EventType::Success(OkEv::Drained) => {
-                let message = event_message(event).or_else(|| {
+                let message = event.message.clone().or_else(|| {
                     Some(
                         "Pipeline runtime (core) drained; waiting for shutdown or deletion."
                             .to_string(),
@@ -157,7 +160,9 @@ impl PipelineRuntimeStatus {
                 );
             }
             EventType::Success(OkEv::Deleted) => {
-                let message = event_message(event)
+                let message = event
+                    .message
+                    .clone()
                     .or_else(|| Some("Pipeline runtime (core) resources deleted.".to_string()));
                 let message_clone = message.clone();
                 _ = self.accepted_condition.update(
@@ -175,7 +180,7 @@ impl PipelineRuntimeStatus {
             }
             EventType::Success(OkEv::UpdateAdmitted) => {
                 if self.ready_condition.status != ConditionStatus::True {
-                    let message = event_message(event).or_else(|| {
+                    let message = event.message.clone().or_else(|| {
                         Some(
                             "Pipeline runtime (core) update admitted and will begin applying."
                                 .to_string(),
@@ -208,7 +213,9 @@ impl PipelineRuntimeStatus {
             }
             EventType::Request(req) => match req {
                 Req::StartRequested => {
-                    let message = event_message(event)
+                    let message = event
+                        .message
+                        .clone()
                         .or_else(|| Some("Start requested; awaiting admission.".to_string()));
                     _ = self.accepted_condition.update(
                         ConditionStatus::False,
@@ -218,7 +225,9 @@ impl PipelineRuntimeStatus {
                     );
                 }
                 Req::ShutdownRequested => {
-                    let message = event_message(event)
+                    let message = event
+                        .message
+                        .clone()
                         .or_else(|| Some("Shutdown requested; core will drain.".to_string()));
                     _ = self.ready_condition.update(
                         ConditionStatus::False,
@@ -228,7 +237,9 @@ impl PipelineRuntimeStatus {
                     );
                 }
                 Req::DeleteRequested => {
-                    let message = event_message(event)
+                    let message = event
+                        .message
+                        .clone()
                         .or_else(|| Some("Delete requested; core entering draining.".to_string()));
                     _ = self.ready_condition.update(
                         ConditionStatus::False,
@@ -238,7 +249,7 @@ impl PipelineRuntimeStatus {
                     );
                 }
                 Req::ForceDeleteRequested => {
-                    let message = event_message(event).or_else(|| {
+                    let message = event.message.clone().or_else(|| {
                         Some("Force delete requested; pipeline runtime (core) will terminate immediately.".to_string())
                     });
                     _ = self.ready_condition.update(
@@ -253,12 +264,12 @@ impl PipelineRuntimeStatus {
     }
 
     #[must_use]
-    pub(crate) fn accepted_condition(&self) -> &ConditionState {
+    pub(crate) const fn accepted_condition(&self) -> &ConditionState {
         &self.accepted_condition
     }
 
     #[must_use]
-    pub(crate) fn ready_condition(&self) -> &ConditionState {
+    pub(crate) const fn ready_condition(&self) -> &ConditionState {
         &self.ready_condition
     }
 
@@ -504,10 +515,7 @@ impl PipelineRuntimeStatus {
     }
 }
 
-fn error_reason_and_message(
-    err: &ErrEv,
-    event: &ObservedEvent,
-) -> (ConditionReason, Option<String>) {
+fn error_reason_and_message(err: &ErrEv, event: &EngineEvent) -> (ConditionReason, Option<String>) {
     let reason = match err {
         ErrEv::AdmissionError(_) => ConditionReason::AdmissionError,
         ErrEv::ConfigRejected(_) => ConditionReason::ConfigRejected,
@@ -518,7 +526,7 @@ fn error_reason_and_message(
         ErrEv::DeleteError(_) => ConditionReason::DeleteError,
     };
 
-    let message = event_message(event).or_else(|| match err {
+    let message = event.message.clone().or_else(|| match err {
         ErrEv::AdmissionError(summary)
         | ErrEv::ConfigRejected(summary)
         | ErrEv::UpdateFailed(summary)
@@ -557,14 +565,10 @@ impl Serialize for PipelineRuntimeStatus {
     }
 }
 
-fn event_message(event: &ObservedEvent) -> Option<String> {
-    event.message().map(|s| s.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{
+    use otap_df_telemetry::event::{
         ErrorEvent as ErrEv, ErrorSummary, RequestEvent as Req, SuccessEvent as OkEv,
     };
 

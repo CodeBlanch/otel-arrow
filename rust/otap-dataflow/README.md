@@ -1,4 +1,4 @@
-# OTAP Dataflow Library
+# OTAP Dataflow Engine
 
 [![build](https://github.com/open-telemetry/otel-arrow/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/open-telemetry/otel-arrow/actions/workflows/rust-ci.yml)
 [![build](https://github.com/open-telemetry/otel-arrow/actions/workflows/rust-audit.yml/badge.svg)](https://github.com/open-telemetry/otel-arrow/actions/workflows/rust-audit.yml)
@@ -10,17 +10,31 @@
 
 ## Overview
 
-The OTAP Dataflow library is a set of core Rust crates which combine
+The OTAP Dataflow Engine is a set of core Rust crates which combine
 to produce an OpenTelemetry pipeline support, for use as an embedded
 software component, providing a framework for collecting OpenTelemetry
 data.
 
-> [!NOTE] These Rust libraries are the main deliverable of Phase 2 of
-> the OTel-Arrow project, as defined in the [project
-> phases](../../docs/project-phases.md).  The `df_engine` main
-> program built through `cargo` in [`src/main.rs`](./src/main.rs) is
-> provided as a means to test and validate OTAP pipelines built using
-> the dataflow engine.
+> [!NOTE]
+> These Rust libraries are the main deliverable of Phase 2 of the OTel-Arrow
+> project, as defined in the [project phases](../../docs/project-phases.md).
+> The `df_engine` main program built through `cargo` in
+> [`src/main.rs`](./src/main.rs) is provided as a means to test and validate
+> OTAP pipelines built using the dataflow engine.
+
+## Architecture
+
+![OTAP Dataflow Engine architecture](docs/images/architecture-high-level.svg)
+
+The controller is the local control plane for pipeline groups. It allocates CPU
+cores, spawns one worker thread per core, and owns lifecycle, coordination, and
+runtime observability. Each pipeline runs a single-threaded engine instance per
+assigned core, hot data paths stay within that thread, while cross-thread
+coordination is handled through control messages and internal telemetry.
+
+The admin HTTP server and observed-state store are driven by the controller for
+runtime visibility and control. For details, see the controller and engine crate
+READMEs.
 
 ## Features
 
@@ -71,9 +85,12 @@ the many N-to-1 relationships expressed within an OTAP request.
 
 ## Major components
 
-### Engine
+### Controller and Engine
 
-[See crate README.](./crates/engine/README.md)
+See the controller and engine crate READMEs:
+
+- [controller](./crates/controller/README.md).
+- [engine](./crates/engine/README.md),
 
 The `otap_df_engine` crate is located in `crates/engine`, here we
 find the engine's overall architecture expressed:
@@ -105,7 +122,7 @@ crates/engine/lib.rs:    Effect handler extensions, pipeline factory
 |-- runtime_pipeline.rs: Builds the graph of component channels
 ```
 
-### OTAP: OTel-Arrow Protocol pipline data
+### OTAP: OTel-Arrow Protocol pipeline data
 
 [See crate README.](./crates/otap/README.md)
 
@@ -230,14 +247,44 @@ route destinations.
 The Syslog/CEF receiver is considered a core component used to
 establish the performance of the OTAP Dataflow system.
 
+### Core Nodes
+
+[See crate README.](./crates/core-nodes/README.md)
+
+The `otap-df-core-nodes` crate is the destination for core-node
+implementations as they are split out from `otap-df-otap` during the
+ongoing refactor.
+
+Current status:
+
+- The crate is currently a scaffold.
+- No core node implementations have been moved there yet.
+
+### Contrib Nodes
+
+[See crate README.](./crates/contrib-nodes/README.md)
+
+The `otap-df-contrib-nodes` crate contains optional, feature-gated
+exporters and processors that are registered into the OTAP pipeline
+factory maps when enabled.
+
+Contrib feature model:
+
+- Aggregate exporter feature:
+  - `contrib-exporters` enables all contrib exporters
+- Aggregate processor feature:
+  - `contrib-processors` enables all contrib processors
+- Individual feature flags can still be enabled independently for
+  smaller builds.
+
 ### Controller
 
 [See crate README.](./crates/controller/README.md)
 
-The `otap_df_controller` crate is located in `crates/controller` is
+The `otap_df_controller` crate is located in `crates/controller` and is
 the main entry point to construct an OTAP Dataflow pipeline instance. The
-controller type, `otap_df_controller::Controller<PData>`, manages building
-and running one or more pipelines.
+controller type, `otap_df_controller::Controller<PData>`, manages building,
+running, and supervising one or more pipelines.
 
 This component is responsible for making the assignment between OTAP
 dataflow pipeline and individually-numbered CPU instances. The
@@ -254,7 +301,7 @@ pipeline, the engine, and the pipeline components.
 
 A number of example configurations are listed in
 [`./configs`](./configs). These are deserialized into the
-`otap_df_config::engine::EngineConfig` structs, defined in this crate.
+`otap_df_config::engine::OtelDataflowSpec` structs, defined in this crate.
 
 ### Channel
 
@@ -337,6 +384,7 @@ docker build --build-context otel-arrow=../../ -f Dockerfile -t df_engine .
 ## Contributing
 
 - [Contribution Guidelines](CONTRIBUTING.md)
+- [Internal Telemetry Guidelines](docs/telemetry/README.md)
 - Code of Conduct (TBD)
 
 Before submitting a PR, please run the following commands:

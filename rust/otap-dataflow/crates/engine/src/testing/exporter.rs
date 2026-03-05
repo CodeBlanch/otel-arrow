@@ -7,6 +7,7 @@
 //! setup and lifecycle management.
 
 use crate::ExporterFactory;
+use crate::Interests;
 use crate::config::ExporterConfig;
 use crate::context::{ControllerContext, PipelineContext};
 use crate::control::{
@@ -21,8 +22,8 @@ use crate::shared::message::{SharedReceiver, SharedSender};
 use crate::testing::{CtrlMsgCounters, create_not_send_channel, setup_test_runtime, test_node};
 use otap_df_channel::error::SendError;
 use otap_df_config::node::NodeUserConfig;
-use otap_df_telemetry::MetricsSystem;
-use otap_df_telemetry::registry::MetricsRegistryHandle;
+use otap_df_telemetry::InternalTelemetrySystem;
+use otap_df_telemetry::registry::TelemetryRegistryHandle;
 use otap_df_telemetry::reporter::MetricsReporter;
 use serde_json::Value;
 use std::fmt::Debug;
@@ -59,7 +60,7 @@ impl<PData> Clone for TestContext<PData> {
 impl<PData> TestContext<PData> {
     /// Creates a new TestContext with the given transmitters.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         control_tx: Sender<NodeControlMsg<PData>>,
         pdata_tx: Sender<PData>,
         counters: CtrlMsgCounters,
@@ -80,7 +81,7 @@ impl<PData> TestContext<PData> {
 
     /// Takes the pipeline control message receiver from the context.
     /// Returns None if already taken.
-    pub fn take_pipeline_ctrl_receiver(&mut self) -> Option<PipelineCtrlMsgReceiver<PData>> {
+    pub const fn take_pipeline_ctrl_receiver(&mut self) -> Option<PipelineCtrlMsgReceiver<PData>> {
         self.pipeline_ctrl_msg_receiver.take()
     }
 
@@ -153,7 +154,7 @@ pub struct TestRuntime<PData> {
     /// Message counter for tracking processed messages
     counter: CtrlMsgCounters,
 
-    metrics_system: MetricsSystem,
+    metrics_system: InternalTelemetrySystem,
 
     _pd: PhantomData<PData>,
 }
@@ -193,7 +194,7 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
     /// Creates a new test runtime with channels of the specified capacity.
     #[must_use]
     pub fn new() -> Self {
-        let metrics_system = MetricsSystem::default();
+        let metrics_system = InternalTelemetrySystem::default();
         let config = ExporterConfig::new("test_exporter");
         let (rt, local_tasks) = setup_test_runtime();
         let counter = CtrlMsgCounters::new();
@@ -209,12 +210,12 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
     }
 
     /// Returns the current exporter configuration.
-    pub fn config(&self) -> &ExporterConfig {
+    pub const fn config(&self) -> &ExporterConfig {
         &self.config
     }
 
     /// Returns a handle to the metrics registry.
-    pub fn metrics_registry(&self) -> MetricsRegistryHandle {
+    pub fn metrics_registry(&self) -> TelemetryRegistryHandle {
         self.metrics_system.registry()
     }
 
@@ -236,16 +237,16 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
                 let (pdata_tx, pdata_rx) =
                     create_not_send_channel(self.config.control_channel.capacity);
                 (
-                    Sender::Local(LocalSender::MpscSender(pdata_tx)),
-                    Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx)),
+                    Sender::Local(LocalSender::mpsc(pdata_tx)),
+                    Receiver::Local(LocalReceiver::mpsc(pdata_rx)),
                 )
             }
             ExporterWrapper::Shared { .. } => {
                 let (pdata_tx, pdata_rx) =
                     tokio::sync::mpsc::channel(self.config.control_channel.capacity);
                 (
-                    Sender::Shared(SharedSender::MpscSender(pdata_tx)),
-                    Receiver::Shared(SharedReceiver::MpscReceiver(pdata_rx)),
+                    Sender::Shared(SharedSender::mpsc(pdata_tx)),
+                    Receiver::Shared(SharedReceiver::mpsc(pdata_rx)),
                 )
             }
         };
@@ -256,14 +257,20 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
             .expect("Failed to set PData receiver");
         let metrics_reporter_start = self.metrics_reporter();
         let metrics_reporter_terminal = self.metrics_reporter();
+        let metrics_collector = self.metrics_system.collector();
         let run_exporter_handle = self.local_tasks.spawn_local(async move {
             exporter
-                .start(pipeline_ctrl_msg_tx, metrics_reporter_start)
+                .start(
+                    pipeline_ctrl_msg_tx,
+                    metrics_reporter_start,
+                    Interests::empty(),
+                )
                 .await
                 .map(|terminal_state| {
                     for snapshot in terminal_state.into_metrics() {
                         let _ = metrics_reporter_terminal.try_report_snapshot(snapshot);
                     }
+                    metrics_collector.collect_pending(); // Collect after sending all the
                 })
         });
         TestPhase {
@@ -355,9 +362,9 @@ impl<PData> ValidationPhase<PData> {
 /// Creates a test pipeline context for component testing
 #[must_use]
 pub fn create_test_pipeline_context() -> PipelineContext {
-    let metrics_registry = MetricsRegistryHandle::new();
-    let controller_ctx = ControllerContext::new(metrics_registry);
-    controller_ctx.pipeline_context_with("test_grp".into(), "test_pipeline".into(), 0, 0)
+    let telemetry_registry = TelemetryRegistryHandle::new();
+    let controller_ctx = ControllerContext::new(telemetry_registry);
+    controller_ctx.pipeline_context_with("test_grp".into(), "test_pipeline".into(), 0, 1, 0)
 }
 
 /// Creates an exporter using its factory function with minimal test setup

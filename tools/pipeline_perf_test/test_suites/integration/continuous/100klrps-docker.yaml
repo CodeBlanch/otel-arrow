@@ -19,7 +19,7 @@ components:
         volumes:
           - 'test_suites/integration/configs/loadgen/config.rendered.yaml:/home/dataflow/config.yaml:ro'
         command:
-          - "--pipeline"
+          - "--config"
           - "./config.yaml"
           - "--core-id-range"
           - "2-2"
@@ -40,7 +40,7 @@ components:
         volumes:
           - 'test_suites/integration/configs/engine/config.rendered.yaml:/home/dataflow/config.yaml:ro'
         command:
-          - "--pipeline"
+          - "--config"
           - "./config.yaml"
           - "--core-id-range"
           - "3-3"
@@ -61,7 +61,7 @@ components:
         volumes:
           - 'test_suites/integration/configs/backend/config.rendered.yaml:/home/dataflow/config.yaml:ro'
         command:
-          - "--pipeline"
+          - "--config"
           - "./config.yaml"
           - "--core-id-range"
           - "1-1"
@@ -81,6 +81,7 @@ tests:
         engine_config_template: test_suites/integration/templates/configs/engine/continuous/otlp-attr-otlp.yaml
         loadgen_exporter_type: otlp
         backend_receiver_type: otlp
+        max_batch_size: 1000
   - name: OTLP-ATTR-OTAP
     from_template:
       path: test_suites/integration/templates/test_steps/df-loadgen-steps-docker.yaml
@@ -88,6 +89,7 @@ tests:
         engine_config_template: test_suites/integration/templates/configs/engine/continuous/otlp-attr-otap.yaml
         loadgen_exporter_type: otlp
         backend_receiver_type: otap
+        max_batch_size: 1000
   - name: OTAP-ATTR-OTAP
     from_template:
       path: test_suites/integration/templates/test_steps/df-loadgen-steps-docker.yaml
@@ -95,6 +97,7 @@ tests:
         engine_config_template: test_suites/integration/templates/configs/engine/continuous/otap-attr-otap.yaml
         loadgen_exporter_type: otap
         backend_receiver_type: otap
+        max_batch_size: 1000
   - name: OTAP-ATTR-OTLP
     from_template:
       path: test_suites/integration/templates/test_steps/df-loadgen-steps-docker.yaml
@@ -102,3 +105,4 @@ tests:
         engine_config_template: test_suites/integration/templates/configs/engine/continuous/otap-attr-otlp.yaml
         loadgen_exporter_type: otap
         backend_receiver_type: otlp
+        max_batch_size: 1000

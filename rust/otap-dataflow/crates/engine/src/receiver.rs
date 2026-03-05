@@ -7,9 +7,15 @@
 //! For more details on the `!Send` implementation of a receiver, see [`local::Receiver`].
 //! See [`shared::Receiver`] for the Send implementation.
 
+use crate::Interests;
+use crate::channel_metrics::ChannelMetricsRegistry;
+use crate::channel_mode::{LocalMode, SharedMode, wrap_control_channel_metrics};
 use crate::config::ReceiverConfig;
+use crate::context::PipelineContext;
 use crate::control::{Controllable, NodeControlMsg, PipelineCtrlMsgSender};
-use crate::error::{Error, ProcessorErrorKind, ReceiverErrorKind};
+use crate::effect_handler::SourceTagging;
+use crate::entity_context::NodeTelemetryGuard;
+use crate::error::{Error, ReceiverErrorKind};
 use crate::local::message::{LocalReceiver, LocalSender};
 use crate::local::receiver as local;
 use crate::message::{Receiver, Sender};
@@ -44,10 +50,16 @@ pub enum ReceiverWrapper<PData> {
         control_sender: LocalSender<NodeControlMsg<PData>>,
         /// A receiver for control messages.
         control_receiver: LocalReceiver<NodeControlMsg<PData>>,
-        /// Senders for PData messages per out port.
-        pdata_senders: HashMap<PortName, LocalSender<PData>>,
+        /// Senders for PData messages per output port.
+        /// Uses the generic `Sender` so local receivers can still target shared channels when
+        /// mixed local/shared wiring requires it.
+        pdata_senders: HashMap<PortName, Sender<PData>>,
         /// A receiver for pdata messages.
         pdata_receiver: Option<LocalReceiver<PData>>,
+        /// Telemetry guard for node lifecycle cleanup.
+        telemetry: Option<NodeTelemetryGuard>,
+        /// Whether outgoing messages need source node tagging.
+        source_tag: SourceTagging,
     },
     /// A receiver with a `Send` implementation.
     Shared {
@@ -63,10 +75,15 @@ pub enum ReceiverWrapper<PData> {
         control_sender: SharedSender<NodeControlMsg<PData>>,
         /// A receiver for control messages.
         control_receiver: SharedReceiver<NodeControlMsg<PData>>,
-        /// Senders for PData messages per out port.
+        /// Senders for PData messages per output port.
+        /// Uses `SharedSender` to keep the shared receiver `Send` for multi-threaded execution.
         pdata_senders: HashMap<PortName, SharedSender<PData>>,
         /// A receiver for pdata messages.
         pdata_receiver: Option<SharedReceiver<PData>>,
+        /// Telemetry guard for node lifecycle cleanup.
+        telemetry: Option<NodeTelemetryGuard>,
+        /// Whether outgoing messages need source node tagging.
+        source_tag: SourceTagging,
     },
 }
 
@@ -102,10 +119,12 @@ impl<PData> ReceiverWrapper<PData> {
             user_config,
             runtime_config: config.clone(),
             receiver: Box::new(receiver),
-            control_sender: LocalSender::MpscSender(control_sender),
-            control_receiver: LocalReceiver::MpscReceiver(control_receiver),
+            control_sender: LocalSender::mpsc(control_sender),
+            control_receiver: LocalReceiver::mpsc(control_receiver),
             pdata_senders: HashMap::new(),
             pdata_receiver: None,
+            telemetry: None,
+            source_tag: SourceTagging::Disabled,
         }
     }
 
@@ -127,18 +146,164 @@ impl<PData> ReceiverWrapper<PData> {
             user_config,
             runtime_config: config.clone(),
             receiver: Box::new(receiver),
-            control_sender: SharedSender::MpscSender(control_sender),
-            control_receiver: SharedReceiver::MpscReceiver(control_receiver),
+            control_sender: SharedSender::mpsc(control_sender),
+            control_receiver: SharedReceiver::mpsc(control_receiver),
             pdata_senders: HashMap::new(),
             pdata_receiver: None,
+            telemetry: None,
+            source_tag: SourceTagging::Disabled,
+        }
+    }
+
+    pub(crate) fn with_node_telemetry_guard(self, guard: NodeTelemetryGuard) -> Self {
+        match self {
+            ReceiverWrapper::Local {
+                node_id,
+                user_config,
+                runtime_config,
+                receiver,
+                control_sender,
+                control_receiver,
+                pdata_senders,
+                pdata_receiver,
+                source_tag,
+                ..
+            } => ReceiverWrapper::Local {
+                node_id,
+                user_config,
+                runtime_config,
+                receiver,
+                control_sender,
+                control_receiver,
+                pdata_senders,
+                pdata_receiver,
+                telemetry: Some(guard),
+                source_tag,
+            },
+            ReceiverWrapper::Shared {
+                node_id,
+                user_config,
+                runtime_config,
+                receiver,
+                control_sender,
+                control_receiver,
+                pdata_senders,
+                pdata_receiver,
+                source_tag,
+                ..
+            } => ReceiverWrapper::Shared {
+                node_id,
+                user_config,
+                runtime_config,
+                receiver,
+                control_sender,
+                control_receiver,
+                pdata_senders,
+                pdata_receiver,
+                telemetry: Some(guard),
+                source_tag,
+            },
+        }
+    }
+
+    pub(crate) const fn take_telemetry_guard(&mut self) -> Option<NodeTelemetryGuard> {
+        match self {
+            ReceiverWrapper::Local { telemetry, .. } => telemetry.take(),
+            ReceiverWrapper::Shared { telemetry, .. } => telemetry.take(),
+        }
+    }
+
+    pub(crate) fn with_control_channel_metrics(
+        self,
+        pipeline_ctx: &PipelineContext,
+        channel_metrics: &mut ChannelMetricsRegistry,
+        channel_metrics_enabled: bool,
+    ) -> Self {
+        match self {
+            ReceiverWrapper::Local {
+                node_id,
+                runtime_config,
+                control_sender,
+                control_receiver,
+                user_config,
+                receiver,
+                pdata_senders,
+                pdata_receiver,
+                telemetry,
+                source_tag,
+                ..
+            } => {
+                let (control_sender, control_receiver) =
+                    wrap_control_channel_metrics::<LocalMode, PData>(
+                        &node_id,
+                        pipeline_ctx,
+                        channel_metrics,
+                        channel_metrics_enabled,
+                        runtime_config.control_channel.capacity as u64,
+                        control_sender,
+                        control_receiver,
+                    );
+
+                ReceiverWrapper::Local {
+                    node_id,
+                    user_config,
+                    runtime_config,
+                    receiver,
+                    control_sender,
+                    control_receiver,
+                    pdata_senders,
+                    pdata_receiver,
+                    telemetry,
+                    source_tag,
+                }
+            }
+            ReceiverWrapper::Shared {
+                node_id,
+                runtime_config,
+                control_sender,
+                control_receiver,
+                user_config,
+                receiver,
+                pdata_senders,
+                pdata_receiver,
+                telemetry,
+                source_tag,
+                ..
+            } => {
+                let (control_sender, control_receiver) =
+                    wrap_control_channel_metrics::<SharedMode, PData>(
+                        &node_id,
+                        pipeline_ctx,
+                        channel_metrics,
+                        channel_metrics_enabled,
+                        runtime_config.control_channel.capacity as u64,
+                        control_sender,
+                        control_receiver,
+                    );
+
+                ReceiverWrapper::Shared {
+                    node_id,
+                    user_config,
+                    runtime_config,
+                    receiver,
+                    control_sender,
+                    control_receiver,
+                    pdata_senders,
+                    pdata_receiver,
+                    telemetry,
+                    source_tag,
+                }
+            }
         }
     }
 
     /// Starts the receiver and begins receiver incoming data.
+    #[doc(hidden)]
     pub async fn start(
         self,
         pipeline_ctrl_msg_tx: PipelineCtrlMsgSender<PData>,
         metrics_reporter: MetricsReporter,
+        node_interests: Interests,
     ) -> Result<TerminalState, Error> {
         match (self, metrics_reporter) {
             (
@@ -148,6 +313,7 @@ impl<PData> ReceiverWrapper<PData> {
                     control_receiver,
                     pdata_senders,
                     user_config,
+                    source_tag,
                     ..
                 },
                 metrics_reporter,
@@ -162,15 +328,17 @@ impl<PData> ReceiverWrapper<PData> {
                 } else {
                     pdata_senders
                 };
-                let default_port = user_config.default_out_port.clone();
+                let default_port = user_config.default_output.clone();
                 let ctrl_msg_chan = local::ControlChannel::new(Receiver::Local(control_receiver));
-                let effect_handler = local::EffectHandler::new(
+                let mut effect_handler = local::EffectHandler::new(
                     node_id,
                     msg_senders,
                     default_port,
                     pipeline_ctrl_msg_tx,
                     metrics_reporter,
                 );
+                effect_handler.set_source_tagging(source_tag);
+                effect_handler.core.set_node_interests(node_interests);
                 receiver.start(ctrl_msg_chan, effect_handler).await
             }
             (
@@ -180,6 +348,7 @@ impl<PData> ReceiverWrapper<PData> {
                     control_receiver,
                     pdata_senders,
                     user_config,
+                    source_tag,
                     ..
                 },
                 metrics_reporter,
@@ -194,22 +363,24 @@ impl<PData> ReceiverWrapper<PData> {
                 } else {
                     pdata_senders
                 };
-                let default_port = user_config.default_out_port.clone();
+                let default_port = user_config.default_output.clone();
                 let ctrl_msg_chan = shared::ControlChannel::new(control_receiver);
-                let effect_handler = shared::EffectHandler::new(
+                let mut effect_handler = shared::EffectHandler::new(
                     node_id,
                     msg_senders,
                     default_port,
                     pipeline_ctrl_msg_tx,
                     metrics_reporter,
                 );
+                effect_handler.set_source_tagging(source_tag);
+                effect_handler.core.set_node_interests(node_interests);
                 receiver.start(ctrl_msg_chan, effect_handler).await
             }
         }
     }
 
     /// Returns the PData receiver.
-    pub fn take_pdata_receiver(&mut self) -> Receiver<PData> {
+    pub const fn take_pdata_receiver(&mut self) -> Receiver<PData> {
         match self {
             ReceiverWrapper::Local { pdata_receiver, .. } => {
                 Receiver::Local(pdata_receiver.take().expect("pdata_receiver is None"))
@@ -270,7 +441,7 @@ impl<PData> NodeWithPDataSender<PData> for ReceiverWrapper<PData> {
         sender: Sender<PData>,
     ) -> Result<(), Error> {
         match (self, sender) {
-            (ReceiverWrapper::Local { pdata_senders, .. }, Sender::Local(sender)) => {
+            (ReceiverWrapper::Local { pdata_senders, .. }, sender) => {
                 let _ = pdata_senders.insert(port, sender);
                 Ok(())
             }
@@ -278,18 +449,19 @@ impl<PData> NodeWithPDataSender<PData> for ReceiverWrapper<PData> {
                 let _ = pdata_senders.insert(port, sender);
                 Ok(())
             }
-            (ReceiverWrapper::Local { .. }, _) => Err(Error::ProcessorError {
-                processor: node_id,
-                kind: ProcessorErrorKind::Configuration,
-                error: "Expected a local sender for PData".to_owned(),
-                source_detail: String::new(),
-            }),
-            (ReceiverWrapper::Shared { .. }, _) => Err(Error::ProcessorError {
-                processor: node_id,
-                kind: ProcessorErrorKind::Configuration,
+            (ReceiverWrapper::Shared { .. }, _) => Err(Error::ReceiverError {
+                receiver: node_id,
+                kind: ReceiverErrorKind::Configuration,
                 error: "Expected a shared sender for PData".to_owned(),
                 source_detail: String::new(),
             }),
+        }
+    }
+
+    fn set_source_tagging(&mut self, value: SourceTagging) {
+        match self {
+            ReceiverWrapper::Local { source_tag, .. } => *source_tag = value,
+            ReceiverWrapper::Shared { source_tag, .. } => *source_tag = value,
         }
     }
 }

@@ -7,7 +7,7 @@
 # with the arrow enabled go collector build files in the repo root, the image
 # must be built with additional --build-context flags as follows:
 # docker build --build-context otel-arrow=../../ -f Dockerfile -t df_engine .
-FROM --platform=$BUILDPLATFORM docker.io/rust:1.92@sha256:02fc8ce2ce3d93ba228e503907fee24d9796c837eda6ba382da3917bc4416857 AS dataflow-build
+FROM --platform=$BUILDPLATFORM docker.io/rust:1.93@sha256:51c04d7a2b38418ba23ecbfb373c40d3bd493dec1ddfae00ab5669527320195e AS dataflow-build
 WORKDIR /build/rust/dataflow
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
@@ -28,8 +28,8 @@ COPY . /build/rust/dataflow/.
 ARG RUSTFLAGS="-C target-cpu=native"
 ENV RUSTFLAGS=${RUSTFLAGS}
 
-# These are used to enable features and are passed to carg's --features argument
-# e.g. --build-arg FEATURES="azure,quiver-persistence"
+# These are used to enable features and are passed to cargo's --features argument
+# e.g. --build-arg FEATURES="azure"
 ARG FEATURES
 ENV FEATURES=${FEATURES}
 
@@ -37,7 +37,7 @@ ENV FEATURES=${FEATURES}
 RUN ./cross-arch-build.sh
 
 # The runtime image
-FROM docker.io/alpine:3.23@sha256:51183f2cfa6320055da30872f211093f9ff1d3cf06f39a0bdb212314c5dc7375
+FROM docker.io/alpine:3.23@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 LABEL maintainer="The OpenTelemetry Authors"
 
 # Passing --build-arg BUILD=1 adds additional debugging features to the image.

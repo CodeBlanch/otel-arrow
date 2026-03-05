@@ -23,22 +23,16 @@ otap-df-pdata = { path = "../pdata" }
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio"] }
 data_engine_kql_parser = { workspace = true }
+data_engine_parser_abstractions = { workspace = true }
 pretty_assertions = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
 
+otap-df-opl = { path = "../opl" }
 
 [[bench]]
 name = "filter"
 harness = false
-
-[profile.bench]
-opt-level = 3
-debug = false
-incremental = false
-lto = "fat"
-codegen-units = 1
-panic = "abort"
 
 [lints]
 workspace = true

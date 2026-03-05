@@ -6,8 +6,10 @@
 //! These utilities are designed to make testing processors simpler by abstracting away common
 //! setup and lifecycle management.
 
+use crate::Interests;
 use crate::config::ProcessorConfig;
 use crate::control::pipeline_ctrl_msg_channel;
+use crate::effect_handler::SourceTagging;
 use crate::error::Error;
 use crate::local::message::{LocalReceiver, LocalSender};
 use crate::message::{Message, Receiver, Sender};
@@ -15,8 +17,8 @@ use crate::node::{NodeWithPDataReceiver, NodeWithPDataSender};
 use crate::processor::{ProcessorWrapper, ProcessorWrapperRuntime};
 use crate::shared::message::{SharedReceiver, SharedSender};
 use crate::testing::{CtrlMsgCounters, setup_test_runtime, test_node};
-use otap_df_telemetry::MetricsSystem;
-use otap_df_telemetry::registry::MetricsRegistryHandle;
+use otap_df_telemetry::InternalTelemetrySystem;
+use otap_df_telemetry::registry::TelemetryRegistryHandle;
 use otap_df_telemetry::reporter::MetricsReporter;
 use std::fmt::Debug;
 use std::future::Future;
@@ -39,7 +41,7 @@ pub struct ValidateContext {
 impl<PData> TestContext<PData> {
     /// Creates a new TestContext from a ProcessorWrapperRuntime.
     #[must_use]
-    pub fn new(runtime: ProcessorWrapperRuntime<PData>) -> Self {
+    pub const fn new(runtime: ProcessorWrapperRuntime<PData>) -> Self {
         Self {
             runtime,
             output_receiver: None,
@@ -89,6 +91,18 @@ impl<PData> TestContext<PData> {
         sleep(duration).await;
     }
 
+    /// Sets whether outgoing messages need source node tagging on the effect handler.
+    pub fn set_source_tagging(&mut self, value: SourceTagging) {
+        match &mut self.runtime {
+            ProcessorWrapperRuntime::Local { effect_handler, .. } => {
+                effect_handler.set_source_tagging(value);
+            }
+            ProcessorWrapperRuntime::Shared { effect_handler, .. } => {
+                effect_handler.set_source_tagging(value);
+            }
+        }
+    }
+
     /// Sets the pipeline control message sender on the effect handler.
     /// This is needed for processor ACK/NACK handling.
     pub fn set_pipeline_ctrl_sender(
@@ -118,6 +132,10 @@ impl ValidateContext {
     }
 }
 
+/// The name of the output that will be configured automatically on the [`ProcessorWrapper`] by
+/// the [`TestRuntime`].
+pub const TEST_OUT_PORT_NAME: &str = "default";
+
 /// A test runtime for simplifying processor tests.
 ///
 /// This structure encapsulates the common setup logic needed for testing processors,
@@ -134,7 +152,7 @@ pub struct TestRuntime<PData> {
     /// Message counter for tracking processed messages
     counter: CtrlMsgCounters,
 
-    metrics_system: MetricsSystem,
+    metrics_system: InternalTelemetrySystem,
 
     _pd: PhantomData<PData>,
 }
@@ -146,7 +164,7 @@ pub struct TestPhase<PData> {
     processor: ProcessorWrapper<PData>,
     counters: CtrlMsgCounters,
     output_receiver: Option<Receiver<PData>>,
-    metrics_system: MetricsSystem,
+    metrics_system: InternalTelemetrySystem,
 }
 
 /// Data and operations for the validation phase of a processor.
@@ -167,7 +185,7 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
     /// Creates a new test runtime with default configuration.
     #[must_use]
     pub fn new() -> Self {
-        let metrics_system = MetricsSystem::default();
+        let metrics_system = InternalTelemetrySystem::default();
         let config = ProcessorConfig::new("test_processor");
         let (rt, local_tasks) = setup_test_runtime();
 
@@ -182,12 +200,12 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
     }
 
     /// Returns the current receiver configuration.
-    pub fn config(&self) -> &ProcessorConfig {
+    pub const fn config(&self) -> &ProcessorConfig {
         &self.config
     }
 
     /// Returns a handle to the metrics registry.
-    pub fn metrics_registry(&self) -> MetricsRegistryHandle {
+    pub fn metrics_registry(&self) -> TelemetryRegistryHandle {
         self.metrics_system.registry()
     }
 
@@ -208,15 +226,15 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
             ProcessorWrapper::Local { .. } => {
                 let (sender, receiver) = otap_df_channel::mpsc::Channel::new(100);
                 (
-                    Sender::Local(LocalSender::MpscSender(sender)),
-                    Receiver::Local(LocalReceiver::MpscReceiver(receiver)),
+                    Sender::Local(LocalSender::mpsc(sender)),
+                    Receiver::Local(LocalReceiver::mpsc(receiver)),
                 )
             }
             ProcessorWrapper::Shared { .. } => {
                 let (sender, receiver) = tokio::sync::mpsc::channel(100);
                 (
-                    Sender::Shared(SharedSender::MpscSender(sender)),
-                    Receiver::Shared(SharedReceiver::MpscReceiver(receiver)),
+                    Sender::Shared(SharedSender::mpsc(sender)),
+                    Receiver::Shared(SharedReceiver::mpsc(receiver)),
                 )
             }
         };
@@ -224,7 +242,7 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
         // Set the output sender for the processor
         let _ = processor.set_pdata_sender(
             test_node(self.config().name.clone()),
-            "out".into(),
+            TEST_OUT_PORT_NAME.into(),
             pdata_sender,
         );
 
@@ -233,11 +251,11 @@ impl<PData: Clone + Debug + 'static> TestRuntime<PData> {
         let dummy_receiver = match &processor {
             ProcessorWrapper::Local { .. } => {
                 let (_, receiver) = otap_df_channel::mpsc::Channel::new(1);
-                Receiver::Local(LocalReceiver::MpscReceiver(receiver))
+                Receiver::Local(LocalReceiver::mpsc(receiver))
             }
             ProcessorWrapper::Shared { .. } => {
                 let (_, receiver) = tokio::sync::mpsc::channel(1);
-                Receiver::Shared(SharedReceiver::MpscReceiver(receiver))
+                Receiver::Shared(SharedReceiver::mpsc(receiver))
             }
         };
         let _ = processor.set_pdata_receiver(test_node(self.config().name.clone()), dummy_receiver);
@@ -262,13 +280,14 @@ impl<PData: Debug + 'static> TestPhase<PData> {
     {
         let metrics_reporter = self.metrics_system.reporter();
         // Spawn metrics collection loop
-        let metrics_collection_handle = self.rt.spawn(self.metrics_system.run_collection_loop());
+        let collector = self.metrics_system.collector();
+        let metrics_collection_handle = self.rt.spawn(collector.run_collection_loop());
 
         // The entire scenario is run to completion before the validation phase
         self.rt.block_on(async move {
             let mut runtime = self
                 .processor
-                .prepare_runtime(metrics_reporter)
+                .prepare_runtime(metrics_reporter, Interests::empty())
                 .await
                 .expect("Failed to prepare runtime");
 

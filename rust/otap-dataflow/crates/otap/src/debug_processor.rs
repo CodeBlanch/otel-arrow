@@ -26,6 +26,7 @@ use otap_df_engine::local::processor as local;
 use otap_df_engine::message::Message;
 use otap_df_engine::node::NodeId;
 use otap_df_engine::processor::ProcessorWrapper;
+use otap_df_engine::{ConsumerEffectHandlerExtension, MessageSourceLocalEffectHandlerExtension};
 use otap_df_engine::{Interests, ProducerEffectHandlerExtension};
 use otap_df_pdata::OtlpProtoBytes;
 use otap_df_pdata::proto::opentelemetry::{
@@ -50,7 +51,7 @@ mod predicate;
 mod sampling;
 
 /// The URN for the debug processor
-pub const DEBUG_PROCESSOR_URN: &str = "urn:otel:debug:processor";
+pub const DEBUG_PROCESSOR_URN: &str = "urn:otel:processor:debug";
 
 /// processor that outputs all data received to stdout
 pub struct DebugProcessor {
@@ -88,6 +89,8 @@ pub static DEBUG_PROCESSOR_FACTORY: otap_df_engine::ProcessorFactory<OtapPdata> 
                  proc_cfg: &ProcessorConfig| {
             create_debug_processor(pipeline_ctx, node, node_config, proc_cfg)
         },
+        wiring_contract: otap_df_engine::wiring_contract::WiringContract::UNRESTRICTED,
+        validate_config: otap_df_config::validation::validate_typed_config::<Config>,
     };
 
 impl DebugProcessor {
@@ -185,8 +188,8 @@ impl local::Processor<OtapPdata> for DebugProcessor {
         let active_signals = self.config.signals();
         let output_mode = self.config.output();
 
-        // if the outputmode is via outports then we can have multiple outports configured
-        // so there is no clear default we need to determine which portnames are for the main port
+        // if the output mode is via output ports then we can have multiple output ports configured
+        // so there is no clear default; we need to determine which port names are for the main port
         let main_ports: Option<Vec<PortName>> = if let OutputMode::Outports(ref ports) = output_mode
         {
             let connected_ports = effect_handler.connected_ports();
@@ -245,16 +248,48 @@ impl local::Processor<OtapPdata> for DebugProcessor {
                             .await?;
                     }
                     NodeControlMsg::Ack(ackmsg) => {
-                        let dd: DebugCallData = ackmsg.calldata.try_into()?;
-                        debug_output
-                            .output_message(&format!("ACK received after {:?}\n", dd.elapsed()))
-                            .await?;
+                        match DebugCallData::try_from(ackmsg.unwind.route.calldata.clone()) {
+                            Ok(dd) => {
+                                debug_output
+                                    .output_message(&format!(
+                                        "ACK received after {:?}\n",
+                                        dd.elapsed()
+                                    ))
+                                    .await?;
+                            }
+                            Err(e) => {
+                                debug_output
+                                    .output_message(&format!(
+                                        "ACK received with unrecognized calldata (len={}): {e}\n",
+                                        ackmsg.unwind.route.calldata.len()
+                                    ))
+                                    .await?;
+                            }
+                        }
+                        // Forward ACK upstream to continue the acknowledgment chain
+                        effect_handler.notify_ack(ackmsg).await?;
                     }
                     NodeControlMsg::Nack(nackmsg) => {
-                        let dd: DebugCallData = nackmsg.calldata.try_into()?;
-                        debug_output
-                            .output_message(&format!("NACK received after {:?}\n", dd.elapsed()))
-                            .await?;
+                        match DebugCallData::try_from(nackmsg.unwind.route.calldata.clone()) {
+                            Ok(dd) => {
+                                debug_output
+                                    .output_message(&format!(
+                                        "NACK received after {:?}\n",
+                                        dd.elapsed()
+                                    ))
+                                    .await?;
+                            }
+                            Err(e) => {
+                                debug_output
+                                    .output_message(&format!(
+                                        "NACK received with unrecognized calldata (len={}): {e}\n",
+                                        nackmsg.unwind.route.calldata.len()
+                                    ))
+                                    .await?;
+                            }
+                        }
+                        // Forward NACK upstream to continue the rejection chain
+                        effect_handler.notify_nack(nackmsg).await?;
                     }
                     NodeControlMsg::CollectTelemetry {
                         mut metrics_reporter,
@@ -274,14 +309,18 @@ impl local::Processor<OtapPdata> for DebugProcessor {
                         &mut pdata,
                     );
                 }
-                // ToDo: handle multiple out_ports differently here?
+                // ToDo: handle multiple outputs differently here?
                 if let Some(ports) = main_ports {
                     for port in ports {
                         // Note each clone has its own clone of the context.
-                        effect_handler.send_message_to(port, pdata.clone()).await?;
+                        effect_handler
+                            .send_message_with_source_node_to(port, pdata.clone())
+                            .await?;
                     }
                 } else {
-                    effect_handler.send_message(pdata.clone()).await?;
+                    effect_handler
+                        .send_message_with_source_node(pdata.clone())
+                        .await?;
                 }
 
                 let (_context, payload) = pdata.into_parts();
@@ -504,6 +543,7 @@ mod tests {
     use crate::debug_processor::sampling::SamplingConfig;
     use crate::debug_processor::{DEBUG_PROCESSOR_URN, DebugProcessor};
     use crate::pdata::OtapPdata;
+    use crate::testing::{next_ack, next_nack};
     use bytes::BytesMut;
     use otap_df_config::node::NodeUserConfig;
     use otap_df_engine::context::ControllerContext;
@@ -525,7 +565,7 @@ mod tests {
             span::SpanKind, status::StatusCode,
         },
     };
-    use otap_df_telemetry::registry::MetricsRegistryHandle;
+    use otap_df_telemetry::registry::TelemetryRegistryHandle;
     use prost::Message as _;
     use serde_json::Value;
     use std::collections::HashSet;
@@ -791,10 +831,10 @@ mod tests {
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
 
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
 
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
@@ -830,10 +870,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -868,10 +908,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -927,10 +967,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -986,10 +1026,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1104,10 +1144,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1142,10 +1182,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1190,10 +1230,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1238,10 +1278,10 @@ mod tests {
             sampling,
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1298,10 +1338,10 @@ mod tests {
         );
         let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
 
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
 
         let processor = ProcessorWrapper::local(
             DebugProcessor::new(config, pipeline_ctx),
@@ -1316,5 +1356,204 @@ mod tests {
             .validate(validation_procedure_zap_sampling(output_file.clone()));
 
         remove_file(output_file).expect("Failed to remove file");
+    }
+
+    /// Creates a debug processor test setup for ACK/NACK forwarding tests.
+    /// Returns (test_runtime, processor, pipeline_ctrl_tx, pipeline_ctrl_rx, output_file).
+    fn create_ack_nack_test_setup(
+        output_file: &str,
+    ) -> (
+        TestRuntime<OtapPdata>,
+        ProcessorWrapper<OtapPdata>,
+        otap_df_engine::control::PipelineCtrlMsgSender<OtapPdata>,
+        otap_df_engine::control::PipelineCtrlMsgReceiver<OtapPdata>,
+        String,
+    ) {
+        use otap_df_engine::control::pipeline_ctrl_msg_channel;
+
+        let test_runtime = TestRuntime::new();
+        let signals = HashSet::from([SignalActive::Logs]);
+        let config = Config::new(
+            Verbosity::Normal,
+            DisplayMode::Batch,
+            signals,
+            OutputMode::File(output_file.to_string()),
+            Vec::new(),
+            SamplingConfig::NoSampling,
+        );
+        let user_config = Arc::new(NodeUserConfig::new_processor_config(DEBUG_PROCESSOR_URN));
+
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
+        let pipeline_ctx =
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
+
+        let processor = ProcessorWrapper::local(
+            DebugProcessor::new(config, pipeline_ctx),
+            test_node(test_runtime.config().name.clone()),
+            user_config,
+            test_runtime.config(),
+        );
+
+        let (pipeline_ctrl_tx, pipeline_ctrl_rx) = pipeline_ctrl_msg_channel::<OtapPdata>(10);
+
+        (
+            test_runtime,
+            processor,
+            pipeline_ctrl_tx,
+            pipeline_ctrl_rx,
+            output_file.to_string(),
+        )
+    }
+
+    /// Creates test pdata without any payload (empty logs request).
+    fn create_empty_test_pdata() -> OtapPdata {
+        OtapPdata::new_default(OtlpProtoBytes::ExportLogsRequest(bytes::Bytes::from(vec![])).into())
+    }
+
+    /// Tests that the debug processor forwards ACK messages upstream via the effect handler.
+    #[test]
+    fn test_debug_processor_forwards_ack_upstream() {
+        use crate::testing::TestCallData;
+        use otap_df_engine::Interests;
+        use otap_df_engine::control::{AckMsg, PipelineControlMsg};
+
+        let (test_runtime, processor, pipeline_ctrl_tx, mut pipeline_ctrl_rx, output_file) =
+            create_ack_nack_test_setup("debug_output_ack_test.txt");
+
+        test_runtime
+            .set_processor(processor)
+            .run_test(move |mut ctx| {
+                Box::pin(async move {
+                    ctx.set_pipeline_ctrl_sender(pipeline_ctrl_tx);
+
+                    let test_calldata = TestCallData::default();
+                    let upstream_node_id = 42usize;
+                    let pdata = create_empty_test_pdata().test_subscribe_to(
+                        Interests::ACKS,
+                        test_calldata.clone().into(),
+                        upstream_node_id,
+                    );
+
+                    ctx.process(Message::ack_ctrl_msg(AckMsg::new(pdata)))
+                        .await
+                        .expect("Processor failed on ACK");
+
+                    match pipeline_ctrl_rx.try_recv() {
+                        Ok(PipelineControlMsg::DeliverAck { ack }) => {
+                            let (node_id, ack) = next_ack(ack).expect("expected ack subscriber");
+                            assert_eq!(
+                                node_id, upstream_node_id,
+                                "ACK should route to subscriber's node_id"
+                            );
+                            let received_calldata: TestCallData =
+                                ack.unwind.route.calldata.try_into().unwrap();
+                            assert_eq!(
+                                received_calldata, test_calldata,
+                                "ACK should contain subscriber's calldata"
+                            );
+                        }
+                        Ok(other) => panic!("Expected DeliverAck, got: {other:?}"),
+                        Err(e) => panic!("Expected ACK to be forwarded upstream: {e:?}"),
+                    }
+                })
+            })
+            .validate(|_| Box::pin(async {}));
+
+        let _ = remove_file(output_file);
+    }
+
+    /// Tests that the debug processor forwards NACK messages upstream via the effect handler.
+    #[test]
+    fn test_debug_processor_forwards_nack_upstream() {
+        use crate::testing::TestCallData;
+        use otap_df_engine::Interests;
+        use otap_df_engine::control::{NackMsg, PipelineControlMsg};
+
+        let (test_runtime, processor, pipeline_ctrl_tx, mut pipeline_ctrl_rx, output_file) =
+            create_ack_nack_test_setup("debug_output_nack_test.txt");
+
+        test_runtime
+            .set_processor(processor)
+            .run_test(move |mut ctx| {
+                Box::pin(async move {
+                    ctx.set_pipeline_ctrl_sender(pipeline_ctrl_tx);
+
+                    let test_calldata = TestCallData::default();
+                    let upstream_node_id = 99usize;
+                    let nack_reason = "downstream unavailable";
+                    let pdata = create_empty_test_pdata().test_subscribe_to(
+                        Interests::NACKS,
+                        test_calldata.clone().into(),
+                        upstream_node_id,
+                    );
+
+                    ctx.process(Message::nack_ctrl_msg(NackMsg::new(nack_reason, pdata)))
+                        .await
+                        .expect("Processor failed on NACK");
+
+                    match pipeline_ctrl_rx.try_recv() {
+                        Ok(PipelineControlMsg::DeliverNack { nack }) => {
+                            let (node_id, nack) =
+                                next_nack(nack).expect("expected nack subscriber");
+                            assert_eq!(
+                                node_id, upstream_node_id,
+                                "NACK should route to subscriber's node_id"
+                            );
+                            let received_calldata: TestCallData =
+                                nack.unwind.route.calldata.try_into().unwrap();
+                            assert_eq!(
+                                received_calldata, test_calldata,
+                                "NACK should contain subscriber's calldata"
+                            );
+                            assert_eq!(nack.reason, nack_reason, "NACK reason should be preserved");
+                        }
+                        Ok(other) => panic!("Expected DeliverNack, got: {other:?}"),
+                        Err(e) => panic!("Expected NACK to be forwarded upstream: {e:?}"),
+                    }
+                })
+            })
+            .validate(|_| Box::pin(async {}));
+
+        let _ = remove_file(output_file);
+    }
+
+    /// Tests that ACK/NACK messages without subscribers are handled gracefully.
+    #[test]
+    fn test_debug_processor_ack_nack_no_subscriber() {
+        use otap_df_engine::control::{AckMsg, NackMsg};
+
+        let (test_runtime, processor, pipeline_ctrl_tx, mut pipeline_ctrl_rx, output_file) =
+            create_ack_nack_test_setup("debug_output_no_subscriber_test.txt");
+
+        test_runtime
+            .set_processor(processor)
+            .run_test(move |mut ctx| {
+                Box::pin(async move {
+                    ctx.set_pipeline_ctrl_sender(pipeline_ctrl_tx);
+
+                    let pdata_no_sub = create_empty_test_pdata();
+
+                    ctx.process(Message::ack_ctrl_msg(AckMsg::new(pdata_no_sub.clone())))
+                        .await
+                        .expect("Processor should handle ACK with no subscriber");
+
+                    ctx.process(Message::nack_ctrl_msg(NackMsg::new(
+                        "some reason",
+                        pdata_no_sub,
+                    )))
+                    .await
+                    .expect("Processor should handle NACK with no subscriber");
+
+                    // Verify no messages were forwarded (channel should be empty)
+                    assert!(
+                        pipeline_ctrl_rx.try_recv().is_err(),
+                        "Expected no forwarded messages when there are no subscribers"
+                    );
+                })
+            })
+            .validate(|_| Box::pin(async {}));
+
+        let _ = remove_file(output_file);
     }
 }

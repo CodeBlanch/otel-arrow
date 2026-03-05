@@ -3,12 +3,12 @@
 
 //! Observed pipeline status and aggregation logic per core.
 
-use crate::CoreId;
 use crate::conditions::{
     Condition, ConditionKind, ConditionReason, ConditionState, ConditionStatus,
 };
 use crate::phase::PipelinePhase;
 use crate::pipeline_rt_status::PipelineRuntimeStatus;
+use otap_df_config::CoreId;
 use otap_df_config::health::{HealthPolicy, PhaseKind, Quorum};
 use serde::Serialize;
 use serde::ser::SerializeStruct;
@@ -35,7 +35,7 @@ impl PipelineStatus {
 
     /// Returns the current per-core status map.
     #[must_use]
-    pub fn per_core(&self) -> &HashMap<CoreId, PipelineRuntimeStatus> {
+    pub const fn per_core(&self) -> &HashMap<CoreId, PipelineRuntimeStatus> {
         &self.cores
     }
 
@@ -52,6 +52,16 @@ impl PipelineStatus {
             .values()
             .filter(|c| matches!(c.phase, PipelinePhase::Running))
             .count()
+    }
+
+    #[must_use]
+    /// Returns true if all cores have reached a terminal state (Stopped, Deleted, Failed, or Rejected).
+    /// Returns false if there are no cores tracked or if any core is still active.
+    pub fn is_terminated(&self) -> bool {
+        if self.cores.is_empty() {
+            return false;
+        }
+        self.cores.values().all(|c| c.phase.is_terminal())
     }
 
     #[must_use]
@@ -139,7 +149,8 @@ impl PipelineStatus {
             status: ConditionStatus::True,
             reason: Some(ConditionReason::ConfigValid),
             message: Some(
-                "Pipeline configuration validated and resources quota is not exceeded.".to_string(),
+                "Pipeline configuration validated and resource policy constraints are satisfied."
+                    .to_string(),
             ),
             last_transition_time: latest_true_time,
         }

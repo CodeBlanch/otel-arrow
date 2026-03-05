@@ -135,13 +135,12 @@ use crate::context::PipelineContext;
 use cpu_time::ThreadTime;
 use otap_df_telemetry::instrument::{Counter, Gauge, ObserveCounter, ObserveUpDownCounter};
 use otap_df_telemetry::metrics::MetricSet;
+use otap_df_telemetry::registry::TelemetryRegistryHandle;
 use otap_df_telemetry_macros::metric_set;
 use std::time::Instant;
 
-#[cfg(not(windows))]
-use tikv_jemalloc_ctl::thread;
-#[cfg(not(windows))]
-use tikv_jemalloc_ctl::thread::ThreadLocal;
+#[cfg(all(not(windows), feature = "jemalloc"))]
+use tikv_jemalloc_ctl::{thread, thread::ThreadLocal};
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 use nix::sys::resource::{UsageWho, getrusage};
@@ -393,13 +392,16 @@ pub struct TokioRuntimeMetrics {
 pub(crate) struct PipelineMetricsMonitor {
     start_time: Instant,
 
+    #[cfg(all(not(windows), feature = "jemalloc"))]
     jemalloc_supported: bool,
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), feature = "jemalloc"))]
     allocated: Option<ThreadLocal<u64>>,
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), feature = "jemalloc"))]
     deallocated: Option<ThreadLocal<u64>>,
+    #[cfg(all(not(windows), feature = "jemalloc"))]
     last_allocated: u64,
+    #[cfg(all(not(windows), feature = "jemalloc"))]
     last_deallocated: u64,
 
     rusage_thread_supported: bool,
@@ -411,13 +413,14 @@ pub(crate) struct PipelineMetricsMonitor {
     metrics: MetricSet<PipelineMetrics>,
     tokio_rt: Option<tokio::runtime::RuntimeMetrics>,
     tokio_metrics: MetricSet<TokioRuntimeMetrics>,
+    registry: TelemetryRegistryHandle,
 }
 
 impl PipelineMetricsMonitor {
     pub(crate) fn new(pipeline_ctx: PipelineContext) -> Self {
         let now = Instant::now();
 
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), feature = "jemalloc"))]
         let (jemalloc_supported, allocated, deallocated, last_allocated, last_deallocated) = {
             // Try to initialize jemalloc thread-local stats. If the global allocator is not
             // jemalloc, these calls will fail and memory-related metrics will remain unchanged.
@@ -448,43 +451,53 @@ impl PipelineMetricsMonitor {
             }
         };
 
-        #[cfg(windows)]
-        let (jemalloc_supported, last_allocated, last_deallocated) = (false, 0, 0);
-
         let rusage_thread_supported = Self::init_rusage_baseline();
         let tokio_rt = tokio::runtime::Handle::try_current()
             .ok()
             .map(|handle| handle.metrics());
 
+        let entity_key = crate::entity_context::pipeline_entity_key().expect(
+            "pipeline entity key not set; ensure pipeline entity is registered and instrumented",
+        );
+        let metrics = pipeline_ctx.register_metric_set_for_entity::<PipelineMetrics>(entity_key);
+        let tokio_metrics =
+            pipeline_ctx.register_metric_set_for_entity::<TokioRuntimeMetrics>(entity_key);
+        let registry = pipeline_ctx.metrics_registry();
+
         Self {
             start_time: now,
+            #[cfg(all(not(windows), feature = "jemalloc"))]
             jemalloc_supported,
-            #[cfg(not(windows))]
+            #[cfg(all(not(windows), feature = "jemalloc"))]
             allocated,
-            #[cfg(not(windows))]
+            #[cfg(all(not(windows), feature = "jemalloc"))]
             deallocated,
+            #[cfg(all(not(windows), feature = "jemalloc"))]
             last_allocated,
+            #[cfg(all(not(windows), feature = "jemalloc"))]
             last_deallocated,
             rusage_thread_supported,
             wall_start: now,
             cpu_start: ThreadTime::now(),
-            metrics: pipeline_ctx.register_metrics::<PipelineMetrics>(),
+            metrics,
             tokio_rt,
-            tokio_metrics: pipeline_ctx.register_metrics::<TokioRuntimeMetrics>(),
+            tokio_metrics,
+            registry,
         }
     }
 
     /// Returns a mutable reference to the metrics struct.
-    pub fn metrics_mut(&mut self) -> &mut MetricSet<PipelineMetrics> {
+    pub const fn metrics_mut(&mut self) -> &mut MetricSet<PipelineMetrics> {
         &mut self.metrics
     }
 
     /// Returns a mutable reference to the Tokio runtime metrics struct.
-    pub fn tokio_metrics_mut(&mut self) -> &mut MetricSet<TokioRuntimeMetrics> {
+    pub const fn tokio_metrics_mut(&mut self) -> &mut MetricSet<TokioRuntimeMetrics> {
         &mut self.tokio_metrics
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // Used by jemalloc_tests on non-Windows platforms
     pub fn update_metrics(&mut self) {
         self.update_tokio_metrics();
         self.update_pipeline_metrics();
@@ -496,7 +509,7 @@ impl PipelineMetricsMonitor {
     /// signals and jemalloc-derived heap metrics.
     pub fn update_pipeline_metrics(&mut self) {
         // === Update thread memory allocation metrics (jemalloc only) ===
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), feature = "jemalloc"))]
         if self.jemalloc_supported {
             if let (Some(allocated), Some(deallocated)) =
                 (self.allocated.as_ref(), self.deallocated.as_ref())
@@ -743,14 +756,29 @@ impl PipelineMetricsMonitor {
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
-    fn update_rusage_metrics(&mut self) {}
+    fn update_rusage_metrics(&mut self) {
+        // Field exists but rusage metrics are not supported on this platform.
+        // Silence unused field warning by reading here and setting to _.
+        let _ = self.rusage_thread_supported;
+    }
+}
+
+impl Drop for PipelineMetricsMonitor {
+    fn drop(&mut self) {
+        let _ = self
+            .registry
+            .unregister_metric_set(self.metrics.metric_set_key());
+        let _ = self
+            .registry
+            .unregister_metric_set(self.tokio_metrics.metric_set_key());
+    }
 }
 
 #[cfg(all(test, not(windows), feature = "jemalloc-testing"))]
 mod jemalloc_tests {
     use super::*;
     use crate::context::ControllerContext;
-    use otap_df_telemetry::registry::MetricsRegistryHandle;
+    use otap_df_telemetry::registry::TelemetryRegistryHandle;
     use std::hint::black_box;
     use std::time::{Duration, Instant};
 
@@ -764,9 +792,14 @@ mod jemalloc_tests {
 
     #[test]
     fn pipeline_metrics_monitor_black_box_updates_jemalloc() {
-        let registry = MetricsRegistryHandle::new();
-        let controller = ControllerContext::new(registry);
-        let pipeline_ctx = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+        let telemetry_registry = TelemetryRegistryHandle::new();
+        let controller = ControllerContext::new(telemetry_registry);
+        let pipeline_ctx = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
+        let pipeline_entity_key = pipeline_ctx.register_pipeline_entity();
+        let _pipeline_entity_guard = crate::entity_context::set_pipeline_entity_key(
+            pipeline_ctx.metrics_registry(),
+            pipeline_entity_key,
+        );
 
         let mut monitor = PipelineMetricsMonitor::new(pipeline_ctx);
 
@@ -824,15 +857,20 @@ mod jemalloc_tests {
 mod non_jemalloc_tests {
     use super::*;
     use crate::context::ControllerContext;
-    use otap_df_telemetry::registry::MetricsRegistryHandle;
+    use otap_df_telemetry::registry::TelemetryRegistryHandle;
     use std::hint::black_box;
     use std::time::{Duration, Instant};
 
     #[test]
     fn pipeline_metrics_monitor_does_not_update_memory_without_jemalloc() {
-        let registry = MetricsRegistryHandle::new();
-        let controller = ControllerContext::new(registry);
-        let pipeline_ctx = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+        let telemetry_registry = TelemetryRegistryHandle::new();
+        let controller = ControllerContext::new(telemetry_registry);
+        let pipeline_ctx = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
+        let pipeline_entity_key = pipeline_ctx.register_pipeline_entity();
+        let _pipeline_entity_guard = crate::entity_context::set_pipeline_entity_key(
+            pipeline_ctx.metrics_registry(),
+            pipeline_entity_key,
+        );
 
         let mut monitor = PipelineMetricsMonitor::new(pipeline_ctx);
 

@@ -16,6 +16,7 @@ use linkme::distributed_slice;
 use otap_df_config::SignalType;
 use otap_df_config::error::Error as ConfigError;
 use otap_df_config::node::NodeUserConfig;
+use otap_df_engine::MessageSourceLocalEffectHandlerExtension;
 use otap_df_engine::config::ProcessorConfig;
 use otap_df_engine::context::PipelineContext;
 use otap_df_engine::control::NodeControlMsg;
@@ -32,7 +33,7 @@ use std::sync::Arc;
 mod config;
 mod metrics;
 /// The URN for the filter processor
-pub const FILTER_PROCESSOR_URN: &str = "urn:otel:filter:processor";
+pub const FILTER_PROCESSOR_URN: &str = "urn:otel:processor:filter";
 
 /// processor that outputs all data received to stdout
 pub struct FilterProcessor {
@@ -69,6 +70,8 @@ pub static FILTER_PROCESSOR_FACTORY: otap_df_engine::ProcessorFactory<OtapPdata>
                  proc_cfg: &ProcessorConfig| {
             create_filter_processor(pipeline_ctx, node, node_config, proc_cfg)
         },
+        wiring_contract: otap_df_engine::wiring_contract::WiringContract::UNRESTRICTED,
+        validate_config: otap_df_config::validation::validate_typed_config::<Config>,
     };
 
 impl FilterProcessor {
@@ -113,7 +116,8 @@ impl local::Processor<OtapPdata> for FilterProcessor {
                 // convert to arrow records
                 let (context, payload) = pdata.into_parts();
 
-                let arrow_records: OtapArrowRecords = payload.try_into()?;
+                let mut arrow_records: OtapArrowRecords = payload.try_into()?;
+                arrow_records.decode_transport_optimized_ids()?;
 
                 let filtered_arrow_records: OtapArrowRecords = match signal {
                     SignalType::Metrics => {
@@ -169,7 +173,10 @@ impl local::Processor<OtapPdata> for FilterProcessor {
                     }
                 };
                 effect_handler
-                    .send_message(OtapPdata::new(context, filtered_arrow_records.into()))
+                    .send_message_with_source_node(OtapPdata::new(
+                        context,
+                        filtered_arrow_records.into(),
+                    ))
                     .await?;
                 Ok(())
             }
@@ -204,7 +211,7 @@ mod tests {
             status::StatusCode,
         },
     };
-    use otap_df_telemetry::registry::MetricsRegistryHandle;
+    use otap_df_telemetry::registry::TelemetryRegistryHandle;
     use prost::Message as _;
     use std::future::Future;
     use std::pin::Pin;
@@ -748,10 +755,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -872,10 +879,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -973,10 +980,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1082,10 +1089,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1231,10 +1238,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1345,10 +1352,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),
@@ -1543,10 +1550,10 @@ mod tests {
 
         let config = Config::new(log_filter, trace_filter);
         let user_config = Arc::new(NodeUserConfig::new_processor_config(FILTER_PROCESSOR_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle);
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle);
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let processor = ProcessorWrapper::local(
             FilterProcessor::new(config, pipeline_ctx),
             test_node(test_runtime.config().name.clone()),

@@ -4,8 +4,6 @@
 //! This module defines the top-level API for executing data transformation pipelines on
 //! streaming telemetry data in the OTAP columnar format.
 
-use std::sync::Arc;
-
 use arrow::compute::concat_batches;
 use async_trait::async_trait;
 use data_engine_expressions::PipelineExpression;
@@ -18,16 +16,24 @@ use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 use otap_df_pdata::OtapArrowRecords;
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::pipeline::planner::PipelinePlanner;
+use crate::pipeline::state::ExecutionState;
 use crate::table::RecordBatchPartitionStream;
 
+mod assign;
 mod attributes;
 mod conditional;
+mod expr;
 mod filter;
 mod functions;
 mod planner;
+mod project;
+
+pub mod routing;
+pub mod state;
 
 /// A stage in the pipeline.
 ///
@@ -55,6 +61,7 @@ pub trait PipelineStage {
         session_context: &SessionContext,
         config_options: &ConfigOptions,
         task_context: Arc<TaskContext>,
+        exec_options: &mut ExecutionState,
     ) -> Result<OtapArrowRecords>;
 }
 
@@ -83,6 +90,7 @@ impl PipelineStage for DataFusionPipelineStage {
         _session_context: &SessionContext,
         _config_options: &ConfigOptions,
         task_context: Arc<TaskContext>,
+        _execution_options: &mut ExecutionState,
     ) -> Result<OtapArrowRecords> {
         let rb = match otap_batch.get(self.payload_type) {
             Some(rb) => rb,
@@ -190,7 +198,7 @@ pub struct Pipeline {
 impl Pipeline {
     /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`]
     #[must_use]
-    pub fn new(pipeline_definition: PipelineExpression) -> Self {
+    pub const fn new(pipeline_definition: PipelineExpression) -> Self {
         Self {
             pipeline_definition,
             planned_pipeline: None,
@@ -199,6 +207,18 @@ impl Pipeline {
 
     /// Execute the pipeline on a batch of telemetry data.
     ///
+    /// # Arguments
+    /// - `otap_batch`: The input telemetry data to process
+    ///
+    /// # Returns
+    /// The transformed telemetry data after all stages have executed
+    pub async fn execute(&mut self, otap_batch: OtapArrowRecords) -> Result<OtapArrowRecords> {
+        let mut exec_state = ExecutionState::default();
+        self.execute_with_state(otap_batch, &mut exec_state).await
+    }
+
+    /// Execute the pipeline on a batch of telemetry data, using the provided execution state.
+    ///
     /// Any query planning happens during the first call to execute, including setting up any
     /// DataFusion SessionContext, TaskContext, etc. Subsequent calls will not have to redo
     /// the full planning, although individual stages may do light re-plannings to adapt to
@@ -206,10 +226,15 @@ impl Pipeline {
     ///
     /// # Arguments
     /// - `otap_batch`: The input telemetry data to process
+    /// - `exec_state`: The execution state to use for the pipeline execution
     ///
     /// # Returns
     /// The transformed telemetry data after all stages have executed
-    pub async fn execute(&mut self, mut otap_batch: OtapArrowRecords) -> Result<OtapArrowRecords> {
+    pub async fn execute_with_state(
+        &mut self,
+        mut otap_batch: OtapArrowRecords,
+        exec_state: &mut ExecutionState,
+    ) -> Result<OtapArrowRecords> {
         // lazily plan the pipeline if have not already done so
         if self.planned_pipeline.is_none() {
             let session_ctx = Self::create_session_context();
@@ -231,6 +256,7 @@ impl Pipeline {
                     &pipeline.session_context,
                     pipeline.config_options.as_ref(),
                     pipeline.task_context.clone(),
+                    exec_state,
                 )
                 .await?;
         }
@@ -261,80 +287,19 @@ mod test {
 
     use data_engine_expressions::PipelineExpression;
 
-    use data_engine_kql_parser::{KqlParser, Parser};
+    use data_engine_parser_abstractions::Parser;
     use datafusion::catalog::streaming::StreamingTable;
     use datafusion::logical_expr::{col, lit};
     use otap_df_pdata::proto::OtlpProtoMessage;
     use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
-    use otap_df_pdata::proto::opentelemetry::metrics::v1::{
-        Metric, MetricsData, ResourceMetrics, ScopeMetrics,
-    };
-    use otap_df_pdata::proto::opentelemetry::trace::v1::{
-        ResourceSpans, ScopeSpans, Span, TracesData,
-    };
-
-    use otap_df_pdata::proto::opentelemetry::logs::v1::{
-        LogRecord, LogsData, ResourceLogs, ScopeLogs,
-    };
-    use otap_df_pdata::testing::round_trip::otlp_to_otap;
+    use otap_df_pdata::proto::opentelemetry::logs::v1::{LogRecord, LogsData};
+    use otap_df_pdata::proto::opentelemetry::metrics::v1::MetricsData;
+    use otap_df_pdata::proto::opentelemetry::trace::v1::TracesData;
+    use otap_df_pdata::testing::round_trip::{otlp_to_otap, to_otap_logs};
     use otap_df_pdata::{OtapPayload, OtlpProtoBytes};
     use prost::Message;
 
     use super::*;
-
-    /// helper function for converting [`LogRecord`]s to [`LogsData`]
-    pub fn to_logs_data(log_records: Vec<LogRecord>) -> LogsData {
-        LogsData {
-            resource_logs: vec![ResourceLogs {
-                scope_logs: vec![ScopeLogs {
-                    log_records,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        }
-    }
-
-    /// helper function for converting [`Metric`]s to [`MetricsData`]
-    pub fn to_metrics_data(metrics: Vec<Metric>) -> MetricsData {
-        MetricsData {
-            resource_metrics: vec![ResourceMetrics {
-                scope_metrics: vec![ScopeMetrics {
-                    metrics,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        }
-    }
-
-    /// helper function for converting [`Span`]s to [`TracesData`]
-    pub fn to_traces_data(spans: Vec<Span>) -> TracesData {
-        TracesData {
-            resource_spans: vec![ResourceSpans {
-                scope_spans: vec![ScopeSpans {
-                    spans,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        }
-    }
-
-    /// helper function for converting OTLP logs to OTAP batch
-    pub fn to_otap_logs(log_records: Vec<LogRecord>) -> OtapArrowRecords {
-        otlp_to_otap(&OtlpProtoMessage::Logs(to_logs_data(log_records)))
-    }
-
-    /// helper function for converting OTLP spans to OTAP batch
-    pub fn to_otap_traces(spans: Vec<Span>) -> OtapArrowRecords {
-        otlp_to_otap(&OtlpProtoMessage::Traces(to_traces_data(spans)))
-    }
-
-    /// helper function for converting OTLP metrics to OTAP batch
-    pub fn to_otap_metrics(metrics: Vec<Metric>) -> OtapArrowRecords {
-        otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)))
-    }
 
     /// helper function for converting [`OtapArrowRecords`] to [`LogsData`]
     pub fn otap_to_logs_data(otap_batch: OtapArrowRecords) -> LogsData {
@@ -357,8 +322,8 @@ mod test {
         MetricsData::decode(otlp_bytes.as_bytes()).unwrap()
     }
 
-    pub async fn exec_logs_pipeline(kql_expr: &str, logs_data: LogsData) -> LogsData {
-        let parser_result = KqlParser::parse(kql_expr).unwrap();
+    pub async fn exec_logs_pipeline<P: Parser>(query: &str, logs_data: LogsData) -> LogsData {
+        let parser_result = P::parse(query).unwrap();
         exec_logs_pipeline_expr(parser_result.pipeline, logs_data).await
     }
 

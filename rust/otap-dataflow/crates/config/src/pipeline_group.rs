@@ -5,23 +5,28 @@
 
 use crate::error::Error;
 use crate::pipeline::PipelineConfig;
-use crate::{PipelineGroupId, PipelineId};
+use crate::policy::Policies;
+use crate::topic::TopicSpec;
+use crate::{PipelineGroupId, PipelineId, TopicName};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt::Display;
 
 /// Configuration for a single pipeline group.
-/// Contains group-specific settings and all its pipelines.
+/// Contains group-specific policies and all its pipelines.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineGroupConfig {
+    /// Optional policy set for this pipeline group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Policies>,
+
+    /// Group-local topic declarations visible only to pipelines in this group.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topics: HashMap<TopicName, TopicSpec>,
+
     /// All pipelines belonging to this pipeline group, keyed by pipeline ID.
     pub pipelines: HashMap<PipelineId, PipelineConfig>,
-
-    /// Quota for the pipeline group.
-    #[serde(default)]
-    pub quota: Quota,
 }
 
 impl PipelineGroupConfig {
@@ -29,14 +34,10 @@ impl PipelineGroupConfig {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            policies: None,
+            topics: HashMap::new(),
             pipelines: HashMap::new(),
-            quota: Default::default(),
         }
-    }
-
-    /// Sets the quota for the pipeline group.
-    pub fn set_quota(&mut self, quota: Quota) {
-        self.quota = quota;
     }
 
     /// Adds a pipeline to the pipeline group.
@@ -56,7 +57,36 @@ impl PipelineGroupConfig {
     pub fn validate(&self, pipeline_group_id: &PipelineGroupId) -> Result<(), Error> {
         let mut errors = Vec::new();
 
+        if let Some(policies) = &self.policies {
+            let path = format!("groups.{pipeline_group_id}.policies");
+            errors.extend(
+                policies
+                    .validation_errors(&path)
+                    .into_iter()
+                    .map(|error| Error::InvalidUserConfig { error }),
+            );
+        }
+
+        for (topic_name, topic) in &self.topics {
+            let path = format!("groups.{pipeline_group_id}.topics.{topic_name}");
+            errors.extend(
+                topic
+                    .validation_errors(&path)
+                    .into_iter()
+                    .map(|error| Error::InvalidUserConfig { error }),
+            );
+        }
+
         for (pipeline_id, pipeline) in &self.pipelines {
+            if let Some(policies) = pipeline.policies() {
+                let path = format!("groups.{pipeline_group_id}.pipelines.{pipeline_id}.policies");
+                errors.extend(
+                    policies
+                        .validation_errors(&path)
+                        .into_iter()
+                        .map(|error| Error::InvalidUserConfig { error }),
+                );
+            }
             if let Err(e) = pipeline.validate(pipeline_group_id, pipeline_id) {
                 errors.push(e);
             }
@@ -72,111 +102,5 @@ impl PipelineGroupConfig {
 impl Default for PipelineGroupConfig {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Pipeline group quota configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Quota {
-    /// CPU core allocation strategy for this pipeline group.
-    #[serde(default)]
-    pub core_allocation: CoreAllocation,
-}
-
-/// Defines how CPU cores should be allocated for pipeline execution.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CoreAllocation {
-    /// Use all available CPU cores.
-    #[default]
-    AllCores,
-    /// Use a specific number of CPU cores (starting from core 0).
-    /// If the requested number exceeds available cores, use all available cores.
-    CoreCount {
-        /// Number of cores to use. If 0, uses all available cores.
-        count: usize,
-    },
-    /// Defines a set of CPU cores should be allocated for pipeline execution.
-    CoreSet {
-        /// Core set defined as a set of ranges.
-        set: Vec<CoreRange>,
-    },
-}
-
-impl Display for CoreAllocation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CoreAllocation::AllCores => write!(f, "*"),
-            CoreAllocation::CoreCount { count } => write!(f, "[{count} cores]"),
-            CoreAllocation::CoreSet { set } => {
-                let mut first = true;
-                for item in set {
-                    if !first {
-                        write!(f, ",")?
-                    }
-                    write!(f, "{item}")?;
-                    first = false
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Defines a range of CPU cores should be allocated for pipeline execution.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub struct CoreRange {
-    /// Start core ID (inclusive).
-    pub start: usize,
-    /// End core ID (inclusive).
-    pub end: usize,
-}
-
-impl Display for CoreRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.start == self.end {
-            write!(f, "{}", self.start)
-        } else {
-            write!(f, "{}-{}", self.start, self.end)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_core_allocation_display_all_cores() {
-        let allocation = CoreAllocation::AllCores;
-        assert_eq!(allocation.to_string(), "*");
-    }
-
-    #[test]
-    fn test_core_allocation_display_core_count() {
-        let allocation = CoreAllocation::CoreCount { count: 4 };
-        assert_eq!(allocation.to_string(), "[4 cores]");
-    }
-
-    #[test]
-    fn test_core_allocation_display_core_set_single_range() {
-        let allocation = CoreAllocation::CoreSet {
-            set: vec![CoreRange { start: 0, end: 3 }],
-        };
-        assert_eq!(allocation.to_string(), "0-3");
-    }
-
-    #[test]
-    fn test_core_allocation_display_core_set_multiple_ranges() {
-        let allocation = CoreAllocation::CoreSet {
-            set: vec![
-                CoreRange { start: 0, end: 3 },
-                CoreRange { start: 8, end: 11 },
-                CoreRange { start: 16, end: 16 },
-            ],
-        };
-        assert_eq!(allocation.to_string(), "0-3,8-11,16");
     }
 }

@@ -7,18 +7,18 @@ pydantic==2.12.5
 
 # Docker management
 docker==7.1.0
-psutil==7.1.3
+psutil==7.2.2
 
 # Kubernetes management
-kubernetes==33.1.0
+kubernetes==35.0.0
 
 # Other dependencies
-duckdb==1.4.3
+duckdb==1.4.4
 jinja2==3.1.6
 opentelemetry-exporter-otlp==1.39.1
 opentelemetry-sdk==1.39.1
 opentelemetry-proto==1.39.1
-prometheus_client==0.23.1
+prometheus_client==0.24.1
 pandas==2.3.3
-pyarrow==21.0.0
+pyarrow==23.0.1
 tabulate==0.9.0

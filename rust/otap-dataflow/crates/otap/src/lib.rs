@@ -21,6 +21,8 @@ pub mod otlp_receiver;
 /// Implementation of OTLP exporter that implements the exporter trait
 pub mod otlp_exporter;
 
+pub mod otlp_http_exporter;
+
 /// Batch processor
 pub mod batch_processor;
 
@@ -49,12 +51,11 @@ pub mod filter_processor;
 /// Implementation of a noop exporter that acts as a exporter placeholder
 pub mod noop_exporter;
 
+/// Fan-out processor to clone data to multiple downstream outputs.
+pub mod fanout_processor;
+
 /// An error-exporter returns a static error.
 pub mod error_exporter;
-
-/// Experimental exporters
-#[cfg(feature = "experimental-exporters")]
-pub mod experimental;
 
 /// testing utilities
 #[cfg(test)]
@@ -65,11 +66,14 @@ mod otlp_mock;
 #[cfg(test)]
 mod fixtures;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
 /// Signal-type router processor (OTAP-based)
 pub mod signal_type_router;
+
+/// Content-based router processor (routes by resource attribute value)
+pub mod content_router;
 
 /// Attributes processor (OTAP-based)
 pub mod attributes_processor;
@@ -81,11 +85,26 @@ pub mod compression;
 
 pub mod metrics;
 
+pub(crate) mod socket_options;
+
+/// Shared concurrency limiting across protocol servers
+pub(crate) mod shared_concurrency;
+
 /// gRPC service implementation
 pub mod otlp_grpc;
 
+/// OTLP/HTTP receiver support.
+pub mod otlp_http;
+
 /// Cloud specific auth utilities
 pub mod cloud_auth;
+
+/// Internal telemetry receiver
+pub mod internal_telemetry_receiver;
+
+pub mod topic_receiver;
+
+pub mod topic_exporter;
 
 /// Object storage utilities including integrations for different cloud
 /// providers
@@ -93,6 +112,12 @@ pub mod object_store;
 /// TLS utilities
 #[cfg(feature = "experimental-tls")]
 pub mod tls_utils;
+
+/// Console exporter similar using built-in OTLP-bytes formatting.
+pub mod console_exporter;
+
+/// Durable buffer processor for crash-resilient buffering via Quiver
+pub mod durable_buffer_processor;
 
 /// Factory for OTAP-based pipeline
 #[pipeline_factory(OTAP, OtapPdata)]

@@ -3,6 +3,7 @@
 
 //! HTTP server for exposing admin endpoints.
 
+mod dashboard;
 pub mod error;
 mod health;
 mod pipeline;
@@ -20,7 +21,8 @@ use crate::error::Error;
 use otap_df_config::engine::HttpAdminSettings;
 use otap_df_engine::control::PipelineAdminSender;
 use otap_df_state::store::ObservedStateHandle;
-use otap_df_telemetry::registry::MetricsRegistryHandle;
+use otap_df_telemetry::registry::TelemetryRegistryHandle;
+use otap_df_telemetry::{otel_info, otel_warn};
 
 /// Shared state for the HTTP admin server.
 #[derive(Clone)]
@@ -29,7 +31,7 @@ struct AppState {
     observed_state_store: ObservedStateHandle,
 
     /// The metrics registry for querying current metrics.
-    metrics_registry: MetricsRegistryHandle,
+    metrics_registry: TelemetryRegistryHandle,
 
     /// The control message senders for controlling pipelines.
     ctrl_msg_senders: Vec<Arc<dyn PipelineAdminSender>>,
@@ -40,7 +42,7 @@ pub async fn run(
     config: HttpAdminSettings,
     observed_store: ObservedStateHandle,
     ctrl_msg_senders: Vec<Arc<dyn PipelineAdminSender>>,
-    metrics_registry: MetricsRegistryHandle,
+    metrics_registry: TelemetryRegistryHandle,
     cancel: CancellationToken,
 ) -> Result<(), Error> {
     let app_state = AppState {
@@ -54,26 +56,47 @@ pub async fn run(
         .merge(telemetry::routes())
         .merge(pipeline_group::routes())
         .merge(pipeline::routes())
+        .merge(dashboard::routes())
         .layer(ServiceBuilder::new())
         .with_state(app_state);
 
     // Parse the configured bind address.
-    let addr =
-        config
-            .bind_address
-            .parse::<SocketAddr>()
-            .map_err(|e| Error::InvalidBindAddress {
-                bind_address: config.bind_address.clone(),
-                details: format!("{e}"),
-            })?;
+    let addr = config.bind_address.parse::<SocketAddr>().map_err(|e| {
+        let details = format!("{e}");
+        otel_warn!(
+            "endpoint.parse_address_failed",
+            bind_address = config.bind_address.as_str(),
+            error = details.as_str(),
+            message = "Failed to parse admin server bind address"
+        );
+        Error::InvalidBindAddress {
+            bind_address: config.bind_address.clone(),
+            details,
+        }
+    })?;
 
     // Bind the TCP listener.
-    let listener = TcpListener::bind(&addr)
-        .await
-        .map_err(|e| Error::BindFailed {
-            addr: addr.to_string(),
-            details: format!("{e}"),
-        })?;
+    let listener = TcpListener::bind(&addr).await.map_err(|e| {
+        let addr_str = addr.to_string();
+        let details = format!("{e}");
+        otel_warn!(
+            "endpoint.bind_failed",
+            bind_address = addr_str.as_str(),
+            error = details.as_str(),
+            message = "Failed to bind admin server"
+        );
+        Error::BindFailed {
+            addr: addr_str,
+            details,
+        }
+    })?;
+
+    let addr_str = addr.to_string();
+    otel_info!(
+        "endpoint.start",
+        bind_address = addr_str.as_str(),
+        message = "Admin HTTP server listening"
+    );
 
     // Start serving requests, with graceful shutdown on signal.
     axum::serve(listener, app)

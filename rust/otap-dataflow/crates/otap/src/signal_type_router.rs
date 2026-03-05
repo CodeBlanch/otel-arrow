@@ -4,7 +4,7 @@
 //! Signal type router processor for OTAP pipelines.
 //!
 //! Simplest behavior: pass-through using engine wiring.
-//! All signals are forwarded unchanged via the engine-provided default out port
+//! All signals are forwarded unchanged via the engine-provided default output port
 //! (or error if multiple ports are connected without a default).
 
 use crate::OTAP_PROCESSOR_FACTORIES;
@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use linkme::distributed_slice;
 use otap_df_config::error::Error as ConfigError;
 use otap_df_config::node::NodeUserConfig;
-use otap_df_engine::ProcessorFactory;
 use otap_df_engine::config::ProcessorConfig;
 use otap_df_engine::context::PipelineContext;
 use otap_df_engine::control::NodeControlMsg;
@@ -22,6 +21,7 @@ use otap_df_engine::local::processor as local;
 use otap_df_engine::message::Message;
 use otap_df_engine::node::NodeId;
 use otap_df_engine::processor::ProcessorWrapper;
+use otap_df_engine::{MessageSourceLocalEffectHandlerExtension, ProcessorFactory};
 use otap_df_telemetry::instrument::Counter;
 use otap_df_telemetry::metrics::MetricSet;
 use otap_df_telemetry_macros::metric_set;
@@ -29,14 +29,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// URN for the SignalTypeRouter processor
-pub const SIGNAL_TYPE_ROUTER_URN: &str = "urn:otap:processor:signal_type_router";
+pub const SIGNAL_TYPE_ROUTER_URN: &str = "urn:otel:processor:type_router";
 
-/// Well-known out port names for type-based routing
-/// Name of the out port used for trace signals
+/// Well-known output port names for type-based routing
+/// Name of the output port used for trace signals
 pub const PORT_TRACES: &str = "traces";
-/// Name of the out port used for metric signals
+/// Name of the output port used for metric signals
 pub const PORT_METRICS: &str = "metrics";
-/// Name of the out port used for log signals
+/// Name of the output port used for log signals
 pub const PORT_LOGS: &str = "logs";
 
 /// Metrics for the SignalTypeRouter processor.
@@ -85,28 +85,28 @@ pub struct SignalTypeRouterMetrics {
 }
 
 impl SignalTypeRouterMetrics {
-    fn inc_received(&mut self, st: otap_df_config::SignalType) {
+    const fn inc_received(&mut self, st: otap_df_config::SignalType) {
         match st {
             otap_df_config::SignalType::Logs => self.signals_received_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_received_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_received_traces.inc(),
         }
     }
-    fn inc_routed_named(&mut self, st: otap_df_config::SignalType) {
+    const fn inc_routed_named(&mut self, st: otap_df_config::SignalType) {
         match st {
             otap_df_config::SignalType::Logs => self.signals_routed_named_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_routed_named_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_routed_named_traces.inc(),
         }
     }
-    fn inc_routed_default(&mut self, st: otap_df_config::SignalType) {
+    const fn inc_routed_default(&mut self, st: otap_df_config::SignalType) {
         match st {
             otap_df_config::SignalType::Logs => self.signals_routed_default_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_routed_default_metrics.inc(),
             otap_df_config::SignalType::Traces => self.signals_routed_default_traces.inc(),
         }
     }
-    fn inc_dropped(&mut self, st: otap_df_config::SignalType) {
+    const fn inc_dropped(&mut self, st: otap_df_config::SignalType) {
         match st {
             otap_df_config::SignalType::Logs => self.signals_dropped_logs.inc(),
             otap_df_config::SignalType::Metrics => self.signals_dropped_metrics.inc(),
@@ -131,7 +131,7 @@ pub struct SignalTypeRouter {
 impl SignalTypeRouter {
     /// Creates a new SignalTypeRouter with the given configuration
     #[must_use]
-    pub fn new(config: SignalTypeRouterConfig) -> Self {
+    pub const fn new(config: SignalTypeRouterConfig) -> Self {
         Self {
             config,
             metrics: None,
@@ -177,7 +177,7 @@ impl local::Processor<OtapPdata> for SignalTypeRouter {
                     m.inc_received(st);
                 }
 
-                // Determine desired out port by signal type
+                // Determine desired output port by signal type
                 let desired_port = match st {
                     otap_df_config::SignalType::Traces => PORT_TRACES,
                     otap_df_config::SignalType::Metrics => PORT_METRICS,
@@ -191,7 +191,10 @@ impl local::Processor<OtapPdata> for SignalTypeRouter {
                     .any(|p| p.as_ref() == desired_port);
 
                 if has_port {
-                    match effect_handler.send_message_to(desired_port, data).await {
+                    match effect_handler
+                        .send_message_with_source_node_to(desired_port, data)
+                        .await
+                    {
                         Ok(()) => {
                             if let Some(m) = self.metrics.as_mut() {
                                 m.inc_routed_named(st);
@@ -206,7 +209,7 @@ impl local::Processor<OtapPdata> for SignalTypeRouter {
                         }
                     }
                 } else {
-                    match effect_handler.send_message(data).await {
+                    match effect_handler.send_message_with_source_node(data).await {
                         Ok(()) => {
                             if let Some(m) = self.metrics.as_mut() {
                                 m.inc_routed_default(st);
@@ -272,11 +275,10 @@ pub static SIGNAL_TYPE_ROUTER_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFa
         // Create the router with metrics registered via PipelineContext
         let router = SignalTypeRouter::with_pipeline_ctx(pipeline, router_config);
 
-        // Create NodeUserConfig and wrap as local processor
-        let user_config = Arc::new(NodeUserConfig::new_processor_config(SIGNAL_TYPE_ROUTER_URN));
-
-        Ok(ProcessorWrapper::local(router, node, user_config, proc_cfg))
+        Ok(ProcessorWrapper::local(router, node, node_config, proc_cfg))
     },
+    wiring_contract: otap_df_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otap_df_config::validation::validate_typed_config::<SignalTypeRouterConfig>,
 };
 
 #[cfg(test)]
@@ -371,19 +373,21 @@ mod tests {
         use otap_df_engine::local::processor::{
             EffectHandler as LocalEffectHandler, Processor as _,
         };
-        use otap_df_engine::message::Message;
+        use otap_df_engine::message::{Message, Sender};
         use otap_df_engine::testing::setup_test_runtime;
         use otap_df_pdata::otap::{Logs, OtapArrowRecords};
-        use otap_df_telemetry::MetricsSystem;
-        use otap_df_telemetry::registry::MetricsRegistryHandle;
+        use otap_df_telemetry::InternalTelemetrySystem;
+        use otap_df_telemetry::registry::TelemetryRegistryHandle;
         use otap_df_telemetry::reporter::MetricsReporter;
         use std::collections::HashMap;
         use std::time::Duration;
         use tokio::task::JoinHandle;
 
-        fn collect_metrics_map(registry: &MetricsRegistryHandle) -> HashMap<String, u64> {
+        fn collect_metrics_map(
+            telemetry_registry: &TelemetryRegistryHandle,
+        ) -> HashMap<String, u64> {
             let mut out = HashMap::new();
-            registry.visit_current_metrics(|_desc, _attrs, iter| {
+            telemetry_registry.visit_current_metrics(|_desc, _attrs, iter| {
                 for (field, value) in iter {
                     let _ = out.insert(field.name.to_string(), value.to_u64_lossy());
                 }
@@ -392,15 +396,16 @@ mod tests {
         }
 
         // Helper to start/stop telemetry collection on the local task set.
-        // Returns the registry, a cloneable reporter, and the spawned collector task handle.
-        fn start_telemetry() -> (MetricsRegistryHandle, MetricsReporter, JoinHandle<()>) {
-            let telemetry = MetricsSystem::default();
-            let registry = telemetry.registry();
+        // Returns the telemetry registry, a cloneable reporter, and the spawned collector task handle.
+        fn start_telemetry() -> (TelemetryRegistryHandle, MetricsReporter, JoinHandle<()>) {
+            let telemetry = InternalTelemetrySystem::default();
+            let telemetry_registry = telemetry.registry();
             let reporter = telemetry.reporter();
             let collector_task = tokio::task::spawn_local(async move {
-                let _ = telemetry.run_collection_loop().await;
+                let collector = telemetry.collector();
+                let _ = collector.run_collection_loop().await;
             });
-            (registry, reporter, collector_task)
+            (telemetry_registry, reporter, collector_task)
         }
 
         // Stops telemetry collection by dropping the reporter and aborting the collector task.
@@ -413,12 +418,13 @@ mod tests {
         fn test_metrics_named_logs_success() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                // Telemetry setup (registry + collector + reporter)
-                let (registry, reporter, collector_task) = start_telemetry();
+                // Telemetry setup (telemetry registry + collector + reporter)
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
                 // Pipeline + node context
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_named_success");
 
                 // Router with metrics
@@ -430,7 +436,7 @@ mod tests {
                 // Effect handler with a logs named port
                 let (tx_logs, rx_logs) = mpsc::Channel::new(4);
                 let mut senders = HashMap::new();
-                let _ = senders.insert(PORT_LOGS.into(), LocalSender::MpscSender(tx_logs));
+                let _ = senders.insert(PORT_LOGS.into(), Sender::Local(LocalSender::mpsc(tx_logs)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -458,7 +464,7 @@ mod tests {
                 // Allow collector to accumulate snapshot
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let metrics = collect_metrics_map(&registry);
+                let metrics = collect_metrics_map(&telemetry_registry);
                 assert_eq!(
                     metrics.get("signals.received.logs").copied().unwrap_or(0),
                     1
@@ -488,10 +494,11 @@ mod tests {
         fn test_metrics_named_logs_failure() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_named_failure");
 
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
@@ -503,7 +510,7 @@ mod tests {
                 let (tx_logs, rx_logs) = mpsc::Channel::new(1);
                 drop(rx_logs); // close to trigger SendError::Closed
                 let mut senders = HashMap::new();
-                let _ = senders.insert(PORT_LOGS.into(), LocalSender::MpscSender(tx_logs));
+                let _ = senders.insert(PORT_LOGS.into(), Sender::Local(LocalSender::mpsc(tx_logs)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -523,7 +530,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let metrics = collect_metrics_map(&registry);
+                let metrics = collect_metrics_map(&telemetry_registry);
                 assert_eq!(
                     metrics.get("signals.received.logs").copied().unwrap_or(0),
                     1
@@ -552,10 +559,11 @@ mod tests {
         fn test_metrics_default_logs_success() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_default_success");
 
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
@@ -563,10 +571,10 @@ mod tests {
                     SignalTypeRouterConfig::default(),
                 );
 
-                // Only a single out port (non-named for logs); default path should be used
+                // Only a single output port (non-named for logs); default path should be used
                 let (tx_out, rx_out) = mpsc::Channel::new(2);
                 let mut senders = HashMap::new();
-                let _ = senders.insert("out".into(), LocalSender::MpscSender(tx_out));
+                let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx_out)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -590,7 +598,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let metrics = collect_metrics_map(&registry);
+                let metrics = collect_metrics_map(&telemetry_registry);
                 assert_eq!(
                     metrics.get("signals.received.logs").copied().unwrap_or(0),
                     1
@@ -619,10 +627,11 @@ mod tests {
         fn test_metrics_default_logs_failure() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_default_failure");
 
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
@@ -630,11 +639,11 @@ mod tests {
                     SignalTypeRouterConfig::default(),
                 );
 
-                // Single default out port but drop receiver to force send error
+                // Single default output port but drop receiver to force send error
                 let (tx_out, rx_out) = mpsc::Channel::new(1);
                 drop(rx_out);
                 let mut senders = HashMap::new();
-                let _ = senders.insert("out".into(), LocalSender::MpscSender(tx_out));
+                let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx_out)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -656,7 +665,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let metrics = collect_metrics_map(&registry);
+                let metrics = collect_metrics_map(&telemetry_registry);
                 assert_eq!(
                     metrics.get("signals.received.logs").copied().unwrap_or(0),
                     1
@@ -686,10 +695,11 @@ mod tests {
         fn test_metrics_named_traces_success() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_named_traces_success");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -698,7 +708,7 @@ mod tests {
 
                 let (tx, rx) = mpsc::Channel::new(2);
                 let mut senders = HashMap::new();
-                let _ = senders.insert(PORT_TRACES.into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert(PORT_TRACES.into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -721,7 +731,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.traces").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.traces").copied().unwrap_or(0),
@@ -741,10 +751,11 @@ mod tests {
         fn test_metrics_named_traces_failure() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_named_traces_failure");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -754,7 +765,7 @@ mod tests {
                 let (tx, rx) = mpsc::Channel::new(1);
                 drop(rx);
                 let mut senders = HashMap::new();
-                let _ = senders.insert(PORT_TRACES.into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert(PORT_TRACES.into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -774,7 +785,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.traces").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.traces").copied().unwrap_or(0),
@@ -794,10 +805,11 @@ mod tests {
         fn test_metrics_default_traces_success() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_default_traces_success");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -806,7 +818,7 @@ mod tests {
 
                 let (tx, rx) = mpsc::Channel::new(2);
                 let mut senders = HashMap::new();
-                let _ = senders.insert("out".into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -829,7 +841,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.traces").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.traces").copied().unwrap_or(0),
@@ -849,10 +861,11 @@ mod tests {
         fn test_metrics_default_traces_failure() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_default_traces_failure");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -862,7 +875,7 @@ mod tests {
                 let (tx, rx) = mpsc::Channel::new(1);
                 drop(rx);
                 let mut senders = HashMap::new();
-                let _ = senders.insert("out".into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -882,7 +895,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.traces").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.traces").copied().unwrap_or(0),
@@ -903,10 +916,11 @@ mod tests {
         fn test_metrics_named_metrics_success() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_named_metrics_success");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -915,7 +929,7 @@ mod tests {
 
                 let (tx, rx) = mpsc::Channel::new(2);
                 let mut senders = HashMap::new();
-                let _ = senders.insert(PORT_METRICS.into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert(PORT_METRICS.into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -938,7 +952,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.metrics").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.metrics").copied().unwrap_or(0),
@@ -960,10 +974,11 @@ mod tests {
         fn test_metrics_named_metrics_failure() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_named_metrics_failure");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -973,7 +988,7 @@ mod tests {
                 let (tx, rx) = mpsc::Channel::new(1);
                 drop(rx);
                 let mut senders = HashMap::new();
-                let _ = senders.insert(PORT_METRICS.into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert(PORT_METRICS.into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -993,7 +1008,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.metrics").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.metrics").copied().unwrap_or(0),
@@ -1015,10 +1030,11 @@ mod tests {
         fn test_metrics_default_metrics_success() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_default_metrics_success");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -1027,7 +1043,7 @@ mod tests {
 
                 let (tx, rx) = mpsc::Channel::new(2);
                 let mut senders = HashMap::new();
-                let _ = senders.insert("out".into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -1050,7 +1066,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.metrics").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.metrics").copied().unwrap_or(0),
@@ -1072,10 +1088,11 @@ mod tests {
         fn test_metrics_default_metrics_failure() {
             let (rt, local) = setup_test_runtime();
             rt.block_on(local.run_until(async move {
-                let (registry, reporter, collector_task) = start_telemetry();
+                let (telemetry_registry, reporter, collector_task) = start_telemetry();
 
-                let controller = ControllerContext::new(registry.clone());
-                let pipeline = controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 0);
+                let controller = ControllerContext::new(telemetry_registry.clone());
+                let pipeline =
+                    controller.pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0);
                 let node_id = test_node("signal_router_default_metrics_failure");
                 let mut router = SignalTypeRouter::with_pipeline_ctx(
                     pipeline,
@@ -1085,7 +1102,7 @@ mod tests {
                 let (tx, rx) = mpsc::Channel::new(1);
                 drop(rx);
                 let mut senders = HashMap::new();
-                let _ = senders.insert("out".into(), LocalSender::MpscSender(tx));
+                let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
                 let mut eh =
                     LocalEffectHandler::new(node_id.clone(), senders, None, reporter.clone());
 
@@ -1105,7 +1122,7 @@ mod tests {
                     .expect("collect telemetry failed");
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let m = collect_metrics_map(&registry);
+                let m = collect_metrics_map(&telemetry_registry);
                 assert_eq!(m.get("signals.received.metrics").copied().unwrap_or(0), 1);
                 assert_eq!(
                     m.get("signals.routed.named.metrics").copied().unwrap_or(0),

@@ -26,6 +26,7 @@ use quiver::record_bundle::{
     BundleDescriptor, PayloadRef, RecordBundle, SchemaFingerprint, SlotDescriptor, SlotId,
 };
 use quiver::segment::{OpenSegment, SegmentReader, SegmentSeq, SegmentWriter};
+use tokio::runtime::Runtime;
 
 /// Test bundle with configurable row count and schema fingerprint.
 struct BenchBundle {
@@ -270,12 +271,13 @@ fn segment_accumulate_many(c: &mut Criterion) {
 /// - `multi_slot`: OTAP-style 4-slot bundles (realistic structure)
 fn segment_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("segment_write");
+    let rt = Runtime::new().expect("tokio runtime");
 
     // ── Single-slot write (varying bundle counts) ──
     for num_bundles in [10, 50, 100] {
         let bundle = BenchBundle::single_slot(1_000, [0u8; 32]);
 
-        group.throughput(Throughput::Elements(num_bundles as u64));
+        group.throughput(Throughput::Elements(num_bundles));
         group.bench_with_input(
             BenchmarkId::new("single_slot", num_bundles),
             &num_bundles,
@@ -291,10 +293,13 @@ fn segment_write(c: &mut Criterion) {
                     },
                     |(temp_dir, segment)| {
                         let segment_path = temp_dir.path().join("bench_segment.qseg");
-                        let writer = SegmentWriter::new(SegmentSeq::new(1));
-                        writer
-                            .write_segment(&segment_path, segment)
-                            .expect("write succeeds");
+                        let writer = SegmentWriter::new(SegmentSeq::new(1), false);
+                        rt.block_on(async {
+                            writer
+                                .write_segment(&segment_path, segment)
+                                .await
+                                .expect("write succeeds")
+                        });
                         temp_dir // Keep temp_dir alive until write completes
                     },
                     criterion::BatchSize::SmallInput,
@@ -323,10 +328,13 @@ fn segment_write(c: &mut Criterion) {
                 },
                 |(temp_dir, segment)| {
                     let segment_path = temp_dir.path().join("bench_segment.qseg");
-                    let writer = SegmentWriter::new(SegmentSeq::new(1));
-                    writer
-                        .write_segment(&segment_path, segment)
-                        .expect("write succeeds");
+                    let writer = SegmentWriter::new(SegmentSeq::new(1), false);
+                    rt.block_on(async {
+                        writer
+                            .write_segment(&segment_path, segment)
+                            .await
+                            .expect("write succeeds")
+                    });
                     temp_dir
                 },
                 criterion::BatchSize::SmallInput,
@@ -352,10 +360,13 @@ fn segment_write(c: &mut Criterion) {
                 },
                 |(temp_dir, segment)| {
                     let segment_path = temp_dir.path().join("bench_segment.qseg");
-                    let writer = SegmentWriter::new(SegmentSeq::new(1));
-                    writer
-                        .write_segment(&segment_path, segment)
-                        .expect("write succeeds");
+                    let writer = SegmentWriter::new(SegmentSeq::new(1), false);
+                    rt.block_on(async {
+                        writer
+                            .write_segment(&segment_path, segment)
+                            .await
+                            .expect("write succeeds")
+                    });
                     temp_dir
                 },
                 criterion::BatchSize::SmallInput,
@@ -382,11 +393,15 @@ fn create_test_segment(num_bundles: usize, num_rows: usize) -> (tempfile::TempDi
         segment.append(&bundle).expect("append succeeds");
     }
 
-    // Write to file
-    let writer = SegmentWriter::new(SegmentSeq::new(1));
-    writer
-        .write_segment(&segment_path, segment)
-        .expect("write succeeds");
+    // Write to file using tokio runtime
+    let writer = SegmentWriter::new(SegmentSeq::new(1), false);
+    let rt = Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        writer
+            .write_segment(&segment_path, segment)
+            .await
+            .expect("write succeeds")
+    });
 
     (temp_dir, segment_path)
 }

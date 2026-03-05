@@ -46,7 +46,7 @@ use std::time::Instant;
 use tokio::time::Duration;
 
 /// The URN for the OTAP Perf exporter
-pub const OTAP_PERF_EXPORTER_URN: &str = "urn:otel:otap:perf:exporter";
+pub const OTAP_PERF_EXPORTER_URN: &str = "urn:otel:exporter:perf";
 
 /// Perf Exporter that emits performance data
 pub struct PerfExporter {
@@ -74,6 +74,8 @@ pub static PERF_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
             exporter_config,
         ))
     },
+    wiring_contract: otap_df_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otap_df_config::validation::validate_typed_config::<Config>,
 };
 
 impl PerfExporter {
@@ -131,7 +133,7 @@ impl local::Exporter<OtapPdata> for PerfExporter {
         // let mut average_pipeline_latency: f64 = 0.0;
 
         otel_info!(
-            "Exporter.Start",
+            "perf_exporter.start",
             frequency_ms = self.config.frequency(),
             message = "Starting Perf Exporter"
         );
@@ -281,7 +283,7 @@ mod tests {
     use otap_df_engine::testing::test_node;
     use otap_df_pdata::Consumer;
     use otap_df_pdata::otap::{OtapArrowRecords, from_record_messages};
-    use otap_df_telemetry::registry::MetricsRegistryHandle;
+    use otap_df_telemetry::registry::TelemetryRegistryHandle;
     use std::future::Future;
     use std::ops::Add;
     use std::sync::Arc;
@@ -366,16 +368,16 @@ mod tests {
 
     /// Validation closure that checks the expected counter values
     fn validation_procedure(
-        metrics_registry_handle: MetricsRegistryHandle,
+        telemetry_registry_handle: TelemetryRegistryHandle,
     ) -> impl FnOnce(
         TestContext<OtapPdata>,
         Result<(), Error>,
     ) -> std::pin::Pin<Box<dyn Future<Output = ()>>> {
         |_, exporter_result| {
             Box::pin(async move {
-                assert!(exporter_result.is_ok());
+                exporter_result.unwrap();
 
-                metrics_registry_handle.visit_current_metrics(
+                telemetry_registry_handle.visit_current_metrics(
                     |_metrics_descriptor, _attrs, _metric_values| {
                         // ToDo Check the counters, once the timer tick control message is implemented in the test infrastructure.
                     },
@@ -389,10 +391,10 @@ mod tests {
         let test_runtime = TestRuntime::new();
         let config = Config::new(1000, 0.3, true, true, true, true, true);
         let node_config = Arc::new(NodeUserConfig::new_exporter_config(OTAP_PERF_EXPORTER_URN));
-        let metrics_registry_handle = MetricsRegistryHandle::new();
-        let controller_ctx = ControllerContext::new(metrics_registry_handle.clone());
+        let telemetry_registry_handle = TelemetryRegistryHandle::new();
+        let controller_ctx = ControllerContext::new(telemetry_registry_handle.clone());
         let pipeline_ctx =
-            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 0);
+            controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let exporter = ExporterWrapper::local(
             PerfExporter::new(pipeline_ctx, config),
             test_node(test_runtime.config().name.clone()),
@@ -403,6 +405,6 @@ mod tests {
         test_runtime
             .set_exporter(exporter)
             .run_test(scenario())
-            .run_validation(validation_procedure(metrics_registry_handle));
+            .run_validation(validation_procedure(telemetry_registry_handle));
     }
 }

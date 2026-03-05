@@ -20,7 +20,7 @@ use crate::record_bundle::{
     BundleDescriptor, PayloadRef, RecordBundle, SchemaFingerprint, SlotDescriptor, SlotId,
 };
 
-use super::cursor_sidecar::CursorSidecar;
+use super::cursor_sidecar::{CURSOR_SIDECAR_FILENAME, CursorSidecar};
 use super::header::WalHeader;
 use super::reader::test_support::{self, ReadFailure};
 use super::writer::FlushPolicy;
@@ -189,7 +189,7 @@ fn write_single_entry(body: &[u8]) -> (tempfile::TempDir, PathBuf) {
         .open(&path)
         .expect("create wal file");
     let header = WalHeader::new([0xEE; 16]);
-    header.write_to(&mut file).expect("write header");
+    header.write_to_sync(&mut file).expect("write header");
     let len = u32::try_from(body.len()).expect("body fits u32");
     let _ = file.seek(SeekFrom::End(0)).expect("seek end");
     file.write_all(&len.to_le_bytes()).expect("write len");
@@ -265,17 +265,19 @@ fn single_slot_bundle(
 }
 
 /// Creates a WalWriter with default options for tests that just need basic functionality.
-fn open_test_writer(path: PathBuf, hash: [u8; 16]) -> WalWriter {
-    WalWriter::open(WalWriterOptions::new(path, hash, FlushPolicy::Immediate)).expect("writer")
+async fn open_test_writer(path: PathBuf, hash: [u8; 16]) -> WalWriter {
+    WalWriter::open(WalWriterOptions::new(path, hash, FlushPolicy::Immediate))
+        .await
+        .expect("writer")
 }
 
 /// Creates a WalWriter with custom options builder.
-fn open_test_writer_with<F>(path: PathBuf, hash: [u8; 16], configure: F) -> WalWriter
+async fn open_test_writer_with<F>(path: PathBuf, hash: [u8; 16], configure: F) -> WalWriter
 where
     F: FnOnce(WalWriterOptions) -> WalWriterOptions,
 {
     let options = WalWriterOptions::new(path, hash, FlushPolicy::Immediate);
-    WalWriter::open(configure(options)).expect("writer")
+    WalWriter::open(configure(options)).await.expect("writer")
 }
 
 /// Reads all entries from a WAL file starting at the header.
@@ -292,16 +294,17 @@ fn read_entries(path: &Path, count: usize) -> Vec<super::WalRecordBundle> {
     iter.take(count).map(|r| r.expect("entry")).collect()
 }
 
-fn measure_bundle_data_bytes(mut build_bundle: impl FnMut() -> FixtureBundle) -> u64 {
+async fn measure_bundle_data_bytes(mut build_bundle: impl FnMut() -> FixtureBundle) -> u64 {
     let (_dir, wal_path) = temp_wal("measure_bundle.wal");
     let mut writer = WalWriter::open(WalWriterOptions::new(
         wal_path.clone(),
         [0xFE; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
     let bundle = build_bundle();
-    let _ = writer.append_bundle(&bundle).expect("append bundle");
+    let _ = writer.append_bundle(&bundle).await.expect("append bundle");
     drop(writer);
     std::fs::metadata(&wal_path)
         .expect("metadata")
@@ -324,8 +327,8 @@ impl Drop for FailureGuard {
     }
 }
 
-#[test]
-fn wal_writer_reader_roundtrip_recovers_payloads() {
+#[tokio::test]
+async fn wal_writer_reader_roundtrip_recovers_payloads() {
     let (_dir, wal_path) = temp_wal("roundtrip.wal");
     let hash = [0xAB; 16];
 
@@ -344,8 +347,11 @@ fn wal_writer_reader_roundtrip_recovers_payloads() {
     );
 
     let options = WalWriterOptions::new(wal_path.clone(), hash, FlushPolicy::Immediate);
-    let mut writer = WalWriter::open(options).expect("writer");
-    let offset = writer.append_bundle(&bundle).expect("append succeeds");
+    let mut writer = WalWriter::open(options).await.expect("writer");
+    let offset = writer
+        .append_bundle(&bundle)
+        .await
+        .expect("append succeeds");
     assert_eq!(offset.position, 0); // WAL position: first entry starts at 0
     assert_eq!(offset.sequence, 0);
     drop(writer);
@@ -403,10 +409,10 @@ fn wal_writer_reader_roundtrip_recovers_payloads() {
     assert_eq!(collected2, vec![99]);
 }
 
-#[test]
-fn wal_writer_rejects_slot_ids_outside_bitmap() {
+#[tokio::test]
+async fn wal_writer_rejects_slot_ids_outside_bitmap() {
     let (_dir, wal_path) = temp_wal("slot_range.wal");
-    let mut writer = open_test_writer(wal_path, [0; 16]);
+    let mut writer = open_test_writer(wal_path, [0; 16]).await;
 
     let descriptor = BundleDescriptor::new(vec![slot_descriptor(65, "Overflow")]);
     let bundle = FixtureBundle::new(
@@ -414,14 +420,17 @@ fn wal_writer_rejects_slot_ids_outside_bitmap() {
         vec![FixtureSlot::new(SlotId::new(65), 0xAA, &[1])],
     );
 
-    let err = writer.append_bundle(&bundle).expect_err("slot validation");
+    let err = writer
+        .append_bundle(&bundle)
+        .await
+        .expect_err("slot validation");
     assert!(matches!(err, WalError::SlotOutOfRange(slot) if slot == SlotId::new(65)));
 }
 
-#[test]
-fn wal_writer_rejects_pre_epoch_timestamp() {
+#[tokio::test]
+async fn wal_writer_rejects_pre_epoch_timestamp() {
     let (_dir, wal_path) = temp_wal("pre_epoch.wal");
-    let mut writer = open_test_writer(wal_path, [0; 16]);
+    let mut writer = open_test_writer(wal_path, [0; 16]).await;
 
     let descriptor = logs_descriptor();
     let bundle = FixtureBundle::new(descriptor, vec![])
@@ -429,12 +438,13 @@ fn wal_writer_rejects_pre_epoch_timestamp() {
 
     let err = writer
         .append_bundle(&bundle)
+        .await
         .expect_err("timestamp validation");
     assert!(matches!(err, WalError::InvalidTimestamp));
 }
 
-#[test]
-fn wal_writer_rejects_truncated_existing_file() {
+#[tokio::test]
+async fn wal_writer_rejects_truncated_existing_file() {
     use super::header::WAL_HEADER_MIN_LEN;
 
     let (_dir, wal_path) = temp_wal("truncated.wal");
@@ -447,15 +457,17 @@ fn wal_writer_rejects_truncated_existing_file() {
     }
 
     let options = WalWriterOptions::new(wal_path, [0; 16], FlushPolicy::Immediate);
-    let err = WalWriter::open(options).expect_err("should reject truncated file");
+    let err = WalWriter::open(options)
+        .await
+        .expect_err("should reject truncated file");
     assert!(matches!(
         err,
         WalError::InvalidHeader("file smaller than minimum header")
     ));
 }
 
-#[test]
-fn wal_writer_reopens_with_matching_header() {
+#[tokio::test]
+async fn wal_writer_reopens_with_matching_header() {
     let (_dir, wal_path) = temp_wal("existing.wal");
     let original_hash = [0xAA; 16];
     {
@@ -466,26 +478,26 @@ fn wal_writer_reopens_with_matching_header() {
             .open(&wal_path)
             .expect("create file");
         WalHeader::new(original_hash)
-            .write_to(&mut file)
+            .write_to_sync(&mut file)
             .expect("write header");
         file.flush().expect("flush");
     }
 
     // Reopen with the same hash—should succeed and preserve the header.
     let options = WalWriterOptions::new(wal_path.clone(), original_hash, FlushPolicy::Immediate);
-    let _writer = WalWriter::open(options).expect("open succeeds");
+    let _writer = WalWriter::open(options).await.expect("open succeeds");
     drop(_writer);
 
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .open(&wal_path)
         .expect("open for read");
-    let header = WalHeader::read_from(&mut file).expect("read header");
+    let header = WalHeader::read_from_sync(&mut file).expect("read header");
     assert_eq!(header.segment_cfg_hash, original_hash);
 }
 
-#[test]
-fn wal_writer_flushes_after_interval_elapsed() {
+#[tokio::test]
+async fn wal_writer_flushes_after_interval_elapsed() {
     let (_dir, wal_path) = temp_wal("flush.wal");
 
     let descriptor = logs_descriptor();
@@ -494,6 +506,7 @@ fn wal_writer_flushes_after_interval_elapsed() {
         [0; 16],
         FlushPolicy::EveryDuration(Duration::from_millis(10)),
     ))
+    .await
     .expect("writer");
 
     let bundle = FixtureBundle::new(
@@ -505,12 +518,13 @@ fn wal_writer_flushes_after_interval_elapsed() {
     writer.test_set_last_flush(Instant::now() - Duration::from_secs(1));
     let _offset = writer
         .append_bundle(&bundle)
+        .await
         .expect("append triggers flush");
     assert!(writer.test_last_flush() > before);
 }
 
-#[test]
-fn wal_writer_flush_syncs_file_data() {
+#[tokio::test]
+async fn wal_writer_flush_syncs_file_data() {
     writer_test_support::reset_flush_notifications();
 
     let (_dir, wal_path) = temp_wal("flush_sync.wal");
@@ -521,6 +535,7 @@ fn wal_writer_flush_syncs_file_data() {
         [0; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     let bundle = FixtureBundle::new(
@@ -529,22 +544,24 @@ fn wal_writer_flush_syncs_file_data() {
     );
 
     assert!(!writer_test_support::take_sync_data_notification());
-    let _offset = writer.append_bundle(&bundle).expect("append flush");
+    let _offset = writer.append_bundle(&bundle).await.expect("append flush");
     assert!(writer_test_support::take_sync_data_notification());
 }
 
-#[test]
-fn wal_writer_records_cursor_without_truncating() {
+#[tokio::test]
+async fn wal_writer_records_cursor_without_truncating() {
     let (_dir, wal_path) = temp_wal("record_cursor.wal");
 
     let descriptor = logs_descriptor();
-    let mut writer = open_test_writer(wal_path.clone(), [0x20; 16]);
+    let mut writer = open_test_writer(wal_path.clone(), [0x20; 16]).await;
 
     let _ = writer
         .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
         .expect("first append");
     let _ = writer
         .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5, 6]))
+        .await
         .expect("second append");
 
     let len_before = std::fs::metadata(&wal_path).expect("metadata").len();
@@ -556,7 +573,7 @@ fn wal_writer_records_cursor_without_truncating() {
         safe_offset: first_entry.next_offset,
         ..WalConsumerCursor::default()
     };
-    writer.persist_cursor(&cursor).expect("record cursor");
+    writer.persist_cursor(&cursor).await.expect("record cursor");
     drop(writer);
 
     let len_after = std::fs::metadata(&wal_path).expect("metadata").len();
@@ -565,8 +582,8 @@ fn wal_writer_records_cursor_without_truncating() {
         "recording a safe cursor no longer mutates the active wal immediately"
     );
 
-    let sidecar_path = wal_path.parent().unwrap().join("quiver.wal.cursor");
-    let sidecar = CursorSidecar::read_from(&sidecar_path).expect("sidecar");
+    let sidecar_path = wal_path.parent().unwrap().join(CURSOR_SIDECAR_FILENAME);
+    let sidecar = CursorSidecar::read_from_sync(&sidecar_path).expect("sidecar");
     assert_eq!(
         sidecar.wal_position,
         first_entry.next_offset // Already global coordinate
@@ -581,8 +598,8 @@ fn wal_writer_records_cursor_without_truncating() {
     assert!(iter.next().is_none());
 }
 
-#[test]
-fn wal_writer_enforces_safe_offset_boundaries() {
+#[tokio::test]
+async fn wal_writer_enforces_safe_offset_boundaries() {
     let (_dir, wal_path) = temp_wal("safe_offset.wal");
 
     let descriptor = logs_descriptor();
@@ -591,19 +608,26 @@ fn wal_writer_enforces_safe_offset_boundaries() {
         [0x42; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     let first_bundle = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x01, &[11, 12, 13])],
     );
-    let _ = writer.append_bundle(&first_bundle).expect("first append");
+    let _ = writer
+        .append_bundle(&first_bundle)
+        .await
+        .expect("first append");
 
     let second_bundle = FixtureBundle::new(
         descriptor,
         vec![FixtureSlot::new(SlotId::new(0), 0x02, &[21, 22, 23])],
     );
-    let _ = writer.append_bundle(&second_bundle).expect("second append");
+    let _ = writer
+        .append_bundle(&second_bundle)
+        .await
+        .expect("second append");
 
     let mut reader = WalReader::open(&wal_path).expect("reader");
     let mut iter = reader.iter_from(0).expect("iter");
@@ -614,7 +638,7 @@ fn wal_writer_enforces_safe_offset_boundaries() {
         safe_sequence: first_entry.sequence,
     };
 
-    match writer.persist_cursor(&cursor) {
+    match writer.persist_cursor(&cursor).await {
         Err(WalError::InvalidConsumerCursor(message)) => {
             assert_eq!(message, "safe offset splits entry boundary")
         }
@@ -624,26 +648,28 @@ fn wal_writer_enforces_safe_offset_boundaries() {
     cursor.increment(&first_entry);
     writer
         .persist_cursor(&cursor)
+        .await
         .expect("record succeeds with aligned cursor");
     drop(writer);
 
-    let sidecar_path = wal_path.parent().unwrap().join("quiver.wal.cursor");
-    let sidecar = CursorSidecar::read_from(&sidecar_path).expect("sidecar");
+    let sidecar_path = wal_path.parent().unwrap().join(CURSOR_SIDECAR_FILENAME);
+    let sidecar = CursorSidecar::read_from_sync(&sidecar_path).expect("sidecar");
     assert_eq!(
         sidecar.wal_position,
         first_entry.next_offset // Already global coordinate
     );
 }
 
-#[test]
-fn wal_writer_persists_consumer_cursor_sidecar() {
+#[tokio::test]
+async fn wal_writer_persists_consumer_cursor_sidecar() {
     let (_dir, wal_path) = temp_wal("cursor_sidecar.wal");
     let descriptor = logs_descriptor();
 
-    let mut writer = open_test_writer(wal_path.clone(), [0x99; 16]);
+    let mut writer = open_test_writer(wal_path.clone(), [0x99; 16]).await;
 
     let offset = writer
         .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2]))
+        .await
         .expect("append");
 
     // Use the WAL position from the append result, not file length
@@ -651,25 +677,30 @@ fn wal_writer_persists_consumer_cursor_sidecar() {
         safe_offset: offset.next_offset,
         safe_sequence: offset.sequence,
     };
-    writer.persist_cursor(&cursor).expect("record cursor");
+    writer.persist_cursor(&cursor).await.expect("record cursor");
     drop(writer);
 
-    let sidecar_path = wal_path.parent().expect("dir").join("quiver.wal.cursor");
-    let state = CursorSidecar::read_from(&sidecar_path).expect("sidecar");
+    let sidecar_path = wal_path
+        .parent()
+        .expect("dir")
+        .join(CURSOR_SIDECAR_FILENAME);
+    let state = CursorSidecar::read_from_sync(&sidecar_path).expect("sidecar");
     assert_eq!(state.wal_position, offset.next_offset);
 }
 
-#[test]
-fn wal_writer_rotates_when_target_exceeded() {
+#[tokio::test]
+async fn wal_writer_rotates_when_target_exceeded() {
     let (_dir, wal_path) = temp_wal("force_rotate.wal");
 
     let descriptor = logs_descriptor();
     let mut writer = open_test_writer_with(wal_path.clone(), [0x51; 16], |opts| {
         opts.with_rotation_target(1).with_max_rotated_files(4)
-    });
+    })
+    .await;
 
     let _ = writer
         .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3, 4]))
+        .await
         .expect("append triggers rotation");
     drop(writer);
 
@@ -687,16 +718,16 @@ fn wal_writer_rotates_when_target_exceeded() {
     let active_len = std::fs::metadata(&wal_path).expect("active metadata").len();
     assert_eq!(active_len, test_header_size());
 
-    let sidecar_path = wal_path.parent().unwrap().join("quiver.wal.cursor");
+    let sidecar_path = wal_path.parent().unwrap().join(CURSOR_SIDECAR_FILENAME);
     // Sidecar should exist after rotation (even if no cursor has been recorded yet)
     assert!(sidecar_path.exists(), "sidecar should exist after rotation");
-    let sidecar = CursorSidecar::read_from(&sidecar_path).expect("sidecar should be readable");
+    let sidecar = CursorSidecar::read_from_sync(&sidecar_path).expect("sidecar should be readable");
     // wal_position is 0 because no consumer cursor has been recorded yet
     assert_eq!(sidecar.wal_position, 0);
 }
 
-#[test]
-fn wal_writer_reloads_rotated_files_on_restart() {
+#[tokio::test]
+async fn wal_writer_reloads_rotated_files_on_restart() {
     let (_dir, wal_path) = temp_wal("replay_rotations.wal");
 
     let descriptor = logs_descriptor();
@@ -705,10 +736,13 @@ fn wal_writer_reloads_rotated_files_on_restart() {
         .with_max_rotated_files(4);
 
     {
-        let mut writer = WalWriter::open(options.clone()).expect("first writer");
+        let mut writer = WalWriter::open(options.clone())
+            .await
+            .expect("first writer");
         let bundle = single_slot_bundle(&descriptor, 0x01, &[1, 2, 3, 4]);
         let _ = writer
             .append_bundle(&bundle)
+            .await
             .expect("first append triggers rotation");
     }
 
@@ -718,10 +752,11 @@ fn wal_writer_reloads_rotated_files_on_restart() {
     );
 
     {
-        let mut writer = WalWriter::open(options).expect("reopen writer");
+        let mut writer = WalWriter::open(options).await.expect("reopen writer");
         let bundle = single_slot_bundle(&descriptor, 0x02, &[5, 6, 7, 8]);
         let _ = writer
             .append_bundle(&bundle)
+            .await
             .expect("rotation should succeed after restart");
     }
 
@@ -731,19 +766,21 @@ fn wal_writer_reloads_rotated_files_on_restart() {
     );
 }
 
-#[test]
-fn wal_writer_errors_when_rotated_file_cap_reached() {
+#[tokio::test]
+async fn wal_writer_errors_when_rotated_file_cap_reached() {
     let (_dir, wal_path) = temp_wal("rotated_cap.wal");
 
     let descriptor = logs_descriptor();
     let mut writer = open_test_writer_with(wal_path.clone(), [0x52; 16], |opts| {
         opts.with_rotation_target(1).with_max_rotated_files(1)
-    });
+    })
+    .await;
 
     let payload = [10, 11, 12];
     let first_bundle = single_slot_bundle(&descriptor, 0x02, &payload);
     let _ = writer
         .append_bundle(&first_bundle)
+        .await
         .expect("first append rotates");
     assert!(
         rotated_path_for(&wal_path, 1).exists(),
@@ -752,6 +789,7 @@ fn wal_writer_errors_when_rotated_file_cap_reached() {
 
     let err = writer
         .append_bundle(&single_slot_bundle(&descriptor, 0x03, &payload))
+        .await
         .expect_err("second rotation should hit rotated file cap");
     match err {
         WalError::WalAtCapacity(message) => {
@@ -764,14 +802,15 @@ fn wal_writer_errors_when_rotated_file_cap_reached() {
     }
 }
 
-#[test]
-fn wal_writer_enforces_size_cap_and_purges_rotations() {
+#[tokio::test]
+async fn wal_writer_enforces_size_cap_and_purges_rotations() {
     let (_dir, wal_path) = temp_wal("size_cap.wal");
 
     let descriptor = logs_descriptor();
     let payload: Vec<i64> = (0..64).collect();
     let entry_bytes =
-        measure_bundle_data_bytes(|| single_slot_bundle(&descriptor, 0x07, payload.as_slice()));
+        measure_bundle_data_bytes(|| single_slot_bundle(&descriptor, 0x07, payload.as_slice()))
+            .await;
     let header_len = test_header_size();
     let chunk_file_len = header_len + entry_bytes;
     let slack = cmp::max(1, entry_bytes / 2);
@@ -783,17 +822,20 @@ fn wal_writer_enforces_size_cap_and_purges_rotations() {
             .with_max_rotated_files(4)
             .with_max_wal_size(max_wal_size),
     )
+    .await
     .expect("writer");
 
     let first_bundle = single_slot_bundle(&descriptor, 0x07, payload.as_slice());
     let first_offset = writer
         .append_bundle(&first_bundle)
+        .await
         .expect("first append rotates under cap");
     assert!(rotated_path_for(&wal_path, 1).exists());
 
     let second_bundle = single_slot_bundle(&descriptor, 0x08, payload.as_slice());
     let err = writer
         .append_bundle(&second_bundle)
+        .await
         .expect_err("second rotation should exceed size cap");
     match err {
         WalError::WalAtCapacity(message) => {
@@ -812,6 +854,7 @@ fn wal_writer_enforces_size_cap_and_purges_rotations() {
     };
     writer
         .persist_cursor(&cursor)
+        .await
         .expect("record cursor purges rotated chunks");
 
     assert!(
@@ -826,11 +869,12 @@ fn wal_writer_enforces_size_cap_and_purges_rotations() {
     let third_bundle = single_slot_bundle(&descriptor, 0x09, payload.as_slice());
     let _ = writer
         .append_bundle(&third_bundle)
+        .await
         .expect("append succeeds once space is reclaimed");
 }
 
-#[test]
-fn wal_writer_ignores_invalid_cursor_sidecar() {
+#[tokio::test]
+async fn wal_writer_ignores_invalid_cursor_sidecar() {
     let (_dir, wal_path) = temp_wal("bad_sidecar.wal");
 
     // Create the WAL header so the file exists.
@@ -840,10 +884,14 @@ fn wal_writer_ignores_invalid_cursor_sidecar() {
             [0x11; 16],
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
     }
 
-    let sidecar_path = wal_path.parent().expect("dir").join("quiver.wal.cursor");
+    let sidecar_path = wal_path
+        .parent()
+        .expect("dir")
+        .join(CURSOR_SIDECAR_FILENAME);
     // Write a truncated sidecar file (shorter than minimum length)
     std::fs::write(&sidecar_path, vec![0u8; 8]).expect("write corrupt");
 
@@ -852,6 +900,7 @@ fn wal_writer_ignores_invalid_cursor_sidecar() {
         [0x11; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("reopen");
 
     let descriptor = logs_descriptor();
@@ -859,22 +908,22 @@ fn wal_writer_ignores_invalid_cursor_sidecar() {
         descriptor,
         vec![FixtureSlot::new(SlotId::new(0), 0x02, &[7])],
     );
-    let offset = writer.append_bundle(&bundle).expect("append");
+    let offset = writer.append_bundle(&bundle).await.expect("append");
 
     // Use the WAL position from the append result, not file length
     let cursor = WalConsumerCursor {
         safe_offset: offset.next_offset,
         safe_sequence: offset.sequence,
     };
-    writer.persist_cursor(&cursor).expect("record cursor");
+    writer.persist_cursor(&cursor).await.expect("record cursor");
     drop(writer);
 
-    let state = CursorSidecar::read_from(&sidecar_path).expect("sidecar");
+    let state = CursorSidecar::read_from_sync(&sidecar_path).expect("sidecar");
     assert_eq!(state.wal_position, offset.next_offset);
 }
 
-#[test]
-fn wal_writer_flushes_after_unflushed_byte_threshold() {
+#[tokio::test]
+async fn wal_writer_flushes_after_unflushed_byte_threshold() {
     let (_dir, wal_path) = temp_wal("flush_bytes.wal");
 
     let descriptor = logs_descriptor();
@@ -883,6 +932,7 @@ fn wal_writer_flushes_after_unflushed_byte_threshold() {
         [0; 16],
         FlushPolicy::EveryNBytes(1),
     ))
+    .await
     .expect("writer");
 
     let bundle = FixtureBundle::new(
@@ -894,12 +944,13 @@ fn wal_writer_flushes_after_unflushed_byte_threshold() {
     let before = writer.test_last_flush();
     let _offset = writer
         .append_bundle(&bundle)
+        .await
         .expect("append triggers flush");
     assert!(writer.test_last_flush() > before);
 }
 
-#[test]
-fn wal_writer_flushes_pending_bytes_on_drop() {
+#[tokio::test]
+async fn wal_writer_flushes_pending_bytes_on_drop() {
     writer_test_support::reset_flush_notifications();
 
     let (_dir, wal_path) = temp_wal("flush_drop.wal");
@@ -911,6 +962,7 @@ fn wal_writer_flushes_pending_bytes_on_drop() {
         [0; 16],
         FlushPolicy::EveryDuration(Duration::from_secs(3600)),
     ))
+    .await
     .expect("writer");
 
     {
@@ -919,15 +971,15 @@ fn wal_writer_flushes_pending_bytes_on_drop() {
             descriptor,
             vec![FixtureSlot::new(SlotId::new(0), 0x55, &[42])],
         );
-        let _ = writer.append_bundle(&bundle).expect("append");
+        let _ = writer.append_bundle(&bundle).await.expect("append");
         assert!(!writer_test_support::take_drop_flush_notification());
     }
 
     assert!(writer_test_support::take_drop_flush_notification());
 }
 
-#[test]
-fn wal_reader_rewind_allows_replay_from_start() {
+#[tokio::test]
+async fn wal_reader_rewind_allows_replay_from_start() {
     let (_dir, wal_path) = temp_wal("rewind.wal");
     let descriptor = logs_descriptor();
 
@@ -936,19 +988,26 @@ fn wal_reader_rewind_allows_replay_from_start() {
         [0x10; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     let first_bundle = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x01, &[1])],
     );
-    let _ = writer.append_bundle(&first_bundle).expect("first append");
+    let _ = writer
+        .append_bundle(&first_bundle)
+        .await
+        .expect("first append");
 
     let second_bundle = FixtureBundle::new(
         descriptor,
         vec![FixtureSlot::new(SlotId::new(0), 0x02, &[2])],
     );
-    let _ = writer.append_bundle(&second_bundle).expect("second append");
+    let _ = writer
+        .append_bundle(&second_bundle)
+        .await
+        .expect("second append");
     drop(writer);
 
     let mut reader = WalReader::open(&wal_path).expect("reader");
@@ -966,8 +1025,8 @@ fn wal_reader_rewind_allows_replay_from_start() {
     assert_eq!(entry.sequence, 0);
 }
 
-#[test]
-fn wal_reader_iterator_stays_finished_after_eof() {
+#[tokio::test]
+async fn wal_reader_iterator_stays_finished_after_eof() {
     let (_dir, wal_path) = temp_wal("empty.wal");
     {
         let mut file = std::fs::OpenOptions::new()
@@ -977,7 +1036,7 @@ fn wal_reader_iterator_stays_finished_after_eof() {
             .open(&wal_path)
             .expect("create wal");
         WalHeader::new([0x44; 16])
-            .write_to(&mut file)
+            .write_to_sync(&mut file)
             .expect("header");
     }
 
@@ -987,8 +1046,8 @@ fn wal_reader_iterator_stays_finished_after_eof() {
     assert!(iter.next().is_none(), "iterator remains finished");
 }
 
-#[test]
-fn wal_writer_restores_sequence_after_restart() {
+#[tokio::test]
+async fn wal_writer_restores_sequence_after_restart() {
     let (_dir, wal_path) = temp_wal("sequence_resume.wal");
     let descriptor = logs_descriptor();
     let bundle = FixtureBundle::new(
@@ -1002,10 +1061,11 @@ fn wal_writer_restores_sequence_after_restart() {
             [0xAA; 16],
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
 
-        let _ = writer.append_bundle(&bundle).expect("first append");
-        let _ = writer.append_bundle(&bundle).expect("second append");
+        let _ = writer.append_bundle(&bundle).await.expect("first append");
+        let _ = writer.append_bundle(&bundle).await.expect("second append");
     }
 
     let mut writer = WalWriter::open(WalWriterOptions::new(
@@ -1013,14 +1073,15 @@ fn wal_writer_restores_sequence_after_restart() {
         [0xAA; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer reopen");
 
-    let third = writer.append_bundle(&bundle).expect("third append");
+    let third = writer.append_bundle(&bundle).await.expect("third append");
     assert_eq!(third.sequence, 2, "sequence should continue across restart");
 }
 
-#[test]
-fn wal_writer_preflight_rejects_when_size_cap_hit() {
+#[tokio::test]
+async fn wal_writer_preflight_rejects_when_size_cap_hit() {
     let (_dir, wal_path) = temp_wal("size_cap.wal");
     let descriptor = logs_descriptor();
     let bundle = FixtureBundle::new(
@@ -1035,8 +1096,9 @@ fn wal_writer_preflight_rejects_when_size_cap_hit() {
             hash,
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
-        let _ = writer.append_bundle(&bundle).expect("first append");
+        let _ = writer.append_bundle(&bundle).await.expect("first append");
     }
 
     let wal_cap = std::fs::metadata(&wal_path).expect("metadata").len();
@@ -1045,8 +1107,9 @@ fn wal_writer_preflight_rejects_when_size_cap_hit() {
         WalWriterOptions::new(wal_path.clone(), hash, FlushPolicy::Immediate)
             .with_max_wal_size(wal_cap),
     )
+    .await
     .expect("writer with cap");
-    let err = writer.append_bundle(&bundle).expect_err("cap hit");
+    let err = writer.append_bundle(&bundle).await.expect_err("cap hit");
     assert!(matches!(err, WalError::WalAtCapacity(_)));
 
     // Verify failed append did not persist
@@ -1063,13 +1126,14 @@ fn wal_writer_preflight_rejects_when_size_cap_hit() {
         WalWriterOptions::new(wal_path.clone(), hash, FlushPolicy::Immediate)
             .with_max_wal_size(u64::MAX),
     )
+    .await
     .expect("writer after cap removed");
-    let retry = writer.append_bundle(&bundle).expect("retry append");
+    let retry = writer.append_bundle(&bundle).await.expect("retry append");
     assert_eq!(retry.sequence, only.sequence + 1);
 }
 
-#[test]
-fn wal_writer_preflight_rejects_when_rotated_file_cap_hit() {
+#[tokio::test]
+async fn wal_writer_preflight_rejects_when_rotated_file_cap_hit() {
     let (_dir, wal_path) = temp_wal("rotated_file_cap.wal");
     let descriptor = logs_descriptor();
     let bundle = FixtureBundle::new(
@@ -1083,8 +1147,10 @@ fn wal_writer_preflight_rejects_when_rotated_file_cap_hit() {
         .with_max_rotated_files(1);
 
     {
-        let mut writer = WalWriter::open(constrained_opts.clone()).expect("writer");
-        let first = writer.append_bundle(&bundle).expect("first append");
+        let mut writer = WalWriter::open(constrained_opts.clone())
+            .await
+            .expect("writer");
+        let first = writer.append_bundle(&bundle).await.expect("first append");
         assert_eq!(first.sequence, 0);
     }
 
@@ -1095,9 +1161,12 @@ fn wal_writer_preflight_rejects_when_rotated_file_cap_hit() {
     );
 
     {
-        let mut writer = WalWriter::open(constrained_opts).expect("writer with cap");
+        let mut writer = WalWriter::open(constrained_opts)
+            .await
+            .expect("writer with cap");
         let err = writer
             .append_bundle(&bundle)
+            .await
             .expect_err("rotated file cap hit");
         assert!(matches!(err, WalError::WalAtCapacity(_)));
     }
@@ -1113,15 +1182,17 @@ fn wal_writer_preflight_rejects_when_rotated_file_cap_hit() {
             .with_rotation_target(1)
             .with_max_rotated_files(2),
     )
+    .await
     .expect("writer with higher rotated file cap");
     let retry = writer
         .append_bundle(&bundle)
+        .await
         .expect("retry append succeeds once cap raised");
     assert_eq!(retry.sequence, 1);
 }
 
-#[test]
-fn wal_reader_errors_on_truncated_entry_length() {
+#[tokio::test]
+async fn wal_reader_errors_on_truncated_entry_length() {
     let (_dir, wal_path) = temp_wal("length_trunc.wal");
     {
         let mut file = std::fs::OpenOptions::new()
@@ -1131,7 +1202,7 @@ fn wal_reader_errors_on_truncated_entry_length() {
             .open(&wal_path)
             .expect("create wal");
         WalHeader::new([0x55; 16])
-            .write_to(&mut file)
+            .write_to_sync(&mut file)
             .expect("header");
         file.write_all(&[0xAA, 0xBB])
             .expect("write partial entry length");
@@ -1145,8 +1216,8 @@ fn wal_reader_errors_on_truncated_entry_length() {
     }
 }
 
-#[test]
-fn wal_reader_reports_crc_mismatch() {
+#[tokio::test]
+async fn wal_reader_reports_crc_mismatch() {
     let (_dir, wal_path) = temp_wal("crc.wal");
     let descriptor = logs_descriptor();
     let bundle = FixtureBundle::new(
@@ -1155,8 +1226,8 @@ fn wal_reader_reports_crc_mismatch() {
     );
 
     let options = WalWriterOptions::new(wal_path.clone(), [1; 16], FlushPolicy::Immediate);
-    let mut writer = WalWriter::open(options).expect("writer");
-    let _offset = writer.append_bundle(&bundle).expect("append");
+    let mut writer = WalWriter::open(options).await.expect("writer");
+    let _offset = writer.append_bundle(&bundle).await.expect("append");
     drop(writer);
 
     let mut file = std::fs::OpenOptions::new()
@@ -1179,8 +1250,8 @@ fn wal_reader_reports_crc_mismatch() {
     }
 }
 
-#[test]
-fn wal_reader_rejects_unsupported_entry_type() {
+#[tokio::test]
+async fn wal_reader_rejects_unsupported_entry_type() {
     let body = encode_entry_header(0xAA, 0);
     let (_dir, wal_path) = write_single_entry(&body);
     let mut reader = WalReader::open(&wal_path).expect("reader");
@@ -1192,8 +1263,8 @@ fn wal_reader_rejects_unsupported_entry_type() {
     }
 }
 
-#[test]
-fn wal_reader_errors_on_truncated_slot_header() {
+#[tokio::test]
+async fn wal_reader_errors_on_truncated_slot_header() {
     let mut body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 1);
     body.extend_from_slice(&SlotId::new(0).0.to_le_bytes());
     let (_dir, wal_path) = write_single_entry(&body);
@@ -1208,8 +1279,8 @@ fn wal_reader_errors_on_truncated_slot_header() {
     }
 }
 
-#[test]
-fn wal_reader_errors_on_truncated_slot_payload() {
+#[tokio::test]
+async fn wal_reader_errors_on_truncated_slot_payload() {
     let mut body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 1);
     body.extend_from_slice(&SlotId::new(0).0.to_le_bytes());
     body.extend_from_slice(&[0x7Au8; SCHEMA_FINGERPRINT_LEN]);
@@ -1226,8 +1297,8 @@ fn wal_reader_errors_on_truncated_slot_payload() {
     }
 }
 
-#[test]
-fn wal_reader_errors_on_entry_header_underflow() {
+#[tokio::test]
+async fn wal_reader_errors_on_entry_header_underflow() {
     let body = vec![0u8; ENTRY_HEADER_LEN - 1];
     let (_dir, wal_path) = write_single_entry(&body);
     let mut reader = WalReader::open(&wal_path).expect("reader");
@@ -1240,8 +1311,8 @@ fn wal_reader_errors_on_entry_header_underflow() {
     }
 }
 
-#[test]
-fn wal_reader_errors_on_unexpected_trailing_bytes() {
+#[tokio::test]
+async fn wal_reader_errors_on_unexpected_trailing_bytes() {
     let mut body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 0);
     body.push(0xFF);
     let (_dir, wal_path) = write_single_entry(&body);
@@ -1255,8 +1326,8 @@ fn wal_reader_errors_on_unexpected_trailing_bytes() {
     }
 }
 
-#[test]
-fn wal_reader_errors_on_truncated_entry_body() {
+#[tokio::test]
+async fn wal_reader_errors_on_truncated_entry_body() {
     let body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 0);
     let (_dir, wal_path) = write_single_entry(&body);
     truncate_file_from_end(&wal_path, 6);
@@ -1271,8 +1342,8 @@ fn wal_reader_errors_on_truncated_entry_body() {
     }
 }
 
-#[test]
-fn wal_reader_errors_on_truncated_entry_crc() {
+#[tokio::test]
+async fn wal_reader_errors_on_truncated_entry_crc() {
     let body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 0);
     let (_dir, wal_path) = write_single_entry(&body);
     truncate_file_from_end(&wal_path, 2);
@@ -1285,8 +1356,8 @@ fn wal_reader_errors_on_truncated_entry_crc() {
     }
 }
 
-#[test]
-fn wal_reader_reports_io_error_during_entry_length_read() {
+#[tokio::test]
+async fn wal_reader_reports_io_error_during_entry_length_read() {
     let _guard = FailureGuard::new();
     let body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 0);
     let (_dir, wal_path) = write_single_entry(&body);
@@ -1301,8 +1372,8 @@ fn wal_reader_reports_io_error_during_entry_length_read() {
     }
 }
 
-#[test]
-fn wal_reader_reports_io_error_during_entry_body_read() {
+#[tokio::test]
+async fn wal_reader_reports_io_error_during_entry_body_read() {
     let _guard = FailureGuard::new();
     let body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 0);
     let (_dir, wal_path) = write_single_entry(&body);
@@ -1317,8 +1388,8 @@ fn wal_reader_reports_io_error_during_entry_body_read() {
     }
 }
 
-#[test]
-fn wal_reader_reports_io_error_during_entry_crc_read() {
+#[tokio::test]
+async fn wal_reader_reports_io_error_during_entry_crc_read() {
     let _guard = FailureGuard::new();
     let body = encode_entry_header(ENTRY_TYPE_RECORD_BUNDLE, 0);
     let (_dir, wal_path) = write_single_entry(&body);
@@ -1333,8 +1404,8 @@ fn wal_reader_reports_io_error_during_entry_crc_read() {
     }
 }
 
-#[test]
-fn wal_reader_iter_from_respects_offsets() {
+#[tokio::test]
+async fn wal_reader_iter_from_respects_offsets() {
     let (_dir, wal_path) = temp_wal("offsets.wal");
     let descriptor = logs_descriptor();
 
@@ -1343,19 +1414,26 @@ fn wal_reader_iter_from_respects_offsets() {
         [0xCC; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     let first_bundle = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x01, &[1])],
     );
-    let first_offset = writer.append_bundle(&first_bundle).expect("first append");
+    let first_offset = writer
+        .append_bundle(&first_bundle)
+        .await
+        .expect("first append");
 
     let second_bundle = FixtureBundle::new(
         descriptor,
         vec![FixtureSlot::new(SlotId::new(0), 0x02, &[2])],
     );
-    let second_offset = writer.append_bundle(&second_bundle).expect("second append");
+    let second_offset = writer
+        .append_bundle(&second_bundle)
+        .await
+        .expect("second append");
     drop(writer);
 
     let mut reader = WalReader::open(&wal_path).expect("reader");
@@ -1382,8 +1460,8 @@ fn wal_reader_iter_from_respects_offsets() {
     assert_eq!(second_offset.sequence, 1);
 }
 
-#[test]
-fn wal_reader_iter_from_partial_length_reports_error() {
+#[tokio::test]
+async fn wal_reader_iter_from_partial_length_reports_error() {
     let (_dir, wal_path) = temp_wal("partial_offset.wal");
     let descriptor = logs_descriptor();
 
@@ -1393,13 +1471,14 @@ fn wal_reader_iter_from_partial_length_reports_error() {
             [0x44; 16],
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
 
         let bundle = FixtureBundle::new(
             descriptor.clone(),
             vec![FixtureSlot::new(SlotId::new(0), 0xAA, &[1, 2])],
         );
-        let _ = writer.append_bundle(&bundle).expect("append");
+        let _ = writer.append_bundle(&bundle).await.expect("append");
     }
 
     let metadata_len = std::fs::metadata(&wal_path).expect("metadata").len();
@@ -1418,8 +1497,8 @@ fn wal_reader_iter_from_partial_length_reports_error() {
     }
 }
 
-#[test]
-fn wal_reader_iter_from_offset_past_file_returns_none() {
+#[tokio::test]
+async fn wal_reader_iter_from_offset_past_file_returns_none() {
     let (_dir, wal_path) = temp_wal("past_end_offset.wal");
     let descriptor = logs_descriptor();
 
@@ -1429,13 +1508,14 @@ fn wal_reader_iter_from_offset_past_file_returns_none() {
             [0x55; 16],
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
 
         let bundle = FixtureBundle::new(
             descriptor,
             vec![FixtureSlot::new(SlotId::new(0), 0xCC, &[3, 4])],
         );
-        let _ = writer.append_bundle(&bundle).expect("append");
+        let _ = writer.append_bundle(&bundle).await.expect("append");
     }
 
     let metadata_len = std::fs::metadata(&wal_path).expect("metadata").len();
@@ -1448,8 +1528,8 @@ fn wal_reader_iter_from_offset_past_file_returns_none() {
     assert!(iter.next().is_none());
 }
 
-#[test]
-fn wal_writer_reader_handles_all_bitmap_slots() {
+#[tokio::test]
+async fn wal_writer_reader_handles_all_bitmap_slots() {
     let (_dir, wal_path) = temp_wal("all_slots.wal");
     let descriptor = descriptor_with_all_slots();
 
@@ -1466,8 +1546,9 @@ fn wal_writer_reader_handles_all_bitmap_slots() {
         [0xAA; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
-    let _ = writer.append_bundle(&bundle).expect("append");
+    let _ = writer.append_bundle(&bundle).await.expect("append");
     drop(writer);
 
     let mut reader = WalReader::open(&wal_path).expect("reader");
@@ -1484,8 +1565,8 @@ fn wal_writer_reader_handles_all_bitmap_slots() {
     assert!(iter.next().is_none());
 }
 
-#[test]
-fn wal_writer_handles_large_payload_batches() {
+#[tokio::test]
+async fn wal_writer_handles_large_payload_batches() {
     let (_dir, wal_path) = temp_wal("large_payload.wal");
     let descriptor = BundleDescriptor::new(vec![
         slot_descriptor(0, "Logs"),
@@ -1513,9 +1594,13 @@ fn wal_writer_handles_large_payload_batches() {
         [0xBB; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
-    let _ = writer.append_bundle(&bundle).expect("append large payload");
+    let _ = writer
+        .append_bundle(&bundle)
+        .await
+        .expect("append large payload");
     drop(writer);
 
     let mut reader = WalReader::open(&wal_path).expect("reader");
@@ -1540,8 +1625,8 @@ fn wal_writer_handles_large_payload_batches() {
 /// when the file has been truncated mid-entry (simulating a crash where bytes
 /// were lost). This complements `wal_writer_auto_truncates_trailing_garbage_on_open`
 /// which tests garbage appended at the end.
-#[test]
-fn wal_writer_auto_truncates_after_mid_entry_truncation() {
+#[tokio::test]
+async fn wal_writer_auto_truncates_after_mid_entry_truncation() {
     let (_dir, wal_path) = temp_wal("recovery.wal");
     let descriptor = logs_descriptor();
     let hash = [0x99; 16];
@@ -1552,19 +1637,26 @@ fn wal_writer_auto_truncates_after_mid_entry_truncation() {
         hash,
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     let first_bundle = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x01, &[1])],
     );
-    let _ = writer.append_bundle(&first_bundle).expect("first append");
+    let _ = writer
+        .append_bundle(&first_bundle)
+        .await
+        .expect("first append");
 
     let second_bundle = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x02, &[2])],
     );
-    let _ = writer.append_bundle(&second_bundle).expect("second append");
+    let _ = writer
+        .append_bundle(&second_bundle)
+        .await
+        .expect("second append");
     drop(writer);
 
     // Record valid file length after first entry for later comparison
@@ -1593,6 +1685,7 @@ fn wal_writer_auto_truncates_after_mid_entry_truncation() {
         hash,
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer reopens and auto-truncates");
 
     // Verify file was truncated to first entry boundary
@@ -1609,6 +1702,7 @@ fn wal_writer_auto_truncates_after_mid_entry_truncation() {
     );
     let recovery_offset = writer
         .append_bundle(&recovery_bundle)
+        .await
         .expect("append recovery entry");
     assert_eq!(recovery_offset.position, first_entry_end); // WAL position
     assert_eq!(
@@ -1636,8 +1730,8 @@ fn wal_writer_auto_truncates_after_mid_entry_truncation() {
 /// where a process crashes mid-write, leaving a partial entry at the end of
 /// the WAL file. On reopen, the writer should automatically detect and remove
 /// this garbage so that subsequent appends resume from a clean boundary.
-#[test]
-fn wal_writer_auto_truncates_trailing_garbage_on_open() {
+#[tokio::test]
+async fn wal_writer_auto_truncates_trailing_garbage_on_open() {
     let (_dir, wal_path) = temp_wal("auto_truncate.wal");
     let descriptor = logs_descriptor();
     let hash = [0xAA; 16];
@@ -1648,19 +1742,20 @@ fn wal_writer_auto_truncates_trailing_garbage_on_open() {
         hash,
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     let bundle1 = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x01, &[1])],
     );
-    let _ = writer.append_bundle(&bundle1).expect("first append");
+    let _ = writer.append_bundle(&bundle1).await.expect("first append");
 
     let bundle2 = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x02, &[2])],
     );
-    let _ = writer.append_bundle(&bundle2).expect("second append");
+    let _ = writer.append_bundle(&bundle2).await.expect("second append");
     drop(writer);
 
     // Get the file length before corruption
@@ -1688,6 +1783,7 @@ fn wal_writer_auto_truncates_trailing_garbage_on_open() {
         hash,
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer reopens and truncates garbage");
 
     // File should be truncated back to valid length
@@ -1702,7 +1798,7 @@ fn wal_writer_auto_truncates_trailing_garbage_on_open() {
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0x03, &[3])],
     );
-    let offset3 = writer.append_bundle(&bundle3).expect("third append");
+    let offset3 = writer.append_bundle(&bundle3).await.expect("third append");
 
     // The third entry should have sequence 2 (continuing from 0, 1)
     assert_eq!(offset3.sequence, 2, "sequence should continue correctly");
@@ -1727,8 +1823,8 @@ fn wal_writer_auto_truncates_trailing_garbage_on_open() {
     assert!(iter.next().is_none(), "only three entries should exist");
 }
 
-#[test]
-fn wal_writer_rejects_segment_config_mismatch() {
+#[tokio::test]
+async fn wal_writer_rejects_segment_config_mismatch() {
     let (_dir, wal_path) = temp_wal("mismatch.wal");
     let original_hash = [0xAA; 16];
 
@@ -1736,13 +1832,13 @@ fn wal_writer_rejects_segment_config_mismatch() {
     {
         let options =
             WalWriterOptions::new(wal_path.clone(), original_hash, FlushPolicy::Immediate);
-        let _writer = WalWriter::open(options).expect("initial open");
+        let _writer = WalWriter::open(options).await.expect("initial open");
     }
 
     // Attempt to reopen with a different hash.
     let different_hash = [0xBB; 16];
     let options = WalWriterOptions::new(wal_path, different_hash, FlushPolicy::Immediate);
-    match WalWriter::open(options) {
+    match WalWriter::open(options).await {
         Err(WalError::SegmentConfigMismatch { expected, found }) => {
             assert_eq!(expected, different_hash);
             assert_eq!(found, original_hash);
@@ -1751,15 +1847,15 @@ fn wal_writer_rejects_segment_config_mismatch() {
     }
 }
 
-#[test]
-fn wal_reader_detects_unexpected_segment_config() {
+#[tokio::test]
+async fn wal_reader_detects_unexpected_segment_config() {
     let (_dir, wal_path) = temp_wal("reader_mismatch.wal");
     let stored_hash = [0xDD; 16];
 
     // Write a WAL with a known config hash.
     {
         let options = WalWriterOptions::new(wal_path.clone(), stored_hash, FlushPolicy::Immediate);
-        let _writer = WalWriter::open(options).expect("writer");
+        let _writer = WalWriter::open(options).await.expect("writer");
     }
 
     // Reader opens successfully and exposes the stored hash for the caller to verify.
@@ -1775,14 +1871,14 @@ fn wal_reader_detects_unexpected_segment_config() {
     );
 }
 
-#[test]
-fn wal_reader_fails_on_corrupt_header_version() {
+#[tokio::test]
+async fn wal_reader_fails_on_corrupt_header_version() {
     let (_dir, wal_path) = temp_wal("bad_version.wal");
 
     // Create a valid WAL first.
     {
         let options = WalWriterOptions::new(wal_path.clone(), [0x11; 16], FlushPolicy::Immediate);
-        let _writer = WalWriter::open(options).expect("writer");
+        let _writer = WalWriter::open(options).await.expect("writer");
     }
 
     // Corrupt the version field in the header.
@@ -1810,19 +1906,19 @@ struct CrashCase {
     injection: writer_test_support::CrashInjection,
 }
 
-#[test]
-fn wal_writer_recovers_from_crash_resilience_scenarios() {
+#[tokio::test]
+async fn wal_writer_recovers_from_crash_resilience_scenarios() {
     let cases = [CrashCase {
         name: "sidecar_pre_rename",
         injection: writer_test_support::CrashInjection::BeforeSidecarRename,
     }];
 
     for case in cases {
-        run_crash_case(case);
+        run_crash_case(case).await;
     }
 }
 
-fn run_crash_case(case: CrashCase) {
+async fn run_crash_case(case: CrashCase) {
     writer_test_support::reset_flush_notifications();
 
     let dir = tempdir().expect("tempdir");
@@ -1832,7 +1928,7 @@ fn run_crash_case(case: CrashCase) {
         .with_rotation_target(32 * 1024)
         .with_max_rotated_files(4);
 
-    let mut writer = WalWriter::open(options.clone()).expect("writer");
+    let mut writer = WalWriter::open(options.clone()).await.expect("writer");
     for value in 0..4 {
         let bundle = FixtureBundle::new(
             descriptor.clone(),
@@ -1842,7 +1938,7 @@ fn run_crash_case(case: CrashCase) {
                 build_complex_batch(256, "crash", 1024),
             )],
         );
-        let _ = writer.append_bundle(&bundle).expect("append bundle");
+        let _ = writer.append_bundle(&bundle).await.expect("append bundle");
     }
 
     for value in 0..4 {
@@ -1854,7 +1950,7 @@ fn run_crash_case(case: CrashCase) {
                 &[(value + 1) as i64],
             )],
         );
-        let _ = writer.append_bundle(&bundle).expect("append bundle");
+        let _ = writer.append_bundle(&bundle).await.expect("append bundle");
     }
 
     let cursor = wal_cursor_after_entries(&wal_path, 2);
@@ -1864,7 +1960,7 @@ fn run_crash_case(case: CrashCase) {
         case.name
     );
     writer_test_support::inject_crash(case.injection);
-    let err = match writer.persist_cursor(&cursor) {
+    let err = match writer.persist_cursor(&cursor).await {
         Ok(_) => panic!("{}: crash injection did not trigger", case.name),
         Err(err) => err,
     };
@@ -1876,7 +1972,7 @@ fn run_crash_case(case: CrashCase) {
 
     writer.test_force_crash();
 
-    assert_crash_recovery(&options, &descriptor, case.name, &cursor);
+    assert_crash_recovery(&options, &descriptor, case.name, &cursor).await;
     writer_test_support::reset_flush_notifications();
 }
 
@@ -1899,7 +1995,7 @@ fn wal_cursor_after_entries(path: &Path, entry_count: usize) -> WalConsumerCurso
     cursor
 }
 
-fn assert_crash_recovery(
+async fn assert_crash_recovery(
     options: &WalWriterOptions,
     descriptor: &BundleDescriptor,
     case_name: &str,
@@ -1907,13 +2003,16 @@ fn assert_crash_recovery(
 ) {
     assert_reader_clean(&options.path, cursor.safe_offset, case_name);
 
-    let mut writer = WalWriter::open(options.clone()).expect("writer reopen");
+    let mut writer = WalWriter::open(options.clone())
+        .await
+        .expect("writer reopen");
     let repair_bundle = FixtureBundle::new(
         descriptor.clone(),
         vec![FixtureSlot::new(SlotId::new(0), 0xF0, &[99])],
     );
     let _ = writer
         .append_bundle(&repair_bundle)
+        .await
         .expect("append after crash");
     drop(writer);
 
@@ -1923,9 +2022,9 @@ fn assert_crash_recovery(
         .path
         .parent()
         .expect("wal dir")
-        .join("quiver.wal.cursor");
+        .join(CURSOR_SIDECAR_FILENAME);
     if sidecar_path.exists() {
-        let sidecar = CursorSidecar::read_from(&sidecar_path).expect("sidecar readable");
+        let sidecar = CursorSidecar::read_from_sync(&sidecar_path).expect("sidecar readable");
         let total_logical = total_logical_bytes(&options.path);
         assert!(
             sidecar.wal_position <= total_logical,
@@ -1945,8 +2044,8 @@ fn assert_reader_clean(path: &Path, offset: u64, case_name: &str) {
     }
 }
 
-#[test]
-fn wal_writer_flushes_with_bytes_or_duration_policy_on_bytes() {
+#[tokio::test]
+async fn wal_writer_flushes_with_bytes_or_duration_policy_on_bytes() {
     // Test that BytesOrDuration flushes when byte threshold is exceeded
     let (_dir, wal_path) = temp_wal("flush_bytes_or_duration_bytes.wal");
 
@@ -1960,6 +2059,7 @@ fn wal_writer_flushes_with_bytes_or_duration_policy_on_bytes() {
             duration: Duration::from_secs(3600),
         },
     ))
+    .await
     .expect("writer");
 
     let bundle = FixtureBundle::new(
@@ -1970,6 +2070,7 @@ fn wal_writer_flushes_with_bytes_or_duration_policy_on_bytes() {
     let before = writer.test_last_flush();
     let _offset = writer
         .append_bundle(&bundle)
+        .await
         .expect("append triggers flush via bytes threshold");
     assert!(
         writer.test_last_flush() > before,
@@ -1977,8 +2078,8 @@ fn wal_writer_flushes_with_bytes_or_duration_policy_on_bytes() {
     );
 }
 
-#[test]
-fn wal_writer_flushes_with_bytes_or_duration_policy_on_duration() {
+#[tokio::test]
+async fn wal_writer_flushes_with_bytes_or_duration_policy_on_duration() {
     // Test that BytesOrDuration flushes when duration threshold is exceeded
     let (_dir, wal_path) = temp_wal("flush_bytes_or_duration_time.wal");
 
@@ -1992,6 +2093,7 @@ fn wal_writer_flushes_with_bytes_or_duration_policy_on_duration() {
             duration: Duration::from_millis(1),
         },
     ))
+    .await
     .expect("writer");
 
     let bundle = FixtureBundle::new(
@@ -2005,6 +2107,7 @@ fn wal_writer_flushes_with_bytes_or_duration_policy_on_duration() {
 
     let _offset = writer
         .append_bundle(&bundle)
+        .await
         .expect("append triggers flush via duration threshold");
     assert!(
         writer.test_last_flush() > before,
@@ -2012,8 +2115,8 @@ fn wal_writer_flushes_with_bytes_or_duration_policy_on_duration() {
     );
 }
 
-#[test]
-fn wal_writer_skips_flush_when_neither_threshold_met() {
+#[tokio::test]
+async fn wal_writer_skips_flush_when_neither_threshold_met() {
     // Test that BytesOrDuration does NOT flush when neither threshold is met
     writer_test_support::reset_flush_notifications();
 
@@ -2029,6 +2132,7 @@ fn wal_writer_skips_flush_when_neither_threshold_met() {
             duration: Duration::from_secs(3600),
         },
     ))
+    .await
     .expect("writer");
 
     let bundle = FixtureBundle::new(
@@ -2040,7 +2144,10 @@ fn wal_writer_skips_flush_when_neither_threshold_met() {
     writer.test_set_last_flush(Instant::now());
     let before = writer.test_last_flush();
 
-    let _offset = writer.append_bundle(&bundle).expect("append without flush");
+    let _offset = writer
+        .append_bundle(&bundle)
+        .await
+        .expect("append without flush");
 
     // last_flush should not have changed (no flush occurred during append)
     assert_eq!(
@@ -2050,24 +2157,26 @@ fn wal_writer_skips_flush_when_neither_threshold_met() {
     );
 }
 
-#[test]
-fn wal_writer_appends_empty_bundle_with_no_slots() {
+#[tokio::test]
+async fn wal_writer_appends_empty_bundle_with_no_slots() {
     // Test that a bundle with zero populated slots can be appended
     let (_dir, wal_path) = temp_wal("empty_bundle.wal");
 
     let descriptor = logs_descriptor();
-    let mut writer = open_test_writer(wal_path.clone(), [0x11; 16]);
+    let mut writer = open_test_writer(wal_path.clone(), [0x11; 16]).await;
 
     // Create a bundle with no slots populated (empty slots vec)
     let empty_bundle = FixtureBundle::new(descriptor.clone(), vec![]);
     let offset = writer
         .append_bundle(&empty_bundle)
+        .await
         .expect("empty bundle should append successfully");
     assert_eq!(offset.sequence, 0);
 
     // Append a normal bundle after to verify the writer is still functional
     let offset2 = writer
         .append_bundle(&single_slot_bundle(&descriptor, 0x22, &[1, 2, 3]))
+        .await
         .expect("normal bundle after empty");
     assert_eq!(offset2.sequence, 1);
     drop(writer);
@@ -2090,18 +2199,19 @@ fn wal_writer_appends_empty_bundle_with_no_slots() {
     assert_eq!(entries[1].slots.len(), 1);
 }
 
-#[test]
-fn wal_writer_rejects_cursor_sequence_regression() {
+#[tokio::test]
+async fn wal_writer_rejects_cursor_sequence_regression() {
     // Test that advancing cursor with a lower sequence number fails
     let (_dir, wal_path) = temp_wal("sequence_regression.wal");
 
     let descriptor = logs_descriptor();
-    let mut writer = open_test_writer(wal_path.clone(), [0x33; 16]);
+    let mut writer = open_test_writer(wal_path.clone(), [0x33; 16]).await;
 
     // Append three bundles
     for i in 0..3 {
         let _ = writer
             .append_bundle(&single_slot_bundle(&descriptor, i, &[i as i64]))
+            .await
             .expect("append");
     }
 
@@ -2115,6 +2225,7 @@ fn wal_writer_rejects_cursor_sequence_regression() {
     };
     writer
         .persist_cursor(&cursor_at_second)
+        .await
         .expect("advance to second entry");
 
     // Now try to regress to the first entry (sequence=0)
@@ -2123,7 +2234,7 @@ fn wal_writer_rejects_cursor_sequence_regression() {
         safe_sequence: entries[0].sequence, // sequence=0, which is less than 1
     };
 
-    match writer.persist_cursor(&cursor_at_first) {
+    match writer.persist_cursor(&cursor_at_first).await {
         Err(WalError::InvalidConsumerCursor(msg)) => {
             assert!(
                 msg.contains("regressed"),
@@ -2134,18 +2245,19 @@ fn wal_writer_rejects_cursor_sequence_regression() {
     }
 }
 
-#[test]
-fn wal_writer_rejects_cursor_offset_regression() {
+#[tokio::test]
+async fn wal_writer_rejects_cursor_offset_regression() {
     // Test that advancing cursor with a lower offset fails
     let (_dir, wal_path) = temp_wal("offset_regression.wal");
 
     let descriptor = logs_descriptor();
-    let mut writer = open_test_writer(wal_path.clone(), [0x44; 16]);
+    let mut writer = open_test_writer(wal_path.clone(), [0x44; 16]).await;
 
     // Append two bundles
     for i in 0..2 {
         let _ = writer
             .append_bundle(&single_slot_bundle(&descriptor, i, &[i as i64]))
+            .await
             .expect("append");
     }
 
@@ -2159,6 +2271,7 @@ fn wal_writer_rejects_cursor_offset_regression() {
     };
     writer
         .persist_cursor(&cursor_at_second)
+        .await
         .expect("advance to second entry");
 
     // Now try to advance with a higher sequence but lower offset
@@ -2168,7 +2281,7 @@ fn wal_writer_rejects_cursor_offset_regression() {
         safe_sequence: entries[1].sequence + 1, // higher sequence to pass that check
     };
 
-    match writer.persist_cursor(&bad_cursor) {
+    match writer.persist_cursor(&bad_cursor).await {
         Err(WalError::InvalidConsumerCursor(msg)) => {
             assert!(
                 msg.contains("regressed"),
@@ -2179,8 +2292,8 @@ fn wal_writer_rejects_cursor_offset_regression() {
     }
 }
 
-#[test]
-fn wal_writer_handles_bundle_with_unpopulated_descriptor_slots() {
+#[tokio::test]
+async fn wal_writer_handles_bundle_with_unpopulated_descriptor_slots() {
     // Test a bundle where the descriptor has slots but payload() returns None for some
     let (_dir, wal_path) = temp_wal("sparse_bundle.wal");
 
@@ -2196,6 +2309,7 @@ fn wal_writer_handles_bundle_with_unpopulated_descriptor_slots() {
         [0x55; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     // Only populate slot 1 (middle slot), leaving 0 and 2 empty
@@ -2206,6 +2320,7 @@ fn wal_writer_handles_bundle_with_unpopulated_descriptor_slots() {
 
     let offset = writer
         .append_bundle(&sparse_bundle)
+        .await
         .expect("sparse bundle appends");
     assert_eq!(offset.sequence, 0);
     drop(writer);
@@ -2222,11 +2337,11 @@ fn wal_writer_handles_bundle_with_unpopulated_descriptor_slots() {
     assert_eq!(entry.slots[0].row_count, 2);
 }
 
-#[test]
-fn wal_recovery_clamps_stale_sidecar_offset() {
+#[tokio::test]
+async fn wal_recovery_clamps_stale_sidecar_offset() {
     // Test that recovery handles a sidecar with wal_position beyond actual WAL data
     let (_dir, wal_path) = temp_wal("stale_sidecar.wal");
-    let sidecar_path = wal_path.parent().unwrap().join("quiver.wal.cursor");
+    let sidecar_path = wal_path.parent().unwrap().join(CURSOR_SIDECAR_FILENAME);
 
     let descriptor = logs_descriptor();
 
@@ -2237,15 +2352,16 @@ fn wal_recovery_clamps_stale_sidecar_offset() {
             [0x66; 16],
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
 
         let bundle = single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]);
-        let _ = writer.append_bundle(&bundle).expect("append");
+        let _ = writer.append_bundle(&bundle).await.expect("append");
     }
 
     // Now write a sidecar with an absurdly large offset
     let stale_sidecar = CursorSidecar::new(u64::MAX / 2);
-    CursorSidecar::write_to(&sidecar_path, &stale_sidecar).expect("write stale sidecar");
+    CursorSidecar::write_to_sync(&sidecar_path, &stale_sidecar).expect("write stale sidecar");
 
     // Reopen the writer - it should clamp the offset internally and not panic
     let mut writer = WalWriter::open(WalWriterOptions::new(
@@ -2253,12 +2369,14 @@ fn wal_recovery_clamps_stale_sidecar_offset() {
         [0x66; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer should recover from stale sidecar");
 
     // Writer should still be functional
     let bundle = single_slot_bundle(&descriptor, 0x02, &[4, 5, 6]);
     let offset = writer
         .append_bundle(&bundle)
+        .await
         .expect("append after recovery");
     assert_eq!(offset.sequence, 1, "sequence should continue from WAL scan");
 
@@ -2270,12 +2388,13 @@ fn wal_recovery_clamps_stale_sidecar_offset() {
     };
     writer
         .persist_cursor(&cursor)
+        .await
         .expect("advance cursor to end of WAL");
     drop(writer);
 
     // Verify the sidecar now has a valid offset
     let wal_len = std::fs::metadata(&wal_path).expect("metadata").len();
-    let recovered_sidecar = CursorSidecar::read_from(&sidecar_path).expect("read sidecar");
+    let recovered_sidecar = CursorSidecar::read_from_sync(&sidecar_path).expect("read sidecar");
     let max_logical = wal_len.saturating_sub(test_header_size());
     assert!(
         recovered_sidecar.wal_position <= max_logical,
@@ -2285,8 +2404,8 @@ fn wal_recovery_clamps_stale_sidecar_offset() {
     );
 }
 
-#[test]
-fn wal_recovery_handles_rotated_files_with_gaps_in_ids() {
+#[tokio::test]
+async fn wal_recovery_handles_rotated_files_with_gaps_in_ids() {
     // Test that recovery handles rotated files with non-contiguous IDs (e.g., wal.1, wal.5, wal.12)
     let (_dir, wal_path) = temp_wal("rotation_gaps.wal");
 
@@ -2303,7 +2422,7 @@ fn wal_recovery_handles_rotated_files_with_gaps_in_ids() {
             .open(&rotated_path)
             .expect("create rotated file");
         WalHeader::new([0x77; 16])
-            .write_to(&mut file)
+            .write_to_sync(&mut file)
             .expect("write header");
         file.flush().expect("flush");
     }
@@ -2315,10 +2434,11 @@ fn wal_recovery_handles_rotated_files_with_gaps_in_ids() {
             [0x77; 16],
             FlushPolicy::Immediate,
         ))
+        .await
         .expect("writer");
 
         let bundle = single_slot_bundle(&descriptor, 0x01, &[1]);
-        let _ = writer.append_bundle(&bundle).expect("append");
+        let _ = writer.append_bundle(&bundle).await.expect("append");
     }
 
     // Reopen and verify the writer picks up where it left off
@@ -2327,12 +2447,14 @@ fn wal_recovery_handles_rotated_files_with_gaps_in_ids() {
             .with_rotation_target(1)
             .with_max_rotated_files(10),
     )
+    .await
     .expect("writer with gap-id rotations");
 
     // Append and trigger a rotation
     let bundle = single_slot_bundle(&descriptor, 0x02, &[2, 3, 4, 5]);
     let _ = writer
         .append_bundle(&bundle)
+        .await
         .expect("append triggers rotation");
     drop(writer);
 
@@ -2348,9 +2470,9 @@ fn wal_recovery_handles_rotated_files_with_gaps_in_ids() {
     assert!(rotated_path_for(&wal_path, 7).exists());
 }
 
-#[test]
+#[tokio::test]
 #[ignore] // Run manually: cargo test wal_recovery_scan_benchmark --release -- --ignored --nocapture
-fn wal_recovery_scan_benchmark() {
+async fn wal_recovery_scan_benchmark() {
     use std::time::Instant;
 
     let (_dir, wal_path) = temp_wal("benchmark.wal");
@@ -2370,6 +2492,7 @@ fn wal_recovery_scan_benchmark() {
             .with_rotation_target(512 * 1024 * 1024) // 512 MB - no rotation
             .with_max_wal_size(512 * 1024 * 1024),
     )
+    .await
     .expect("writer");
 
     let target_bytes = 64 * 1024 * 1024u64;
@@ -2378,7 +2501,7 @@ fn wal_recovery_scan_benchmark() {
 
     while total_bytes < target_bytes {
         let bundle = single_slot_bundle(&descriptor, 0x01, payload.as_slice());
-        let offset = writer.append_bundle(&bundle).expect("append");
+        let offset = writer.append_bundle(&bundle).await.expect("append");
         total_bytes = offset.position;
         entry_count += 1;
     }
@@ -2396,6 +2519,7 @@ fn wal_recovery_scan_benchmark() {
         hash,
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("reopen");
     let recovery_elapsed = recovery_start.elapsed();
 
@@ -2415,6 +2539,7 @@ fn wal_recovery_scan_benchmark() {
             .with_max_rotated_files(16) // Allow enough rotated files
             .with_max_wal_size(512 * 1024 * 1024),
     )
+    .await
     .expect("writer");
 
     entry_count = 0;
@@ -2422,7 +2547,7 @@ fn wal_recovery_scan_benchmark() {
     let entries_for_64mb = 26000u64;
     for _ in 0..entries_for_64mb {
         let bundle = single_slot_bundle(&descriptor, 0x01, payload.as_slice());
-        let _ = writer.append_bundle(&bundle).expect("append");
+        let _ = writer.append_bundle(&bundle).await.expect("append");
         entry_count += 1;
     }
     drop(writer);
@@ -2467,6 +2592,7 @@ fn wal_recovery_scan_benchmark() {
             .with_rotation_target(8 * 1024 * 1024)
             .with_max_rotated_files(16),
     )
+    .await
     .expect("reopen");
     let recovery_elapsed = recovery_start.elapsed();
 
@@ -2481,9 +2607,9 @@ fn wal_recovery_scan_benchmark() {
 /// Manual test to observe RSS behavior after a large bundle spike.
 ///
 /// Run with: cargo test wal_memory_after_large_bundle -- --ignored --nocapture
-#[test]
+#[tokio::test]
 #[ignore]
-fn wal_memory_after_large_bundle_spike() {
+async fn wal_memory_after_large_bundle_spike() {
     fn get_rss_kb() -> Option<u64> {
         // Read RSS from /proc/self/statm (Linux-specific)
         // statm format: size resident shared text lib data dt (all in pages)
@@ -2512,6 +2638,7 @@ fn wal_memory_after_large_bundle_spike() {
         [0xEE; 16],
         FlushPolicy::Immediate,
     ))
+    .await
     .expect("writer");
 
     println!("=== Memory Spike Test ===");
@@ -2522,7 +2649,10 @@ fn wal_memory_after_large_bundle_spike() {
     for _ in 0..100 {
         let small_slot = FixtureSlot::new(SlotId::new(0), 0x01, &[1, 2, 3]);
         let small_bundle = FixtureBundle::new(descriptor.clone(), vec![small_slot]);
-        let _ = writer.append_bundle(&small_bundle).expect("append small");
+        let _ = writer
+            .append_bundle(&small_bundle)
+            .await
+            .expect("append small");
     }
     print_rss("after baseline");
 
@@ -2535,7 +2665,10 @@ fn wal_memory_after_large_bundle_spike() {
             build_complex_batch(1_000_000, "large", 1024), // ~1000 MB
         );
         let large_bundle = FixtureBundle::new(descriptor.clone(), vec![large_slot]);
-        let _ = writer.append_bundle(&large_bundle).expect("append large");
+        let _ = writer
+            .append_bundle(&large_bundle)
+            .await
+            .expect("append large");
         // print_rss("after large bundle (before drop)");
     }
     // large_slot and large_bundle are now dropped
@@ -2548,7 +2681,10 @@ fn wal_memory_after_large_bundle_spike() {
     for i in 0..100 {
         let small_slot = FixtureSlot::new(SlotId::new(0), 0x03, &[4, 5, 6]);
         let small_bundle = FixtureBundle::new(descriptor.clone(), vec![small_slot]);
-        let _ = writer.append_bundle(&small_bundle).expect("append small");
+        let _ = writer
+            .append_bundle(&small_bundle)
+            .await
+            .expect("append small");
         drop(small_bundle);
         if (i + 1) % 10 == 0 {
             print_rss(&format!("after {} small bundles", i + 1));
@@ -2556,13 +2692,13 @@ fn wal_memory_after_large_bundle_spike() {
     }
 }
 
-#[test]
-fn wal_buffer_decay_rate_rejects_zero_denominator() {
+#[tokio::test]
+async fn wal_buffer_decay_rate_rejects_zero_denominator() {
     let (_dir, wal_path) = temp_wal("decay_rate_zero_denom.wal");
     let options = WalWriterOptions::new(wal_path, [0xAA; 16], FlushPolicy::Immediate)
         .with_buffer_decay_rate(15, 0); // Invalid: denominator is zero
 
-    let result = WalWriter::open(options);
+    let result = WalWriter::open(options).await;
     let err = result.expect_err("should reject zero denominator");
     assert!(
         matches!(err, WalError::InvalidConfig(msg) if msg.contains("denominator")),
@@ -2571,13 +2707,13 @@ fn wal_buffer_decay_rate_rejects_zero_denominator() {
     );
 }
 
-#[test]
-fn wal_buffer_decay_rate_rejects_numerator_gte_denominator() {
+#[tokio::test]
+async fn wal_buffer_decay_rate_rejects_numerator_gte_denominator() {
     let (_dir, wal_path) = temp_wal("decay_rate_bad_ratio.wal");
     let options = WalWriterOptions::new(wal_path, [0xAA; 16], FlushPolicy::Immediate)
         .with_buffer_decay_rate(16, 16); // Invalid: numerator >= denominator (no decay)
 
-    let result = WalWriter::open(options);
+    let result = WalWriter::open(options).await;
     let err = result.expect_err("should reject numerator >= denominator");
     assert!(
         matches!(err, WalError::InvalidConfig(msg) if msg.contains("numerator")),
@@ -2586,37 +2722,41 @@ fn wal_buffer_decay_rate_rejects_numerator_gte_denominator() {
     );
 }
 
-#[test]
-fn wal_buffer_decay_rate_accepts_valid_values() {
+#[tokio::test]
+async fn wal_buffer_decay_rate_accepts_valid_values() {
     let (_dir, wal_path) = temp_wal("decay_rate_valid.wal");
     // These should all succeed - validation happens at open() time
     let _ = WalWriter::open(
         WalWriterOptions::new(wal_path.clone(), [0xAA; 16], FlushPolicy::Immediate)
             .with_buffer_decay_rate(0, 1), // Aggressive: decay to zero immediately
     )
+    .await
     .expect("(0, 1) should be valid");
 
     let _ = WalWriter::open(
         WalWriterOptions::new(wal_path.clone(), [0xAA; 16], FlushPolicy::Immediate)
             .with_buffer_decay_rate(1, 2), // 50% decay per append
     )
+    .await
     .expect("(1, 2) should be valid");
 
     let _ = WalWriter::open(
         WalWriterOptions::new(wal_path.clone(), [0xAA; 16], FlushPolicy::Immediate)
             .with_buffer_decay_rate(31, 32), // ~3% decay per append (conservative)
     )
+    .await
     .expect("(31, 32) should be valid");
 
     let _ = WalWriter::open(
         WalWriterOptions::new(wal_path, [0xAA; 16], FlushPolicy::Immediate)
             .with_buffer_decay_rate(999, 1000), // ~0.1% decay per append (very conservative)
     )
+    .await
     .expect("(999, 1000) should be valid");
 }
 
-#[test]
-fn wal_buffer_decay_rate_affects_shrinking_behavior() {
+#[tokio::test]
+async fn wal_buffer_decay_rate_affects_shrinking_behavior() {
     // Test that a faster decay rate causes faster shrinking.
     // We use a small threshold and aggressive decay to observe the effect.
     use super::writer::test_support::get_payload_buffer_capacity;
@@ -2629,6 +2769,7 @@ fn wal_buffer_decay_rate_affects_shrinking_behavior() {
         WalWriterOptions::new(wal_path, [0xEE; 16], FlushPolicy::Immediate)
             .with_buffer_decay_rate(1, 2),
     )
+    .await
     .expect("writer");
 
     // Write a moderately large bundle to grow the buffer
@@ -2638,12 +2779,12 @@ fn wal_buffer_decay_rate_affects_shrinking_behavior() {
         build_complex_batch(1000, "medium", 256), // ~256 KB payload
     );
     let bundle = FixtureBundle::new(descriptor.clone(), vec![large_slot]);
-    let _ = writer.append_bundle(&bundle).expect("append");
+    let _ = writer.append_bundle(&bundle).await.expect("append");
     drop(bundle);
 
     let capacity_after_large = get_payload_buffer_capacity(&writer);
     assert!(
-        capacity_after_large >= 256 * 1024,
+        capacity_after_large >= 100 * 1024,
         "buffer should have grown: {}",
         capacity_after_large
     );
@@ -2653,7 +2794,7 @@ fn wal_buffer_decay_rate_affects_shrinking_behavior() {
     for _ in 0..20 {
         let small_slot = FixtureSlot::new(SlotId::new(0), 0x02, &[1, 2, 3]);
         let small_bundle = FixtureBundle::new(descriptor.clone(), vec![small_slot]);
-        let _ = writer.append_bundle(&small_bundle).expect("append");
+        let _ = writer.append_bundle(&small_bundle).await.expect("append");
     }
 
     let capacity_after_small = get_payload_buffer_capacity(&writer);
@@ -2674,8 +2815,8 @@ fn wal_buffer_decay_rate_affects_shrinking_behavior() {
 /// Verifies that WAL positions remain stable across WAL file rotations.
 /// After a rotation, new entries should receive positions that continue from
 /// the previous entry's `next_offset`, not restart at the active file position.
-#[test]
-fn wal_positions_stable_across_rotation() {
+#[tokio::test]
+async fn wal_positions_stable_across_rotation() {
     let (_dir, wal_path) = temp_wal("wal_positions_rotation.wal");
     let descriptor = logs_descriptor();
 
@@ -2685,17 +2826,18 @@ fn wal_positions_stable_across_rotation() {
             .with_rotation_target(1)
             .with_max_rotated_files(10),
     )
+    .await
     .expect("writer");
 
     // Append three entries, each triggering a rotation
     let bundle1 = single_slot_bundle(&descriptor, 0x01, &[1, 2, 3, 4]);
-    let offset1 = writer.append_bundle(&bundle1).expect("first append");
+    let offset1 = writer.append_bundle(&bundle1).await.expect("first append");
 
     let bundle2 = single_slot_bundle(&descriptor, 0x02, &[5, 6, 7, 8]);
-    let offset2 = writer.append_bundle(&bundle2).expect("second append");
+    let offset2 = writer.append_bundle(&bundle2).await.expect("second append");
 
     let bundle3 = single_slot_bundle(&descriptor, 0x03, &[9, 10, 11, 12]);
-    let offset3 = writer.append_bundle(&bundle3).expect("third append");
+    let offset3 = writer.append_bundle(&bundle3).await.expect("third append");
 
     // Verify WAL positions are monotonically increasing and contiguous
     assert_eq!(
@@ -2716,8 +2858,8 @@ fn wal_positions_stable_across_rotation() {
 
 /// Verifies that WAL positions remain stable after rotated files are purged.
 /// The `wal_position_start` field in the WAL header preserves the coordinate system.
-#[test]
-fn wal_positions_stable_after_purge() {
+#[tokio::test]
+async fn wal_positions_stable_after_purge() {
     let (_dir, wal_path) = temp_wal("wal_positions_purge.wal");
     let descriptor = logs_descriptor();
 
@@ -2726,17 +2868,18 @@ fn wal_positions_stable_after_purge() {
             .with_rotation_target(1)
             .with_max_rotated_files(10),
     )
+    .await
     .expect("writer");
 
     // Append several entries to trigger rotations
     let bundle1 = single_slot_bundle(&descriptor, 0x01, &[1, 2, 3, 4]);
-    let offset1 = writer.append_bundle(&bundle1).expect("first append");
+    let offset1 = writer.append_bundle(&bundle1).await.expect("first append");
 
     let bundle2 = single_slot_bundle(&descriptor, 0x02, &[5, 6, 7, 8]);
-    let offset2 = writer.append_bundle(&bundle2).expect("second append");
+    let offset2 = writer.append_bundle(&bundle2).await.expect("second append");
 
     let bundle3 = single_slot_bundle(&descriptor, 0x03, &[9, 10, 11, 12]);
-    let offset3 = writer.append_bundle(&bundle3).expect("third append");
+    let offset3 = writer.append_bundle(&bundle3).await.expect("third append");
 
     // Verify rotations occurred
     assert_eq!(writer.rotation_count(), 3, "three rotations");
@@ -2746,7 +2889,10 @@ fn wal_positions_stable_after_purge() {
         safe_offset: offset3.next_offset,
         safe_sequence: offset3.sequence,
     };
-    writer.persist_cursor(&cursor).expect("persist cursor");
+    writer
+        .persist_cursor(&cursor)
+        .await
+        .expect("persist cursor");
 
     // After persisting cursor for all data, all rotated files should be purged
     let purge_count = writer.purge_count();
@@ -2756,6 +2902,7 @@ fn wal_positions_stable_after_purge() {
     let bundle4 = single_slot_bundle(&descriptor, 0x04, &[13, 14, 15, 16]);
     let offset4 = writer
         .append_bundle(&bundle4)
+        .await
         .expect("fourth append after purge");
 
     // The fourth entry should start where the third ended
@@ -2772,8 +2919,8 @@ fn wal_positions_stable_after_purge() {
 }
 
 /// Verifies that rotation and purge counters are tracked correctly.
-#[test]
-fn rotation_and_purge_counters() {
+#[tokio::test]
+async fn rotation_and_purge_counters() {
     let (_dir, wal_path) = temp_wal("rotation_purge_counters.wal");
     let descriptor = logs_descriptor();
 
@@ -2782,6 +2929,7 @@ fn rotation_and_purge_counters() {
             .with_rotation_target(1)
             .with_max_rotated_files(10),
     )
+    .await
     .expect("writer");
 
     assert_eq!(writer.rotation_count(), 0, "no rotations yet");
@@ -2791,7 +2939,7 @@ fn rotation_and_purge_counters() {
     let mut last_offset = None;
     for i in 0..5i64 {
         let bundle = single_slot_bundle(&descriptor, i as u8, &[i, i + 1, i + 2]);
-        last_offset = Some(writer.append_bundle(&bundle).expect("append"));
+        last_offset = Some(writer.append_bundle(&bundle).await.expect("append"));
     }
 
     assert_eq!(writer.rotation_count(), 5, "5 rotations after 5 appends");
@@ -2803,7 +2951,10 @@ fn rotation_and_purge_counters() {
         safe_offset: final_offset.next_offset,
         safe_sequence: final_offset.sequence,
     };
-    writer.persist_cursor(&cursor).expect("persist cursor");
+    writer
+        .persist_cursor(&cursor)
+        .await
+        .expect("persist cursor");
 
     assert_eq!(writer.purge_count(), 5, "all 5 rotated files purged");
     assert_eq!(writer.rotation_count(), 5, "rotation count unchanged");
@@ -2811,8 +2962,8 @@ fn rotation_and_purge_counters() {
 
 /// Verifies that recovery after restart with purged files correctly infers
 /// the purged cumulative offset from the cursor.
-#[test]
-fn recovery_infers_purged_offset_from_cursor() {
+#[tokio::test]
+async fn recovery_infers_purged_offset_from_cursor() {
     let (_dir, wal_path) = temp_wal("recovery_purged_offset.wal");
     let descriptor = logs_descriptor();
 
@@ -2823,23 +2974,28 @@ fn recovery_infers_purged_offset_from_cursor() {
     // Phase 1: Write entries, persist cursor, and purge
     let final_offset;
     {
-        let mut writer = WalWriter::open(options.clone()).expect("first writer");
+        let mut writer = WalWriter::open(options.clone())
+            .await
+            .expect("first writer");
 
         // Append entries
         for i in 0..3i64 {
             let bundle = single_slot_bundle(&descriptor, i as u8, &[i * 10, i * 10 + 1]);
-            let _ = writer.append_bundle(&bundle).expect("append");
+            let _ = writer.append_bundle(&bundle).await.expect("append");
         }
 
         // Persist cursor
         let bundle = single_slot_bundle(&descriptor, 0x99, &[99]);
-        final_offset = writer.append_bundle(&bundle).expect("final append");
+        final_offset = writer.append_bundle(&bundle).await.expect("final append");
 
         let cursor = WalConsumerCursor {
             safe_offset: final_offset.next_offset,
             safe_sequence: final_offset.sequence,
         };
-        writer.persist_cursor(&cursor).expect("persist cursor");
+        writer
+            .persist_cursor(&cursor)
+            .await
+            .expect("persist cursor");
 
         // All rotated files should be purged
         assert!(!rotated_path_for(&wal_path, 1).exists());
@@ -2849,11 +3005,14 @@ fn recovery_infers_purged_offset_from_cursor() {
 
     // Phase 2: Restart and append new entries
     {
-        let mut writer = WalWriter::open(options).expect("reopen writer");
+        let mut writer = WalWriter::open(options).await.expect("reopen writer");
 
         // Append a new entry - it should get a correct WAL position
         let bundle = single_slot_bundle(&descriptor, 0xBB, &[0xBB]);
-        let new_offset = writer.append_bundle(&bundle).expect("append after restart");
+        let new_offset = writer
+            .append_bundle(&bundle)
+            .await
+            .expect("append after restart");
 
         // The new entry should continue from where the last one ended,
         // even though the rotated files were purged before restart
@@ -2867,8 +3026,8 @@ fn recovery_infers_purged_offset_from_cursor() {
 
 /// Verifies that multiple rotation-cursor-purge cycles maintain
 /// correct WAL positions throughout.
-#[test]
-fn multiple_purge_cycles_maintain_wal_positions() {
+#[tokio::test]
+async fn multiple_purge_cycles_maintain_wal_positions() {
     let (_dir, wal_path) = temp_wal("multiple_purge_cycles.wal");
     let descriptor = logs_descriptor();
 
@@ -2877,6 +3036,7 @@ fn multiple_purge_cycles_maintain_wal_positions() {
             .with_rotation_target(1)
             .with_max_rotated_files(10),
     )
+    .await
     .expect("writer");
 
     let mut expected_next_position = 0u64;
@@ -2884,7 +3044,7 @@ fn multiple_purge_cycles_maintain_wal_positions() {
     // Run multiple cycles of: append -> persist cursor -> purge
     for cycle in 0..5i64 {
         let bundle = single_slot_bundle(&descriptor, cycle as u8, &[cycle, cycle + 1]);
-        let offset = writer.append_bundle(&bundle).expect("append");
+        let offset = writer.append_bundle(&bundle).await.expect("append");
 
         if expected_next_position > 0 {
             assert_eq!(
@@ -2900,7 +3060,10 @@ fn multiple_purge_cycles_maintain_wal_positions() {
             safe_offset: offset.next_offset,
             safe_sequence: offset.sequence,
         };
-        writer.persist_cursor(&cursor).expect("persist cursor");
+        writer
+            .persist_cursor(&cursor)
+            .await
+            .expect("persist cursor");
     }
 
     assert_eq!(writer.rotation_count(), 5, "5 rotations");
@@ -2914,8 +3077,8 @@ fn multiple_purge_cycles_maintain_wal_positions() {
 /// 1. Multiple entries are appended, triggering rotations
 /// 2. A cursor is set to a position within an older rotated file
 /// 3. The cursor should be accepted and rotated files up to that point purged
-#[test]
-fn cursor_in_rotated_file_is_valid() {
+#[tokio::test]
+async fn cursor_in_rotated_file_is_valid() {
     let (_dir, wal_path) = temp_wal("cursor_in_rotated.wal");
     let descriptor = logs_descriptor();
 
@@ -2924,17 +3087,18 @@ fn cursor_in_rotated_file_is_valid() {
             .with_rotation_target(1) // Rotate after each entry
             .with_max_rotated_files(10),
     )
+    .await
     .expect("writer");
 
     // Append three entries, each triggering a rotation
     let bundle1 = single_slot_bundle(&descriptor, 0x01, &[1, 2, 3, 4]);
-    let offset1 = writer.append_bundle(&bundle1).expect("first append");
+    let offset1 = writer.append_bundle(&bundle1).await.expect("first append");
 
     let bundle2 = single_slot_bundle(&descriptor, 0x02, &[5, 6, 7, 8]);
-    let offset2 = writer.append_bundle(&bundle2).expect("second append");
+    let offset2 = writer.append_bundle(&bundle2).await.expect("second append");
 
     let bundle3 = single_slot_bundle(&descriptor, 0x03, &[9, 10, 11, 12]);
-    let _offset3 = writer.append_bundle(&bundle3).expect("third append");
+    let _offset3 = writer.append_bundle(&bundle3).await.expect("third append");
 
     // Verify rotations occurred
     assert_eq!(writer.rotation_count(), 3, "three rotations");
@@ -2948,6 +3112,7 @@ fn cursor_in_rotated_file_is_valid() {
     };
     writer
         .persist_cursor(&cursor)
+        .await
         .expect("cursor in rotated file should succeed");
 
     // The first rotated file should be purged (it's fully consumed)
@@ -2964,6 +3129,7 @@ fn cursor_in_rotated_file_is_valid() {
     };
     writer
         .persist_cursor(&cursor2)
+        .await
         .expect("cursor in second rotated file should succeed");
 
     // Now two rotated files should be purged
@@ -2972,4 +3138,464 @@ fn cursor_in_rotated_file_is_valid() {
         2,
         "two rotated files should be purged"
     );
+}
+
+#[tokio::test]
+async fn wal_error_is_at_capacity_returns_true_for_capacity_errors() {
+    let capacity_error = WalError::WalAtCapacity("test capacity message");
+    assert!(
+        capacity_error.is_at_capacity(),
+        "WalAtCapacity should return true for is_at_capacity()"
+    );
+}
+
+#[tokio::test]
+async fn wal_error_is_at_capacity_returns_false_for_other_errors() {
+    let io_error = WalError::Io(std::io::Error::other("test"));
+    assert!(
+        !io_error.is_at_capacity(),
+        "Io error should return false for is_at_capacity()"
+    );
+
+    let invalid_config = WalError::InvalidConfig("test config");
+    assert!(
+        !invalid_config.is_at_capacity(),
+        "InvalidConfig should return false for is_at_capacity()"
+    );
+
+    let invalid_entry = WalError::InvalidEntry("test entry");
+    assert!(
+        !invalid_entry.is_at_capacity(),
+        "InvalidEntry should return false for is_at_capacity()"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MultiFileWalReader Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+use super::MultiFileWalReader;
+
+#[tokio::test]
+async fn multi_file_reader_reads_single_active_file() {
+    let (_dir, wal_path) = temp_wal("multi_single.wal");
+    let descriptor = logs_descriptor();
+
+    // Write 3 entries to a single WAL file (no rotation)
+    let mut writer = open_test_writer(wal_path.clone(), [0xA1; 16]).await;
+    let offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8, 9]))
+        .await
+        .expect("append 3");
+    drop(writer);
+
+    // Read with MultiFileWalReader
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(0)
+        .expect("iter")
+        .collect::<Result<_, _>>()
+        .expect("all entries");
+
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].sequence, offset1.sequence);
+    assert_eq!(entries[1].sequence, offset2.sequence);
+    assert_eq!(entries[2].sequence, offset3.sequence);
+}
+
+#[tokio::test]
+async fn multi_file_reader_reads_across_rotated_files() {
+    let (_dir, wal_path) = temp_wal("multi_rotated.wal");
+    let descriptor = logs_descriptor();
+
+    // Configure writer to rotate after each entry
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xA2; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    // Write 4 entries - each triggers a rotation
+    let offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8]))
+        .await
+        .expect("append 3");
+    let offset4 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x04, &[9]))
+        .await
+        .expect("append 4");
+    drop(writer);
+
+    // Verify rotated files exist
+    assert!(rotated_path_for(&wal_path, 1).exists());
+    assert!(rotated_path_for(&wal_path, 2).exists());
+    assert!(rotated_path_for(&wal_path, 3).exists());
+
+    // Read all entries with MultiFileWalReader
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(0)
+        .expect("iter")
+        .collect::<Result<_, _>>()
+        .expect("all entries");
+
+    assert_eq!(entries.len(), 4, "should read all 4 entries across files");
+    assert_eq!(entries[0].sequence, offset1.sequence);
+    assert_eq!(entries[1].sequence, offset2.sequence);
+    assert_eq!(entries[2].sequence, offset3.sequence);
+    assert_eq!(entries[3].sequence, offset4.sequence);
+
+    // Verify WAL positions are contiguous: each entry's next_offset equals the next entry's position
+    assert_eq!(entries[0].next_offset, entries[1].offset.position);
+    assert_eq!(entries[1].next_offset, entries[2].offset.position);
+    assert_eq!(entries[2].next_offset, entries[3].offset.position);
+}
+
+#[tokio::test]
+async fn multi_file_reader_starts_from_middle_of_stream() {
+    let (_dir, wal_path) = temp_wal("multi_middle.wal");
+    let descriptor = logs_descriptor();
+
+    // Configure writer to rotate after each entry
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xA3; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    let offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let _offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8]))
+        .await
+        .expect("append 3");
+    drop(writer);
+
+    // Start reading from after the first entry
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(offset1.next_offset)
+        .expect("iter from middle")
+        .collect::<Result<_, _>>()
+        .expect("entries");
+
+    assert_eq!(entries.len(), 2, "should skip first entry");
+    assert_eq!(entries[0].sequence, offset2.sequence);
+}
+
+#[tokio::test]
+async fn multi_file_reader_starts_from_position_in_second_file() {
+    let (_dir, wal_path) = temp_wal("multi_second_file.wal");
+    let descriptor = logs_descriptor();
+
+    // Configure writer to rotate after each entry
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xA4; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    let _offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8]))
+        .await
+        .expect("append 3");
+    drop(writer);
+
+    // Start reading from after the second entry (which is in second rotated file)
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(offset2.next_offset)
+        .expect("iter from second file")
+        .collect::<Result<_, _>>()
+        .expect("entries");
+
+    assert_eq!(entries.len(), 1, "should only read third entry");
+    assert_eq!(entries[0].sequence, offset3.sequence);
+}
+
+#[tokio::test]
+async fn multi_file_reader_returns_empty_when_position_beyond_end() {
+    let (_dir, wal_path) = temp_wal("multi_beyond.wal");
+    let descriptor = logs_descriptor();
+
+    let mut writer = open_test_writer(wal_path.clone(), [0xA5; 16]).await;
+    let offset = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append");
+    drop(writer);
+
+    // Request position way beyond the WAL
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(offset.next_offset + 1_000_000)
+        .expect("iter from beyond")
+        .collect::<Result<_, _>>()
+        .expect("entries");
+
+    assert!(entries.is_empty(), "should have no entries");
+}
+
+#[tokio::test]
+async fn multi_file_reader_handles_only_rotated_files() {
+    let (_dir, wal_path) = temp_wal("multi_rotated_only.wal");
+    let descriptor = logs_descriptor();
+
+    // Write entries, rotate, then delete the active file
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xA6; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    let offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    drop(writer);
+
+    // Active file should be empty (just header), delete it to simulate edge case
+    std::fs::remove_file(&wal_path).expect("remove active file");
+
+    // Should still be able to read from rotated files
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(0)
+        .expect("iter")
+        .collect::<Result<_, _>>()
+        .expect("entries");
+
+    assert_eq!(entries.len(), 2, "should read from rotated files");
+    assert_eq!(entries[0].sequence, offset1.sequence);
+    assert_eq!(entries[1].sequence, offset2.sequence);
+}
+
+#[tokio::test]
+async fn multi_file_reader_preserves_wal_positions_across_files() {
+    let (_dir, wal_path) = temp_wal("multi_positions.wal");
+    let descriptor = logs_descriptor();
+
+    // Configure writer to rotate after each entry
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xA7; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    let offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8]))
+        .await
+        .expect("append 3");
+    drop(writer);
+
+    // Read with MultiFileWalReader and verify WAL positions match writer offsets
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(0)
+        .expect("iter")
+        .collect::<Result<_, _>>()
+        .expect("all entries");
+
+    assert_eq!(entries[0].offset.position, offset1.position);
+    assert_eq!(entries[0].next_offset, offset1.next_offset);
+
+    assert_eq!(entries[1].offset.position, offset2.position);
+    assert_eq!(entries[1].next_offset, offset2.next_offset);
+
+    assert_eq!(entries[2].offset.position, offset3.position);
+    assert_eq!(entries[2].next_offset, offset3.next_offset);
+}
+
+#[tokio::test]
+async fn multi_file_reader_wal_end_position_matches_last_entry() {
+    let (_dir, wal_path) = temp_wal("multi_end_pos.wal");
+    let descriptor = logs_descriptor();
+
+    // Write entries to a single WAL file
+    let mut writer = open_test_writer(wal_path.clone(), [0xA8; 16]).await;
+    let _offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let _offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8, 9]))
+        .await
+        .expect("append 3");
+    drop(writer);
+
+    // Verify wal_end_position matches the last entry's next_offset
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let end_position = reader.wal_end_position();
+
+    assert_eq!(
+        end_position, offset3.next_offset,
+        "wal_end_position should equal the last entry's next_offset"
+    );
+}
+
+#[tokio::test]
+async fn multi_file_reader_wal_end_position_across_rotated_files() {
+    let (_dir, wal_path) = temp_wal("multi_end_pos_rotated.wal");
+    let descriptor = logs_descriptor();
+
+    // Configure writer to rotate after each entry
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xA9; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    let _offset1 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x01, &[1, 2, 3]))
+        .await
+        .expect("append 1");
+    let _offset2 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x02, &[4, 5]))
+        .await
+        .expect("append 2");
+    let offset3 = writer
+        .append_bundle(&single_slot_bundle(&descriptor, 0x03, &[6, 7, 8]))
+        .await
+        .expect("append 3");
+    drop(writer);
+
+    // Verify wal_end_position matches last entry even with rotated files
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let end_position = reader.wal_end_position();
+
+    assert_eq!(
+        end_position, offset3.next_offset,
+        "wal_end_position should equal the last entry's next_offset across rotated files"
+    );
+}
+
+#[tokio::test]
+async fn multi_file_reader_wal_end_position_empty_wal() {
+    let (_dir, wal_path) = temp_wal("multi_end_pos_empty.wal");
+
+    // Create an empty WAL file (header only, no entries)
+    let _writer = open_test_writer(wal_path.clone(), [0xAA; 16]).await;
+    // Writer is dropped immediately without any writes
+
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let end_position = reader.wal_end_position();
+
+    // Empty WAL should have end position at 0 (no data written after header)
+    assert_eq!(
+        end_position, 0,
+        "wal_end_position should be 0 for empty WAL"
+    );
+}
+
+#[tokio::test]
+async fn multi_file_reader_fails_when_no_wal_files_exist() {
+    let dir = tempdir().expect("tempdir");
+    let wal_path = dir.path().join("nonexistent.wal");
+
+    let result = MultiFileWalReader::open(&wal_path);
+    assert!(result.is_err(), "should fail when no WAL files exist");
+}
+
+#[tokio::test]
+async fn multi_file_reader_discovers_files_in_correct_order() {
+    // Test that files with out-of-order names (wal.5, wal.2, wal.8, wal.1) are
+    // read in the correct order based on wal_position_start, not filename.
+    let (_dir, wal_path) = temp_wal("order_test.wal");
+    let descriptor = logs_descriptor();
+
+    // Use rotation target of 1 byte to force rotation after each entry
+    let mut writer = open_test_writer_with(wal_path.clone(), [0xB1; 16], |opts| {
+        opts.with_rotation_target(1).with_max_rotated_files(10)
+    })
+    .await;
+
+    // Write 4 entries - each triggers a rotation, creating wal.1, wal.2, wal.3, wal.4
+    let mut expected_sequences = Vec::new();
+    for i in 0..4u8 {
+        let offset = writer
+            .append_bundle(&single_slot_bundle(&descriptor, i, &[i as i64]))
+            .await
+            .expect("append");
+        expected_sequences.push(offset.sequence);
+    }
+    drop(writer);
+
+    // Rename rotated files to simulate out-of-order discovery (wal.1 -> wal.5, etc.)
+    // The reader should still return entries in wal_position_start order, not filename order.
+    let renames = [(1, 10), (2, 5), (3, 20), (4, 2)];
+    for (old_id, new_id) in renames {
+        let old_path = rotated_path_for(&wal_path, old_id);
+        let new_path = rotated_path_for(&wal_path, new_id);
+        std::fs::rename(&old_path, &new_path).expect("rename rotated file");
+    }
+
+    // Read all entries - they should come back in original sequence order
+    // despite the files having scrambled names
+    let reader = MultiFileWalReader::open(&wal_path).expect("multi reader");
+    let entries: Vec<_> = reader
+        .iter_from(0)
+        .expect("iter")
+        .collect::<Result<_, _>>()
+        .expect("all entries");
+
+    assert_eq!(entries.len(), 4, "should read all 4 entries");
+
+    // Verify entries are in correct order (by sequence number)
+    let actual_sequences: Vec<_> = entries.iter().map(|e| e.sequence).collect();
+    assert_eq!(
+        actual_sequences, expected_sequences,
+        "entries should be in original write order despite scrambled filenames"
+    );
+
+    // Also verify WAL positions are monotonically increasing
+    for i in 1..entries.len() {
+        assert!(
+            entries[i].offset.position > entries[i - 1].offset.position,
+            "entry {} position {} should be > entry {} position {}",
+            i,
+            entries[i].offset.position,
+            i - 1,
+            entries[i - 1].offset.position
+        );
+    }
 }

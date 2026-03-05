@@ -22,11 +22,12 @@
 //! Writes use atomic rename (`write_to` → `.tmp` → `rename`) plus parent
 //! directory fsync to ensure durability across power loss.
 
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
 use crc32fast::Hasher;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::writer::sync_parent_dir;
 use super::{WalError, WalResult};
@@ -51,13 +52,26 @@ pub(crate) struct CursorSidecar {
     pub wal_position: u64,
 }
 
+/// The filename used for cursor sidecar files.
+pub(crate) const CURSOR_SIDECAR_FILENAME: &str = "quiver.wal.cursor";
+
 impl CursorSidecar {
-    pub fn new(wal_position: u64) -> Self {
+    pub const fn new(wal_position: u64) -> Self {
         Self { wal_position }
     }
 
+    /// Returns the path to the cursor sidecar file for a given WAL path.
+    ///
+    /// The cursor sidecar is stored in the same directory as the WAL file.
+    pub fn path_for(wal_path: &Path) -> PathBuf {
+        wal_path
+            .parent()
+            .map(|p| p.join(CURSOR_SIDECAR_FILENAME))
+            .unwrap_or_else(|| PathBuf::from(CURSOR_SIDECAR_FILENAME))
+    }
+
     /// Returns the encoded size for the current version.
-    pub fn encoded_len(&self) -> usize {
+    pub const fn encoded_len(&self) -> usize {
         SIDECAR_V1_LEN
     }
 
@@ -158,8 +172,78 @@ impl CursorSidecar {
     }
 
     /// Reads the size field from a file to determine total sidecar length.
-    fn read_size(file: &mut std::fs::File) -> WalResult<usize> {
-        use std::io::Seek;
+    async fn read_size(file: &mut File) -> WalResult<usize> {
+        let mut prefix = [0u8; SIDECAR_MIN_LEN];
+        let _ = file.read_exact(&mut prefix).await?;
+
+        // Validate magic
+        if &prefix[..CURSOR_SIDECAR_MAGIC.len()] != CURSOR_SIDECAR_MAGIC {
+            return Err(WalError::InvalidCursorSidecar("magic mismatch"));
+        }
+
+        // Read size from offset 10 (magic 8 + version 2)
+        let size = u16::from_le_bytes([prefix[10], prefix[11]]) as usize;
+        if size < SIDECAR_MIN_LEN {
+            return Err(WalError::InvalidCursorSidecar("size too small"));
+        }
+
+        // Seek back to beginning for full read
+        let _ = file.seek(SeekFrom::Start(0)).await?;
+        Ok(size)
+    }
+
+    /// Reads the cursor sidecar from a file.
+    pub async fn read_from(path: &Path) -> WalResult<Self> {
+        let mut file = OpenOptions::new().read(true).open(path).await?;
+        let size = Self::read_size(&mut file).await?;
+        let mut buf = vec![0u8; size];
+        let _ = file.read_exact(&mut buf).await?;
+        Self::decode(&buf)
+    }
+
+    /// Writes the cursor sidecar to a file using atomic rename.
+    pub async fn write_to(path: &Path, value: &Self) -> WalResult<()> {
+        let tmp_path = temporary_path(path);
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .await?;
+            let encoded = value.encode();
+            file.write_all(&encoded).await?;
+            file.flush().await?;
+            file.sync_data().await?;
+        }
+        #[cfg(test)]
+        if writer_test_support::take_crash(CrashInjection::BeforeSidecarRename) {
+            return Err(WalError::InjectedCrash(
+                "crash injected before cursor sidecar rename",
+            ));
+        }
+        tokio::fs::rename(&tmp_path, path).await?;
+        sync_parent_dir(path).await?;
+        Ok(())
+    }
+
+    /// Reads the cursor sidecar from a file synchronously.
+    ///
+    /// Used by tests that verify cursor state after async writes.
+    #[cfg(test)]
+    pub fn read_from_sync(path: &Path) -> WalResult<Self> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let size = Self::read_size_sync(&mut file)?;
+        let mut buf = vec![0u8; size];
+        file.read_exact(&mut buf)?;
+        Self::decode(&buf)
+    }
+
+    /// Reads the size field from a file synchronously.
+    #[cfg(test)]
+    fn read_size_sync(file: &mut std::fs::File) -> WalResult<usize> {
+        use std::io::{Read, Seek};
         let mut prefix = [0u8; SIDECAR_MIN_LEN];
         file.read_exact(&mut prefix)?;
 
@@ -175,22 +259,19 @@ impl CursorSidecar {
         }
 
         // Seek back to beginning for full read
-        let _ = file.seek(std::io::SeekFrom::Start(0))?;
+        let _ = file.seek(SeekFrom::Start(0))?;
         Ok(size)
     }
 
-    pub fn read_from(path: &Path) -> WalResult<Self> {
-        let mut file = OpenOptions::new().read(true).open(path)?;
-        let size = Self::read_size(&mut file)?;
-        let mut buf = vec![0u8; size];
-        file.read_exact(&mut buf)?;
-        Self::decode(&buf)
-    }
-
-    pub fn write_to(path: &Path, value: &Self) -> WalResult<()> {
+    /// Writes the cursor sidecar to a file synchronously using atomic rename.
+    ///
+    /// Used by tests that need to create cursor sidecar files for testing.
+    #[cfg(test)]
+    pub fn write_to_sync(path: &Path, value: &Self) -> WalResult<()> {
+        use std::io::Write;
         let tmp_path = temporary_path(path);
         {
-            let mut file = OpenOptions::new()
+            let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
@@ -200,14 +281,16 @@ impl CursorSidecar {
             file.flush()?;
             file.sync_data()?;
         }
-        #[cfg(test)]
-        if writer_test_support::take_crash(CrashInjection::BeforeSidecarRename) {
-            return Err(WalError::InjectedCrash(
-                "crash injected before cursor sidecar rename",
-            ));
-        }
         std::fs::rename(&tmp_path, path)?;
-        sync_parent_dir(path)?;
+        // Sync parent directory for durability (on Unix)
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_data();
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -264,13 +347,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn write_and_read_sidecar() {
+    #[tokio::test]
+    async fn write_and_read_sidecar() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("quiver.wal.cursor");
+        let path = dir.path().join(CURSOR_SIDECAR_FILENAME);
         let value = sample_sidecar();
-        CursorSidecar::write_to(&path, &value).expect("write");
-        let loaded = CursorSidecar::read_from(&path).expect("read");
+        CursorSidecar::write_to(&path, &value).await.expect("write");
+        let loaded = CursorSidecar::read_from(&path).await.expect("read");
         assert_eq!(loaded, value);
     }
 

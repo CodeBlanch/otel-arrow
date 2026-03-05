@@ -32,12 +32,15 @@
 //! To ensure scalability, the pipeline engine will start multiple instances of the same pipeline
 //! in parallel on different cores, each with its own processor instance.
 
-use crate::control::{AckMsg, NackMsg};
-use crate::effect_handler::{EffectHandlerCore, TelemetryTimerCancelHandle, TimerCancelHandle};
-use crate::error::{Error, ProcessorErrorKind, TypedError};
-use crate::local::message::LocalSender;
-use crate::message::Message;
+use crate::Interests;
+use crate::control::{AckMsg, NackMsg, PipelineCtrlMsgSender};
+use crate::effect_handler::{
+    EffectHandlerCore, SourceTagging, TelemetryTimerCancelHandle, TimerCancelHandle,
+};
+use crate::error::{Error, TypedError};
+use crate::message::{Message, Sender};
 use crate::node::NodeId;
+use crate::output_router::OutputRouter;
 use async_trait::async_trait;
 use otap_df_config::PortName;
 use otap_df_telemetry::error::Error as TelemetryError;
@@ -91,12 +94,8 @@ pub trait Processor<PData> {
 #[derive(Clone)]
 pub struct EffectHandler<PData> {
     pub(crate) core: EffectHandlerCore<PData>,
-
-    /// A sender used to forward messages from the processor.
-    /// Supports multiple named output ports.
-    msg_senders: HashMap<PortName, LocalSender<PData>>,
-    /// Cached default sender for fast access in the hot path
-    default_sender: Option<LocalSender<PData>>,
+    /// Output-port router.
+    pub router: OutputRouter<Sender<PData>>,
 }
 
 /// Implementation for the `!Send` effect handler.
@@ -105,26 +104,13 @@ impl<PData> EffectHandler<PData> {
     #[must_use]
     pub fn new(
         node_id: NodeId,
-        msg_senders: HashMap<PortName, LocalSender<PData>>,
+        msg_senders: HashMap<PortName, Sender<PData>>,
         default_port: Option<PortName>,
         metrics_reporter: MetricsReporter,
     ) -> Self {
-        let core = EffectHandlerCore::new(node_id, metrics_reporter);
-
-        // Determine and cache the default sender
-        let default_sender = if let Some(ref port) = default_port {
-            msg_senders.get(port).cloned()
-        } else if msg_senders.len() == 1 {
-            msg_senders.values().next().cloned()
-        } else {
-            None
-        };
-
-        EffectHandler {
-            core,
-            msg_senders,
-            default_sender,
-        }
+        let core = EffectHandlerCore::new(node_id.clone(), metrics_reporter);
+        let router = OutputRouter::new(node_id, msg_senders, default_port);
+        EffectHandler { core, router }
     }
 
     /// Returns the id of the processor associated with this handler.
@@ -133,10 +119,28 @@ impl<PData> EffectHandler<PData> {
         self.core.node_id()
     }
 
-    /// Returns the list of connected out ports for this processor.
+    /// Sets whether outgoing messages need source node tagging.
+    pub fn set_source_tagging(&mut self, value: SourceTagging) {
+        self.core.set_source_tagging(value);
+    }
+
+    /// Returns whether outgoing messages need source node tagging.
+    /// This is true when the destination node has multiple input sources.
+    #[must_use]
+    pub const fn source_tagging(&self) -> SourceTagging {
+        self.core.source_tagging()
+    }
+
+    /// Returns the list of connected output ports for this processor.
     #[must_use]
     pub fn connected_ports(&self) -> Vec<PortName> {
-        self.msg_senders.keys().cloned().collect()
+        self.router.connected_ports()
+    }
+
+    /// Returns the precomputed node interests.
+    #[must_use]
+    pub fn node_interests(&self) -> Interests {
+        self.core.node_interests()
     }
 
     /// Sends a message to the next node(s) in the pipeline using the default port.
@@ -150,23 +154,25 @@ impl<PData> EffectHandler<PData> {
     /// if the default port is not configured.
     #[inline]
     pub async fn send_message(&self, data: PData) -> Result<(), TypedError<PData>> {
-        match &self.default_sender {
-            Some(sender) => sender
-                .send(data)
-                .await
-                .map_err(TypedError::ChannelSendError),
-            None => Err(TypedError::Error(Error::ProcessorError {
-                processor: self.processor_id(),
-                kind: ProcessorErrorKind::Configuration,
-                error:
-                    "Ambiguous default out port: multiple ports connected and no default configured"
-                        .to_string(),
-                source_detail: String::new(),
-            })),
-        }
+        self.router.send_default(data).await
     }
 
-    /// Sends a message to a specific named out port.
+    /// Attempts to send a message without awaiting.
+    ///
+    /// Unlike `send_message`, this method returns immediately if the downstream
+    /// channel is full, allowing the caller to handle backpressure without awaiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TypedError::ChannelSendError`] containing [`SendError::Full`] if the
+    /// channel is full, or [`SendError::Closed`] if the channel is closed.
+    /// Returns a [`TypedError::Error`] if no default port is configured.
+    #[inline]
+    pub fn try_send_message(&self, data: PData) -> Result<(), TypedError<PData>> {
+        self.router.try_send_default(data)
+    }
+
+    /// Sends a message to a specific named output port.
     ///
     /// # Errors
     ///
@@ -177,22 +183,25 @@ impl<PData> EffectHandler<PData> {
     where
         P: Into<PortName>,
     {
-        let port_name: PortName = port.into();
-        match self.msg_senders.get(&port_name) {
-            Some(sender) => sender
-                .send(data)
-                .await
-                .map_err(TypedError::ChannelSendError),
-            None => Err(TypedError::Error(Error::ProcessorError {
-                processor: self.processor_id(),
-                kind: ProcessorErrorKind::Configuration,
-                error: format!(
-                    "Unknown out port '{port_name}' for node {}",
-                    self.processor_id()
-                ),
-                source_detail: String::new(),
-            })),
-        }
+        self.router.send_to(port, data).await
+    }
+
+    /// Attempts to send a message to a specific named output port without awaiting.
+    ///
+    /// Unlike `send_message_to`, this method returns immediately if the downstream
+    /// channel is full, allowing the caller to handle backpressure without awaiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TypedError::ChannelSendError`] containing [`SendError::Full`] if the
+    /// channel is full, or [`SendError::Closed`] if the channel is closed.
+    /// Returns a [`TypedError::Error`] if the port does not exist.
+    #[inline]
+    pub fn try_send_message_to<P>(&self, port: P, data: PData) -> Result<(), TypedError<PData>>
+    where
+        P: Into<PortName>,
+    {
+        self.router.try_send_to(port, data)
     }
 
     /// Print an info message to stdout.
@@ -222,20 +231,20 @@ impl<PData> EffectHandler<PData> {
         self.core.start_periodic_telemetry(duration).await
     }
 
-    /// Send an Ack to a node of known-interest.
-    pub async fn route_ack<F>(&self, ack: AckMsg<PData>, cxf: F) -> Result<(), Error>
+    /// Send an Ack to the pipeline controller for context unwinding.
+    pub async fn route_ack(&self, ack: AckMsg<PData>) -> Result<(), Error>
     where
-        F: FnOnce(AckMsg<PData>) -> Option<(usize, AckMsg<PData>)>,
+        PData: crate::Unwindable,
     {
-        self.core.route_ack(ack, cxf).await
+        self.core.route_ack(ack).await
     }
 
-    /// Send a Nack to a node of known-interest.
-    pub async fn route_nack<F>(&self, nack: NackMsg<PData>, cxf: F) -> Result<(), Error>
+    /// Send a Nack to the pipeline controller for context unwinding.
+    pub async fn route_nack(&self, nack: NackMsg<PData>) -> Result<(), Error>
     where
-        F: FnOnce(NackMsg<PData>) -> Option<(usize, NackMsg<PData>)>,
+        PData: crate::Unwindable,
     {
-        self.core.route_nack(nack, cxf).await
+        self.core.route_nack(nack).await
     }
 
     /// Delay data.
@@ -252,6 +261,18 @@ impl<PData> EffectHandler<PData> {
         self.core.report_metrics(metrics)
     }
 
+    /// Sets the pipeline control message sender for this effect handler.
+    ///
+    /// Primarily used by tests and manual harnesses that construct an EffectHandler directly;
+    /// the engine wiring sets this automatically in `prepare_runtime`.
+    pub fn set_pipeline_ctrl_msg_sender(
+        &mut self,
+        pipeline_ctrl_msg_sender: PipelineCtrlMsgSender<PData>,
+    ) {
+        self.core
+            .set_pipeline_ctrl_msg_sender(pipeline_ctrl_msg_sender);
+    }
+
     // More methods will be added in the future as needed.
 }
 
@@ -261,6 +282,7 @@ mod tests {
     use super::*;
     use crate::local::message::LocalSender;
     use crate::testing::test_node;
+    use otap_df_channel::error::SendError;
     use otap_df_channel::mpsc;
     use std::borrow::Cow;
     use std::collections::{HashMap, HashSet};
@@ -276,8 +298,8 @@ mod tests {
         let (b_tx, b_rx) = channel::<u64>(10);
 
         let mut senders = HashMap::new();
-        let _ = senders.insert("a".into(), LocalSender::MpscSender(a_tx));
-        let _ = senders.insert("b".into(), LocalSender::MpscSender(b_tx));
+        let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
+        let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
 
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
@@ -296,7 +318,7 @@ mod tests {
     async fn effect_handler_send_message_single_port_fallback() {
         let (tx, rx) = channel::<u64>(10);
         let mut senders = HashMap::new();
-        let _ = senders.insert("only".into(), LocalSender::MpscSender(tx));
+        let _ = senders.insert("only".into(), Sender::Local(LocalSender::mpsc(tx)));
 
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
@@ -311,8 +333,8 @@ mod tests {
         let (b_tx, b_rx) = channel::<u64>(10);
 
         let mut senders = HashMap::new();
-        let _ = senders.insert("a".into(), LocalSender::MpscSender(a_tx));
-        let _ = senders.insert("b".into(), LocalSender::MpscSender(b_tx));
+        let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
+        let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
 
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let eh = EffectHandler::new(
@@ -338,8 +360,8 @@ mod tests {
         let (b_tx, b_rx) = channel::<u64>(10);
 
         let mut senders = HashMap::new();
-        let _ = senders.insert("a".into(), LocalSender::MpscSender(a_tx));
-        let _ = senders.insert("b".into(), LocalSender::MpscSender(b_tx));
+        let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
+        let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
 
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
@@ -366,8 +388,8 @@ mod tests {
         let (b_tx, _b_rx) = channel::<u64>(1);
 
         let mut senders = HashMap::new();
-        let _ = senders.insert("a".into(), LocalSender::MpscSender(a_tx));
-        let _ = senders.insert("b".into(), LocalSender::MpscSender(b_tx));
+        let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
+        let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
 
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
@@ -375,5 +397,120 @@ mod tests {
         let ports: HashSet<_> = eh.connected_ports().into_iter().collect();
         let expected: HashSet<_> = [Cow::from("a"), Cow::from("b")].into_iter().collect();
         assert_eq!(ports, expected);
+    }
+
+    #[test]
+    fn effect_handler_try_send_message_success() {
+        let (tx, rx) = channel::<u64>(10);
+        let mut senders = HashMap::new();
+        let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
+
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let eh = EffectHandler::new(
+            test_node("proc"),
+            senders,
+            Some("out".into()),
+            metrics_reporter,
+        );
+
+        // Should succeed when channel has capacity
+        assert!(eh.try_send_message(42).is_ok());
+        assert_eq!(rx.try_recv().unwrap(), 42);
+    }
+
+    #[test]
+    fn effect_handler_try_send_message_channel_full() {
+        // Create a channel with capacity 1
+        let (tx, _rx) = channel::<u64>(1);
+        let mut senders = HashMap::new();
+        let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
+
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let eh = EffectHandler::new(
+            test_node("proc"),
+            senders,
+            Some("out".into()),
+            metrics_reporter,
+        );
+
+        // First send should succeed
+        assert!(eh.try_send_message(1).is_ok());
+
+        // Second send should fail with Full since channel capacity is 1
+        let result = eh.try_send_message(2);
+        assert!(matches!(
+            result,
+            Err(TypedError::ChannelSendError(SendError::Full(2)))
+        ));
+    }
+
+    #[test]
+    fn effect_handler_try_send_message_no_default_sender() {
+        let (a_tx, _a_rx) = channel::<u64>(10);
+        let (b_tx, _b_rx) = channel::<u64>(10);
+
+        let mut senders = HashMap::new();
+        let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
+        let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
+
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        // No default port specified with multiple ports = ambiguous
+        let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
+
+        // Should return configuration error when no default sender
+        let result = eh.try_send_message(99);
+        assert!(matches!(result, Err(TypedError::Error(_))));
+    }
+
+    #[test]
+    fn effect_handler_try_send_message_to_success() {
+        let (a_tx, a_rx) = channel::<u64>(10);
+        let (b_tx, b_rx) = channel::<u64>(10);
+
+        let mut senders = HashMap::new();
+        let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
+        let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
+
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
+
+        // Should succeed when sending to a specific port
+        assert!(eh.try_send_message_to("b", 42).is_ok());
+        assert_eq!(b_rx.try_recv().unwrap(), 42);
+        // Port 'a' should not have received anything
+        assert!(a_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn effect_handler_try_send_message_to_channel_full() {
+        let (tx, _rx) = channel::<u64>(1);
+        let mut senders = HashMap::new();
+        let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
+
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
+
+        // First send should succeed
+        assert!(eh.try_send_message_to("out", 1).is_ok());
+        // Second send should fail with Full
+        let result = eh.try_send_message_to("out", 2);
+        assert!(matches!(
+            result,
+            Err(TypedError::ChannelSendError(SendError::Full(2)))
+        ));
+    }
+
+    #[test]
+    fn effect_handler_try_send_message_to_unknown_port() {
+        let (tx, _rx) = channel::<u64>(10);
+        let mut senders = HashMap::new();
+        let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
+
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let eh = EffectHandler::new(test_node("proc"), senders, None, metrics_reporter);
+
+        // Should return error for unknown port
+        let result = eh.try_send_message_to("unknown", 99);
+        assert!(matches!(result, Err(TypedError::Error(_))));
     }
 }

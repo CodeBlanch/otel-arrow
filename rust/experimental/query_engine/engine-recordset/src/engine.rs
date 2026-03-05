@@ -316,6 +316,14 @@ fn process_record<'a, TRecord: Record + 'static>(
                 );
                 break;
             }
+            DataExpression::Output(c) => {
+                execution_context.add_diagnostic_if_enabled(
+                    RecordSetEngineDiagnosticLevel::Error,
+                    c,
+                    || "Output Expression not yet supported in record set engine".into(),
+                );
+                break;
+            }
         }
     }
 
@@ -440,8 +448,16 @@ impl<'a, TRecord: Record> RecordSetEngineRecord<'a, TRecord> {
         }
     }
 
+    pub fn get_pipeline(&self) -> &'a PipelineExpression {
+        self.pipeline
+    }
+
     pub fn get_record(&self) -> &TRecord {
         &self.record
+    }
+
+    pub fn get_record_mut(&mut self) -> &mut TRecord {
+        &mut self.record
     }
 
     pub fn get_diagnostics(&self) -> &[RecordSetEngineDiagnostic<'a>] {
@@ -467,7 +483,7 @@ impl<TRecord: Record> Display for RecordSetEngineRecord<'_, TRecord> {
     }
 }
 
-fn format_diagnostics(
+pub fn format_diagnostics(
     query: &str,
     diagnostics: &[RecordSetEngineDiagnostic<'_>],
     f: &mut std::fmt::Formatter<'_>,

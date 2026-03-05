@@ -3,46 +3,151 @@
 
 //! The configuration for the dataflow engine.
 
+mod io;
+mod resolve;
+mod validate;
+
 use crate::PipelineGroupId;
-use crate::error::Error;
+use crate::TopicName;
+use crate::health::HealthPolicy;
+use crate::observed_state::ObservedStateSettings;
+use crate::pipeline::telemetry::TelemetryConfig;
+use crate::pipeline::{PipelineConfig, PipelineConnection, PipelineNodes};
 use crate::pipeline_group::PipelineGroupConfig;
+use crate::policy::{ChannelCapacityPolicy, Policies, ResourcesPolicy, TelemetryPolicy};
+use crate::topic::TopicSpec;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+pub use self::resolve::{
+    ResolvedOtelDataflowSpec, ResolvedPipelineConfig, ResolvedPipelineRole,
+    SYSTEM_OBSERVABILITY_PIPELINE_ID, SYSTEM_PIPELINE_GROUP_ID,
+};
+
+#[cfg(test)]
+use crate::error::Error;
+
+/// Current engine configuration schema version.
+pub const ENGINE_CONFIG_VERSION_V1: &str = "otel_dataflow/v1";
 
 /// Root configuration for the pipeline engine.
 /// Contains engine-level settings and all pipeline groups.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EngineConfig {
-    /// Settings that apply to the entire engine instance.
-    pub settings: EngineSettings,
+pub struct OtelDataflowSpec {
+    /// Version of the engine configuration schema.
+    pub version: String,
 
-    /// All pipeline group managed by this engine, keyed by pipeline group ID.
-    pub pipeline_groups: HashMap<PipelineGroupId, PipelineGroupConfig>,
+    /// Top-level policy set.
+    #[serde(default)]
+    pub policies: Policies,
+
+    /// Global topic declarations visible to all pipeline groups.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topics: HashMap<TopicName, TopicSpec>,
+
+    /// Engine-wide runtime declarations.
+    #[serde(default)]
+    pub engine: EngineConfig,
+
+    /// All groups managed by this engine, keyed by group ID.
+    pub groups: HashMap<PipelineGroupId, PipelineGroupConfig>,
 }
 
-/// Global settings for the engine.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Top-level engine configuration section.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
-pub struct EngineSettings {
+pub struct EngineConfig {
     /// Optional HTTP admin server configuration.
     pub http_admin: Option<HttpAdminSettings>,
 
-    /// Telemetry settings.
-    pub telemetry: TelemetrySettings,
+    /// Telemetry backend configuration shared across pipelines.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+
+    /// Observed state store settings shared across pipelines.
+    #[serde(default)]
+    pub observed_state: ObservedStateSettings,
+
+    /// Engine observability declarations.
+    #[serde(default)]
+    pub observability: EngineObservabilityConfig,
 }
 
-/// Configuration for the telemetry metrics system.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Engine observability declarations.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
-pub struct TelemetrySettings {
-    /// The size of the reporting channel.
-    #[serde(default = "default_reporting_channel_size")]
-    pub reporting_channel_size: usize,
-    /// The interval at which metrics are flushed and aggregated by the collector.
-    #[serde(default = "default_reporting_interval")]
-    pub flush_interval: std::time::Duration,
+pub struct EngineObservabilityConfig {
+    /// Optional dedicated observability pipeline for the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<EngineObservabilityPipelineConfig>,
+}
+
+/// Configuration for the dedicated engine observability pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct EngineObservabilityPipelineConfig {
+    /// Optional policy set for this observability pipeline.
+    ///
+    /// Note: resources policy is intentionally unsupported for observability for now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<EngineObservabilityPolicies>,
+
+    /// Nodes of the observability pipeline.
+    #[serde(default)]
+    pub nodes: PipelineNodes,
+
+    /// Explicit graph connections for observability nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<PipelineConnection>,
+}
+
+impl EngineObservabilityPipelineConfig {
+    /// Converts this config into a runtime [`PipelineConfig`].
+    #[must_use]
+    pub fn into_pipeline_config(self) -> PipelineConfig {
+        PipelineConfig::for_observability_pipeline(
+            self.policies
+                .map(EngineObservabilityPolicies::into_policies),
+            self.nodes,
+            self.connections,
+        )
+    }
+}
+
+/// Policy declarations allowed on the dedicated engine observability pipeline.
+///
+/// Note: `resources` is intentionally not supported yet for observability.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct EngineObservabilityPolicies {
+    /// Channel capacity policy.
+    #[serde(default)]
+    pub channel_capacity: ChannelCapacityPolicy,
+    /// Health policy used by observed-state liveness/readiness evaluation.
+    #[serde(default)]
+    pub health: HealthPolicy,
+    /// Runtime telemetry policy controlling pipeline-local metric collection.
+    #[serde(default)]
+    pub telemetry: TelemetryPolicy,
+}
+
+impl EngineObservabilityPolicies {
+    #[must_use]
+    fn into_policies(self) -> Policies {
+        Policies {
+            channel_capacity: self.channel_capacity,
+            health: self.health,
+            telemetry: self.telemetry,
+            resources: Some(ResourcesPolicy::default()),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn validation_errors(&self, path_prefix: &str) -> Vec<String> {
+        self.clone().into_policies().validation_errors(path_prefix)
+    }
 }
 
 /// Configuration for the HTTP admin endpoints.
@@ -62,46 +167,846 @@ impl Default for HttpAdminSettings {
     }
 }
 
-const fn default_reporting_channel_size() -> usize {
-    100
-}
-
-const fn default_reporting_interval() -> std::time::Duration {
-    std::time::Duration::from_secs(1)
-}
-
 fn default_bind_address() -> String {
     "127.0.0.1:8080".into()
 }
 
-impl EngineConfig {
-    /// Creates a new `EngineConfig` with the given JSON string.
-    pub fn from_json(json: &str) -> Result<Self, Error> {
-        let config: EngineConfig =
-            serde_json::from_str(json).map_err(|e| Error::DeserializationError {
-                context: Default::default(),
-                format: "JSON".to_string(),
-                details: e.to_string(),
-            })?;
-        config.validate()?;
-        Ok(config)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn valid_engine_yaml(version: &str) -> String {
+        format!(
+            r#"
+version: {version}
+engine: {{}}
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#
+        )
     }
 
-    /// Validates the engine configuration and returns a [`Error::InvalidConfiguration`] error
-    /// containing all validation errors found in the pipeline groups.
-    pub fn validate(&self) -> Result<(), Error> {
-        let mut errors = Vec::new();
+    fn write_temp_file(ext: &str, contents: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "otap-df-config-engine-tests-{}-{}.{}",
+            std::process::id(),
+            suffix,
+            ext
+        ));
+        fs::write(&path, contents).expect("failed to write temporary test file");
+        path
+    }
 
-        for (pipeline_group_id, pipeline_group) in &self.pipeline_groups {
-            if let Err(e) = pipeline_group.validate(pipeline_group_id) {
-                errors.push(e);
+    #[test]
+    fn from_yaml_requires_version_field() {
+        let yaml = r#"
+engine: {}
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let err = OtelDataflowSpec::from_yaml(yaml).unwrap_err();
+        match err {
+            Error::DeserializationError { details, .. } => {
+                assert!(details.contains("missing field `version`"));
             }
+            other => panic!("expected deserialization error, got: {other:?}"),
         }
+    }
 
-        if !errors.is_empty() {
-            Err(Error::InvalidConfiguration { errors })
-        } else {
-            Ok(())
+    #[test]
+    fn from_yaml_accepts_supported_version() {
+        let yaml = valid_engine_yaml(ENGINE_CONFIG_VERSION_V1);
+        let config = OtelDataflowSpec::from_yaml(&yaml).expect("v1 config should be accepted");
+        assert_eq!(config.version, ENGINE_CONFIG_VERSION_V1);
+    }
+
+    #[test]
+    fn from_yaml_rejects_unsupported_version() {
+        let yaml = valid_engine_yaml("otel_dataflow/v2");
+        let err = OtelDataflowSpec::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported engine config version `otel_dataflow/v2`")
+        );
+    }
+
+    #[test]
+    fn from_yaml_accepts_observability_pipeline() {
+        let yaml = r#"
+version: otel_dataflow/v1
+engine:
+  observability:
+    pipeline:
+      nodes:
+        itr:
+          type: "urn:otel:receiver:internal_telemetry"
+          config: {}
+        sink:
+          type: "urn:otel:exporter:console"
+          config: {}
+      connections:
+        - from: itr
+          to: sink
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+        assert!(config.engine.observability.pipeline.is_some());
+    }
+
+    #[test]
+    fn from_yaml_rejects_reserved_system_group() {
+        let yaml = r#"
+version: otel_dataflow/v1
+engine: {}
+groups:
+  system:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let err = OtelDataflowSpec::from_yaml(yaml).expect_err("should reject reserved group");
+        assert!(err.to_string().contains(&format!(
+            "groups.{} is reserved for engine-managed pipelines and cannot be configured by users",
+            SYSTEM_PIPELINE_GROUP_ID
+        )));
+    }
+
+    #[test]
+    fn from_yaml_uses_default_top_level_channel_capacity_policy() {
+        let yaml = valid_engine_yaml(ENGINE_CONFIG_VERSION_V1);
+        let config = OtelDataflowSpec::from_yaml(&yaml).expect("should parse");
+        assert_eq!(config.policies.channel_capacity.control.node, 256);
+        assert_eq!(config.policies.channel_capacity.control.pipeline, 256);
+        assert_eq!(config.policies.channel_capacity.pdata, 128);
+        assert_eq!(config.policies.health, HealthPolicy::default());
+        assert!(config.policies.telemetry.pipeline_metrics);
+        assert!(config.policies.telemetry.tokio_metrics);
+        assert_eq!(
+            config.policies.telemetry.channel_metrics,
+            crate::policy::MetricLevel::Basic
+        );
+        assert_eq!(
+            config.policies.effective_resources().core_allocation,
+            crate::policy::CoreAllocation::AllCores
+        );
+    }
+
+    #[test]
+    fn resolve_channel_capacity_policy_respects_scope_precedence() {
+        let yaml = r#"
+version: otel_dataflow/v1
+policies:
+  channel_capacity:
+      control:
+        node: 200
+        pipeline: 201
+      pdata: 202
+  health:
+    ready_if: [Running]
+  telemetry:
+    channel_metrics: none
+  resources:
+    core_allocation:
+      type: core_count
+      count: 9
+engine: {}
+groups:
+  g1:
+    policies:
+      channel_capacity:
+          control:
+            node: 150
+            pipeline: 151
+          pdata: 152
+      health:
+        ready_if: [Running, Updating]
+      telemetry:
+        channel_metrics: basic
+      resources:
+        core_allocation:
+          type: core_count
+          count: 5
+    pipelines:
+      p1:
+        policies:
+          channel_capacity:
+              control:
+                node: 50
+                pipeline: 51
+              pdata: 52
+          health:
+            ready_if: [Failed]
+          telemetry:
+            channel_metrics: none
+          resources:
+            core_allocation:
+              type: core_count
+              count: 2
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+      p2:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+  g2:
+    pipelines:
+      p3:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+
+        let resolved = config.resolve();
+        assert_eq!(resolved.pipelines.len(), 3);
+        assert!(
+            resolved
+                .pipelines
+                .iter()
+                .all(|p| p.role == ResolvedPipelineRole::Regular)
+        );
+        let resolved_ids: Vec<(String, String)> = resolved
+            .pipelines
+            .iter()
+            .map(|p| (p.pipeline_group_id.to_string(), p.pipeline_id.to_string()))
+            .collect();
+        assert_eq!(
+            resolved_ids,
+            vec![
+                ("g1".to_string(), "p1".to_string()),
+                ("g1".to_string(), "p2".to_string()),
+                ("g2".to_string(), "p3".to_string()),
+            ]
+        );
+
+        let p1_resolved = resolved
+            .pipelines
+            .iter()
+            .find(|p| p.pipeline_group_id.as_ref() == "g1" && p.pipeline_id.as_ref() == "p1")
+            .expect("g1/p1 should be resolved");
+        assert_eq!(p1_resolved.policies.channel_capacity.control.node, 50);
+        assert_eq!(p1_resolved.policies.channel_capacity.control.pipeline, 51);
+        assert_eq!(p1_resolved.policies.channel_capacity.pdata, 52);
+        assert_eq!(
+            p1_resolved.policies.effective_resources().core_allocation,
+            crate::policy::CoreAllocation::CoreCount { count: 2 }
+        );
+        assert_eq!(
+            p1_resolved.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Failed]
+        );
+        assert_eq!(
+            p1_resolved.policies.telemetry.channel_metrics,
+            crate::policy::MetricLevel::None
+        );
+
+        let p2_resolved = resolved
+            .pipelines
+            .iter()
+            .find(|p| p.pipeline_group_id.as_ref() == "g1" && p.pipeline_id.as_ref() == "p2")
+            .expect("g1/p2 should be resolved");
+        assert_eq!(p2_resolved.policies.channel_capacity.control.node, 150);
+        assert_eq!(p2_resolved.policies.channel_capacity.control.pipeline, 151);
+        assert_eq!(p2_resolved.policies.channel_capacity.pdata, 152);
+        assert_eq!(
+            p2_resolved.policies.health.ready_if,
+            vec![
+                crate::health::PhaseKind::Running,
+                crate::health::PhaseKind::Updating,
+            ]
+        );
+        assert_eq!(
+            p2_resolved.policies.telemetry.channel_metrics,
+            crate::policy::MetricLevel::Basic
+        );
+        assert_eq!(
+            p2_resolved.policies.effective_resources().core_allocation,
+            crate::policy::CoreAllocation::CoreCount { count: 5 }
+        );
+
+        let p3_resolved = resolved
+            .pipelines
+            .iter()
+            .find(|p| p.pipeline_group_id.as_ref() == "g2" && p.pipeline_id.as_ref() == "p3")
+            .expect("g2/p3 should be resolved");
+        assert_eq!(p3_resolved.policies.channel_capacity.control.node, 200);
+        assert_eq!(p3_resolved.policies.channel_capacity.control.pipeline, 201);
+        assert_eq!(p3_resolved.policies.channel_capacity.pdata, 202);
+        assert_eq!(
+            p3_resolved.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Running]
+        );
+        assert_eq!(
+            p3_resolved.policies.telemetry.channel_metrics,
+            crate::policy::MetricLevel::None
+        );
+        assert_eq!(
+            p3_resolved.policies.effective_resources().core_allocation,
+            crate::policy::CoreAllocation::CoreCount { count: 9 }
+        );
+    }
+
+    #[test]
+    fn from_yaml_parses_topic_declarations_with_queue_policy() {
+        let yaml = r#"
+version: otel_dataflow/v1
+topics:
+  global_default:
+    description: "global topic"
+  global_queue:
+    policies:
+      queue_capacity: 42
+      queue_on_full: drop_newest
+groups:
+  g1:
+    topics:
+      local_queue:
+        policies:
+          queue_capacity: 7
+          queue_on_full: drop_newest
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+
+        let global_default = config
+            .topics
+            .get("global_default")
+            .expect("global_default topic should exist");
+        assert_eq!(global_default.policies.queue_capacity, 128);
+        assert_eq!(
+            global_default.policies.queue_on_full,
+            crate::topic::TopicQueueOnFullPolicy::Block
+        );
+
+        let global_queue = config
+            .topics
+            .get("global_queue")
+            .expect("global_queue topic should exist");
+        assert_eq!(global_queue.policies.queue_capacity, 42);
+        assert_eq!(
+            global_queue.policies.queue_on_full,
+            crate::topic::TopicQueueOnFullPolicy::DropNewest
+        );
+
+        let group = config.groups.get("g1").expect("group g1 should exist");
+        let local_queue = group
+            .topics
+            .get("local_queue")
+            .expect("local_queue topic should exist");
+        assert_eq!(local_queue.policies.queue_capacity, 7);
+        assert_eq!(
+            local_queue.policies.queue_on_full,
+            crate::topic::TopicQueueOnFullPolicy::DropNewest
+        );
+    }
+
+    #[test]
+    fn resolve_topic_spec_respects_scope_precedence() {
+        let yaml = r#"
+version: otel_dataflow/v1
+topics:
+  shared:
+    policies:
+      queue_capacity: 100
+      queue_on_full: block
+  global_only:
+    policies:
+      queue_capacity: 101
+      queue_on_full: drop_newest
+groups:
+  g1:
+    topics:
+      shared:
+        policies:
+          queue_capacity: 10
+          queue_on_full: drop_newest
+      group_only:
+        policies:
+          queue_capacity: 11
+          queue_on_full: drop_newest
+    pipelines:
+      p1:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+  g2:
+    pipelines:
+      p2:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+
+        let g1_shared = config
+            .resolve_topic_spec(&"g1".into(), &"shared".into())
+            .expect("g1 shared topic should resolve");
+        assert_eq!(g1_shared.policies.queue_capacity, 10);
+        assert_eq!(
+            g1_shared.policies.queue_on_full,
+            crate::topic::TopicQueueOnFullPolicy::DropNewest
+        );
+
+        let g2_shared = config
+            .resolve_topic_spec(&"g2".into(), &"shared".into())
+            .expect("g2 shared topic should resolve from global");
+        assert_eq!(g2_shared.policies.queue_capacity, 100);
+        assert_eq!(
+            g2_shared.policies.queue_on_full,
+            crate::topic::TopicQueueOnFullPolicy::Block
+        );
+
+        let g1_group_only = config
+            .resolve_topic_spec(&"g1".into(), &"group_only".into())
+            .expect("g1 group_only topic should resolve");
+        assert_eq!(g1_group_only.policies.queue_capacity, 11);
+
+        let g2_group_only = config.resolve_topic_spec(&"g2".into(), &"group_only".into());
+        assert!(g2_group_only.is_none(), "g2 should not see g1-local topics");
+    }
+
+    #[test]
+    fn resolve_observability_channel_capacity_policy_overrides_top_level() {
+        let yaml = r#"
+version: otel_dataflow/v1
+policies:
+  channel_capacity:
+      control:
+        node: 200
+        pipeline: 201
+      pdata: 202
+  health:
+    ready_if: [Running]
+  telemetry:
+    channel_metrics: none
+engine:
+  observability:
+    pipeline:
+      policies:
+        channel_capacity:
+            control:
+              node: 10
+              pipeline: 11
+            pdata: 12
+        health:
+          ready_if: [Failed]
+        telemetry:
+          channel_metrics: normal
+      nodes:
+        itr:
+          type: "urn:otel:receiver:internal_telemetry"
+          config: {}
+        sink:
+          type: "urn:otel:exporter:console"
+          config: {}
+      connections:
+        - from: itr
+          to: sink
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+        let resolved = config.resolve();
+        let obs = resolved
+            .pipelines
+            .iter()
+            .find(|p| p.role == ResolvedPipelineRole::ObservabilityInternal)
+            .expect("observability pipeline should be resolved");
+        assert_eq!(obs.pipeline_group_id.as_ref(), "system");
+        assert_eq!(obs.pipeline_id.as_ref(), "observability");
+        assert_eq!(obs.policies.channel_capacity.control.node, 10);
+        assert_eq!(obs.policies.channel_capacity.control.pipeline, 11);
+        assert_eq!(obs.policies.channel_capacity.pdata, 12);
+        assert_eq!(
+            obs.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Failed]
+        );
+        assert_eq!(
+            obs.policies.telemetry.channel_metrics,
+            crate::policy::MetricLevel::Normal
+        );
+        assert_eq!(
+            obs.policies.effective_resources().core_allocation,
+            crate::policy::CoreAllocation::AllCores
+        );
+        assert_eq!(
+            resolved
+                .pipelines
+                .iter()
+                .filter(|p| p.role == ResolvedPipelineRole::ObservabilityInternal)
+                .count(),
+            1
+        );
+        let main = resolved
+            .pipelines
+            .iter()
+            .find(|p| p.role == ResolvedPipelineRole::Regular)
+            .expect("main pipeline should be resolved");
+        assert_eq!(main.pipeline_group_id.as_ref(), "default");
+        assert_eq!(main.pipeline_id.as_ref(), "main");
+    }
+
+    #[test]
+    fn from_yaml_rejects_observability_resources_policy() {
+        let yaml = r#"
+version: otel_dataflow/v1
+engine:
+  observability:
+    pipeline:
+      policies:
+        resources:
+          core_allocation:
+            type: core_count
+            count: 2
+      nodes:
+        itr:
+          type: "urn:otel:receiver:internal_telemetry"
+          config: {}
+        sink:
+          type: "urn:otel:exporter:console"
+          config: {}
+      connections:
+        - from: itr
+          to: sink
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let err = OtelDataflowSpec::from_yaml(yaml).expect_err("should reject resources");
+        match err {
+            Error::DeserializationError { details, .. } => {
+                assert!(details.contains("unknown field `resources`"));
+            }
+            other => panic!("expected deserialization error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_yaml_rejects_zero_policy_capacities() {
+        let yaml = r#"
+version: otel_dataflow/v1
+policies:
+  channel_capacity:
+      control:
+        node: 0
+        pipeline: 0
+      pdata: 0
+engine: {}
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let err = OtelDataflowSpec::from_yaml(yaml).expect_err("zero capacities should fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("channel_capacity.control.node"));
+        assert!(rendered.contains("channel_capacity.control.pipeline"));
+        assert!(rendered.contains("channel_capacity.pdata"));
+    }
+
+    #[test]
+    fn from_yaml_rejects_zero_topic_queue_capacity() {
+        let yaml = r#"
+version: otel_dataflow/v1
+topics:
+  global_topic:
+    policies:
+      queue_capacity: 0
+groups:
+  g1:
+    topics:
+      group_topic:
+        policies:
+          queue_capacity: 0
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let err =
+            OtelDataflowSpec::from_yaml(yaml).expect_err("zero topic queue capacity should fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("topics.global_topic.policies.queue_capacity"));
+        assert!(rendered.contains("groups.g1.topics.group_topic.policies.queue_capacity"));
+    }
+
+    #[test]
+    fn from_json_file_nonexistent_file() {
+        let result = OtelDataflowSpec::from_json_file("/nonexistent/path/spec.json");
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::FileReadError { .. }) => {}
+            other => panic!("Expected FileReadError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_yaml_file_nonexistent_file() {
+        let result = OtelDataflowSpec::from_yaml_file("/nonexistent/path/spec.yaml");
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::FileReadError { .. }) => {}
+            other => panic!("Expected FileReadError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_file_yml_extension() {
+        let result = OtelDataflowSpec::from_file("/nonexistent/spec.yml");
+
+        assert!(result.is_err());
+        // Should be a file read error (nonexistent), not an extension error.
+        match result {
+            Err(Error::FileReadError { details, .. }) => {
+                assert!(!details.contains("Unsupported file extension"));
+            }
+            other => panic!("Expected FileReadError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_file_unsupported_extension() {
+        let result = OtelDataflowSpec::from_file("/some/path/spec.txt");
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::FileReadError { details, .. }) => {
+                assert!(details.contains("Unsupported file extension"));
+                assert!(details.contains("txt"));
+                assert!(details.contains(".json, .yaml, .yml"));
+            }
+            other => panic!("Expected FileReadError with unsupported extension, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_file_no_extension() {
+        let result = OtelDataflowSpec::from_file("/some/path/spec");
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::FileReadError { details, .. }) => {
+                assert!(details.contains("Unsupported file extension"));
+                assert!(details.contains("<none>"));
+                assert!(details.contains(".json, .yaml, .yml"));
+            }
+            other => panic!("Expected FileReadError with no extension, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_json_file_reads_valid_spec() {
+        let yaml = valid_engine_yaml(ENGINE_CONFIG_VERSION_V1);
+        let model = OtelDataflowSpec::from_yaml(&yaml).expect("fixture yaml should parse");
+        let json = serde_json::to_string(&model).expect("fixture should serialize to json");
+        let path = write_temp_file("json", &json);
+
+        let result = OtelDataflowSpec::from_json_file(&path);
+        let _ = fs::remove_file(&path);
+
+        assert!(result.is_ok());
+        let parsed = result.expect("json file should parse");
+        assert_eq!(parsed.version, ENGINE_CONFIG_VERSION_V1);
+        assert!(parsed.groups.contains_key("default"));
+    }
+
+    #[test]
+    fn from_file_json_extension() {
+        let yaml = valid_engine_yaml(ENGINE_CONFIG_VERSION_V1);
+        let model = OtelDataflowSpec::from_yaml(&yaml).expect("fixture yaml should parse");
+        let json = serde_json::to_string(&model).expect("fixture should serialize to json");
+        let path = write_temp_file("json", &json);
+
+        let result = OtelDataflowSpec::from_file(&path);
+        let _ = fs::remove_file(&path);
+
+        assert!(result.is_ok());
+        let parsed = result.expect("json file should parse");
+        assert_eq!(parsed.version, ENGINE_CONFIG_VERSION_V1);
+        assert!(parsed.groups.contains_key("default"));
+    }
+
+    #[test]
+    fn bundled_configs_parse_as_engine_configs() {
+        let mut dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../configs")];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap_or_else(|e| {
+                panic!("failed to read configs directory {}: {e}", dir.display())
+            }) {
+                let path = entry.expect("failed to read dir entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+
+                let is_yaml = matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("yaml" | "yml")
+                );
+                if !is_yaml {
+                    continue;
+                }
+
+                let parsed = OtelDataflowSpec::from_file(&path);
+                assert!(
+                    parsed.is_ok(),
+                    "failed to parse engine config {}: {parsed:?}",
+                    path.display()
+                );
+            }
         }
     }
 }

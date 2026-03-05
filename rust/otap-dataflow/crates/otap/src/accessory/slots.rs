@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Slot-based correlation system for correlating in-flight requests
-//! and responses. Provides a CallData to retrieve the data for
+//! and responses. Provides a RouteData to retrieve the data for
 //! Ack/Nack handling. Based on the slotmap crate.
 
 use otap_df_engine::control::CallData;
@@ -79,6 +79,12 @@ impl<UData> State<UData> {
         let key = self.slots.insert(udata);
 
         Some((key, ures))
+    }
+
+    /// Get immutable reference to user data in a slot (if key is valid).
+    #[must_use]
+    pub fn get(&self, key: Key) -> Option<&UData> {
+        self.slots.get(key)
     }
 
     /// Modify user data in a slot (if key is valid).

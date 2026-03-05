@@ -7,8 +7,13 @@
 //! For more details on the `!Send` implementation of an exporter, see [`local::Exporter`].
 //! See [`shared::Exporter`] for the Send implementation.
 
+use crate::Interests;
+use crate::channel_metrics::ChannelMetricsRegistry;
+use crate::channel_mode::{LocalMode, SharedMode, wrap_control_channel_metrics};
 use crate::config::ExporterConfig;
+use crate::context::PipelineContext;
 use crate::control::{Controllable, NodeControlMsg, PipelineCtrlMsgSender};
+use crate::entity_context::NodeTelemetryGuard;
 use crate::error::{Error, ExporterErrorKind};
 use crate::local::exporter as local;
 use crate::local::message::{LocalReceiver, LocalSender};
@@ -35,14 +40,18 @@ pub enum ExporterWrapper<PData> {
         node_id: NodeId,
         /// The user configuration for the node, including its name and channel settings.
         user_config: Arc<NodeUserConfig>,
+        /// The runtime configuration for the exporter.
+        runtime_config: ExporterConfig,
         /// The exporter instance.
         exporter: Box<dyn local::Exporter<PData>>,
         /// A sender for control messages.
         control_sender: LocalSender<NodeControlMsg<PData>>,
         /// A receiver for control messages.
-        control_receiver: Option<LocalReceiver<NodeControlMsg<PData>>>,
+        control_receiver: LocalReceiver<NodeControlMsg<PData>>,
         /// Receiver for PData messages.
         pdata_receiver: Option<Receiver<PData>>,
+        /// Telemetry guard for node lifecycle cleanup.
+        telemetry: Option<NodeTelemetryGuard>,
     },
     /// An exporter with a `Send` implementation.
     Shared {
@@ -50,14 +59,18 @@ pub enum ExporterWrapper<PData> {
         node_id: NodeId,
         /// The user configuration for the node, including its name and channel settings.
         user_config: Arc<NodeUserConfig>,
+        /// The runtime configuration for the exporter.
+        runtime_config: ExporterConfig,
         /// The exporter instance.
         exporter: Box<dyn shared::Exporter<PData>>,
         /// A sender for control messages.
         control_sender: SharedSender<NodeControlMsg<PData>>,
         /// A receiver for control messages.
-        control_receiver: Option<SharedReceiver<NodeControlMsg<PData>>>,
+        control_receiver: SharedReceiver<NodeControlMsg<PData>>,
         /// Receiver for PData messages.
         pdata_receiver: Option<SharedReceiver<PData>>,
+        /// Telemetry guard for node lifecycle cleanup.
+        telemetry: Option<NodeTelemetryGuard>,
     },
 }
 
@@ -92,10 +105,12 @@ impl<PData> ExporterWrapper<PData> {
         ExporterWrapper::Local {
             node_id,
             user_config,
+            runtime_config: config.clone(),
             exporter: Box::new(exporter),
-            control_sender: LocalSender::MpscSender(control_sender),
-            control_receiver: Some(LocalReceiver::MpscReceiver(control_receiver)),
+            control_sender: LocalSender::mpsc(control_sender),
+            control_receiver: LocalReceiver::mpsc(control_receiver),
             pdata_receiver: None, // This will be set later
+            telemetry: None,
         }
     }
 
@@ -116,10 +131,138 @@ impl<PData> ExporterWrapper<PData> {
         ExporterWrapper::Shared {
             node_id,
             user_config,
+            runtime_config: config.clone(),
             exporter: Box::new(exporter),
-            control_sender: SharedSender::MpscSender(control_sender),
-            control_receiver: Some(SharedReceiver::MpscReceiver(control_receiver)),
+            control_sender: SharedSender::mpsc(control_sender),
+            control_receiver: SharedReceiver::mpsc(control_receiver),
             pdata_receiver: None, // This will be set later
+            telemetry: None,
+        }
+    }
+
+    pub(crate) fn with_node_telemetry_guard(self, guard: NodeTelemetryGuard) -> Self {
+        match self {
+            ExporterWrapper::Local {
+                node_id,
+                user_config,
+                runtime_config,
+                exporter,
+                control_sender,
+                control_receiver,
+                pdata_receiver,
+                ..
+            } => ExporterWrapper::Local {
+                node_id,
+                user_config,
+                runtime_config,
+                exporter,
+                control_sender,
+                control_receiver,
+                pdata_receiver,
+                telemetry: Some(guard),
+            },
+            ExporterWrapper::Shared {
+                node_id,
+                user_config,
+                runtime_config,
+                exporter,
+                control_sender,
+                control_receiver,
+                pdata_receiver,
+                ..
+            } => ExporterWrapper::Shared {
+                node_id,
+                user_config,
+                runtime_config,
+                exporter,
+                control_sender,
+                control_receiver,
+                pdata_receiver,
+                telemetry: Some(guard),
+            },
+        }
+    }
+
+    pub(crate) const fn take_telemetry_guard(&mut self) -> Option<NodeTelemetryGuard> {
+        match self {
+            ExporterWrapper::Local { telemetry, .. } => telemetry.take(),
+            ExporterWrapper::Shared { telemetry, .. } => telemetry.take(),
+        }
+    }
+
+    pub(crate) fn with_control_channel_metrics(
+        self,
+        pipeline_ctx: &PipelineContext,
+        channel_metrics: &mut ChannelMetricsRegistry,
+        channel_metrics_enabled: bool,
+    ) -> Self {
+        match self {
+            ExporterWrapper::Local {
+                node_id,
+                runtime_config,
+                control_sender,
+                control_receiver,
+                user_config,
+                exporter,
+                pdata_receiver,
+                telemetry,
+                ..
+            } => {
+                let (control_sender, control_receiver) =
+                    wrap_control_channel_metrics::<LocalMode, PData>(
+                        &node_id,
+                        pipeline_ctx,
+                        channel_metrics,
+                        channel_metrics_enabled,
+                        runtime_config.control_channel.capacity as u64,
+                        control_sender,
+                        control_receiver,
+                    );
+
+                ExporterWrapper::Local {
+                    node_id,
+                    user_config,
+                    runtime_config,
+                    exporter,
+                    control_sender,
+                    control_receiver,
+                    pdata_receiver,
+                    telemetry,
+                }
+            }
+            ExporterWrapper::Shared {
+                node_id,
+                runtime_config,
+                control_sender,
+                control_receiver,
+                user_config,
+                exporter,
+                pdata_receiver,
+                telemetry,
+                ..
+            } => {
+                let (control_sender, control_receiver) =
+                    wrap_control_channel_metrics::<SharedMode, PData>(
+                        &node_id,
+                        pipeline_ctx,
+                        channel_metrics,
+                        channel_metrics_enabled,
+                        runtime_config.control_channel.capacity as u64,
+                        control_sender,
+                        control_receiver,
+                    );
+
+                ExporterWrapper::Shared {
+                    node_id,
+                    user_config,
+                    runtime_config,
+                    exporter,
+                    control_sender,
+                    control_receiver,
+                    pdata_receiver,
+                    telemetry,
+                }
+            }
         }
     }
 
@@ -128,6 +271,7 @@ impl<PData> ExporterWrapper<PData> {
         self,
         pipeline_ctrl_msg_tx: PipelineCtrlMsgSender<PData>,
         metrics_reporter: MetricsReporter,
+        node_interests: Interests,
     ) -> Result<TerminalState, Error> {
         match (self, metrics_reporter) {
             (
@@ -140,13 +284,8 @@ impl<PData> ExporterWrapper<PData> {
                 },
                 metrics_reporter,
             ) => {
-                let mut effect_handler = local::EffectHandler::new(node_id, metrics_reporter);
-                let control_rx = control_receiver.ok_or_else(|| Error::ExporterError {
-                    exporter: effect_handler.exporter_id(),
-                    kind: ExporterErrorKind::Configuration,
-                    error: "Control receiver not initialized".to_owned(),
-                    source_detail: String::new(),
-                })?;
+                let mut effect_handler =
+                    local::EffectHandler::new(node_id.clone(), metrics_reporter);
                 let pdata_rx = pdata_receiver.ok_or_else(|| Error::ExporterError {
                     exporter: effect_handler.exporter_id(),
                     kind: ExporterErrorKind::Configuration,
@@ -156,8 +295,13 @@ impl<PData> ExporterWrapper<PData> {
                 effect_handler
                     .core
                     .set_pipeline_ctrl_msg_sender(pipeline_ctrl_msg_tx);
-                let message_channel =
-                    message::MessageChannel::new(Receiver::Local(control_rx), pdata_rx);
+                effect_handler.core.set_node_interests(node_interests);
+                let message_channel = message::MessageChannel::new(
+                    Receiver::Local(control_receiver),
+                    pdata_rx,
+                    node_id.index,
+                    node_interests,
+                );
                 exporter.start(message_channel, effect_handler).await
             }
             (
@@ -170,13 +314,8 @@ impl<PData> ExporterWrapper<PData> {
                 },
                 metrics_reporter,
             ) => {
-                let mut effect_handler = shared::EffectHandler::new(node_id, metrics_reporter);
-                let control_rx = control_receiver.ok_or_else(|| Error::ExporterError {
-                    exporter: effect_handler.exporter_id(),
-                    kind: ExporterErrorKind::Configuration,
-                    error: "Control receiver not initialized".to_owned(),
-                    source_detail: String::new(),
-                })?;
+                let mut effect_handler =
+                    shared::EffectHandler::new(node_id.clone(), metrics_reporter);
                 let pdata_rx = pdata_receiver.ok_or_else(|| Error::ExporterError {
                     exporter: effect_handler.exporter_id(),
                     kind: ExporterErrorKind::Configuration,
@@ -186,7 +325,13 @@ impl<PData> ExporterWrapper<PData> {
                 effect_handler
                     .core
                     .set_pipeline_ctrl_msg_sender(pipeline_ctrl_msg_tx);
-                let message_channel = shared::MessageChannel::new(control_rx, pdata_rx);
+                effect_handler.core.set_node_interests(node_interests);
+                let message_channel = shared::MessageChannel::new(
+                    control_receiver,
+                    pdata_rx,
+                    node_id.index,
+                    node_interests,
+                );
                 exporter.start(message_channel, effect_handler).await
             }
         }
@@ -261,6 +406,7 @@ impl<PData> NodeWithPDataReceiver<PData> for ExporterWrapper<PData> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Interests;
     use crate::control::{AckMsg, NodeControlMsg};
     use crate::error::ExporterErrorKind;
     use crate::exporter::{Error, ExporterWrapper};
@@ -469,8 +615,10 @@ mod tests {
             control_tx,
             pdata_tx,
             message::MessageChannel::new(
-                message::Receiver::Local(LocalReceiver::MpscReceiver(control_rx)),
-                message::Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx)),
+                message::Receiver::Local(LocalReceiver::mpsc(control_rx)),
+                message::Receiver::Local(LocalReceiver::mpsc(pdata_rx)),
+                0,
+                Interests::empty(),
             ),
         )
     }
@@ -690,5 +838,166 @@ mod tests {
 
         // Second recv -> channel considered closed
         assert!(matches!(chan.recv().await, Err(RecvError::Closed)));
+    }
+
+    // ==================== recv_when tests ====================
+
+    /// recv_when(false) blocks pdata, only returns control messages.
+    #[tokio::test]
+    async fn test_recv_when_false_blocks_pdata() {
+        let (control_tx, pdata_tx, mut channel) = make_chan();
+
+        pdata_tx.send_async("pdata1".to_owned()).await.unwrap();
+        control_tx
+            .send_async(NodeControlMsg::TimerTick {})
+            .await
+            .unwrap();
+
+        // recv_when(false) should return the control message, not pdata
+        let msg = channel.recv_when(false).await.unwrap();
+        assert!(matches!(
+            msg,
+            Message::Control(NodeControlMsg::TimerTick {})
+        ));
+
+        // pdata is still in the channel - recv_when(true) should return it
+        let msg = channel.recv_when(true).await.unwrap();
+        assert!(matches!(msg, Message::PData(ref s) if s == "pdata1"));
+    }
+
+    /// recv_when(true) behaves identically to recv().
+    #[tokio::test]
+    async fn test_recv_when_true_same_as_recv() {
+        let (_control_tx, pdata_tx, mut channel) = make_chan();
+
+        pdata_tx.send_async("pdata1".to_owned()).await.unwrap();
+
+        let msg = channel.recv_when(true).await.unwrap();
+        assert!(matches!(msg, Message::PData(ref s) if s == "pdata1"));
+    }
+
+    /// During shutdown draining, recv_when(false) still drains pdata
+    /// because the guard is ignored in draining mode.
+    #[tokio::test]
+    async fn test_recv_when_false_drains_during_shutdown() {
+        let (control_tx, pdata_tx, mut channel) = make_chan();
+
+        // Pre-load pdata
+        pdata_tx.send_async("pdata1".to_owned()).await.unwrap();
+        pdata_tx.send_async("pdata2".to_owned()).await.unwrap();
+
+        // Send shutdown with deadline
+        control_tx
+            .send_async(NodeControlMsg::Shutdown {
+                deadline: Instant::now().add(Duration::from_millis(200)),
+                reason: "test".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        // Even with accept_pdata=false, pdata should be drained during shutdown
+        let msg1 = channel.recv_when(false).await.unwrap();
+        assert!(matches!(msg1, Message::PData(ref s) if s == "pdata1"));
+
+        let msg2 = channel.recv_when(false).await.unwrap();
+        assert!(matches!(msg2, Message::PData(ref s) if s == "pdata2"));
+
+        // Close pdata channel to end draining
+        drop(pdata_tx);
+
+        // Should get shutdown message
+        let msg3 = channel.recv_when(false).await.unwrap();
+        assert!(matches!(
+            msg3,
+            Message::Control(NodeControlMsg::Shutdown { .. })
+        ));
+    }
+
+    /// recv_when(false) with only pdata available should not return pdata.
+    /// When a control message is then sent, it should be returned.
+    #[tokio::test]
+    async fn test_recv_when_false_waits_for_control() {
+        let (control_tx, pdata_tx, mut channel) = make_chan();
+
+        pdata_tx.send_async("pdata1".to_owned()).await.unwrap();
+
+        // recv_when(false) should not return pdata — use a timeout to prove it blocks
+        let result =
+            tokio::time::timeout(Duration::from_millis(50), channel.recv_when(false)).await;
+        assert!(result.is_err(), "recv_when(false) should not return pdata");
+
+        // Now send a control message
+        control_tx
+            .send_async(NodeControlMsg::TimerTick {})
+            .await
+            .unwrap();
+
+        // recv_when(false) should now return the control message
+        let msg = channel.recv_when(false).await.unwrap();
+        assert!(matches!(
+            msg,
+            Message::Control(NodeControlMsg::TimerTick {})
+        ));
+
+        // pdata still buffered
+        let msg = channel.recv().await.unwrap();
+        assert!(matches!(msg, Message::PData(ref s) if s == "pdata1"));
+    }
+
+    /// recv_when(false) detects a closed pdata channel and generates a
+    /// synthetic Shutdown instead of blocking forever.
+    #[tokio::test]
+    async fn test_recv_when_false_detects_pdata_closed() {
+        let (control_tx, pdata_tx, mut channel) = make_chan();
+
+        // Close the pdata channel
+        drop(pdata_tx);
+
+        // recv_when(false) should detect the closed channel and return
+        // a synthetic Shutdown, not block forever.
+        let msg = tokio::time::timeout(Duration::from_millis(100), channel.recv_when(false))
+            .await
+            .expect("recv_when(false) should not block when pdata channel is closed")
+            .unwrap();
+
+        assert!(matches!(
+            msg,
+            Message::Control(NodeControlMsg::Shutdown { .. })
+        ));
+
+        drop(control_tx);
+    }
+
+    /// recv_when(false) with a closed pdata channel that still has
+    /// buffered data should not trigger synthetic shutdown until the
+    /// data is drained.
+    #[tokio::test]
+    async fn test_recv_when_false_closed_with_buffered_data() {
+        let (_control_tx, pdata_tx, mut channel) = make_chan();
+
+        pdata_tx.send_async("pdata1".to_owned()).await.unwrap();
+        // Close the channel — data is still buffered
+        drop(pdata_tx);
+
+        // recv_when(false) should NOT trigger shutdown because there's
+        // still buffered data (is_empty() is false).
+        // It should time out waiting for control.
+        let result =
+            tokio::time::timeout(Duration::from_millis(50), channel.recv_when(false)).await;
+        assert!(
+            result.is_err(),
+            "should block — pdata has data, no control available"
+        );
+
+        // Now drain the data with recv_when(true)
+        let msg = channel.recv_when(true).await.unwrap();
+        assert!(matches!(msg, Message::PData(ref s) if s == "pdata1"));
+
+        // Now recv_when(false) should detect closed+empty and return shutdown
+        let msg = channel.recv_when(false).await.unwrap();
+        assert!(matches!(
+            msg,
+            Message::Control(NodeControlMsg::Shutdown { .. })
+        ));
     }
 }

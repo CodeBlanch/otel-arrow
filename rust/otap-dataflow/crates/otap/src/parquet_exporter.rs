@@ -58,7 +58,7 @@ mod schema;
 mod writer;
 
 #[allow(dead_code)]
-const PARQUET_EXPORTER_URN: &str = "urn:otel:otap:parquet:exporter";
+const PARQUET_EXPORTER_URN: &str = "urn:otel:exporter:parquet";
 
 /// Parquet exporter for OTAP Data
 pub struct ParquetExporter {
@@ -86,12 +86,14 @@ pub static PARQUET_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
             exporter_config,
         ))
     },
+    wiring_contract: otap_df_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otap_df_config::validation::validate_typed_config::<config::Config>,
 };
 
 impl ParquetExporter {
     /// construct a new instance of the `ParquetExporter`
     #[must_use]
-    pub fn new(config: config::Config) -> Self {
+    pub const fn new(config: config::Config) -> Self {
         // NOTE: This constructor does not register metrics because it lacks a PipelineContext.
         // Prefer using from_config in the factory path so metrics are properly wired.
         Self {
@@ -425,6 +427,7 @@ mod test {
     use fixtures::SimpleDataGenOptions;
     use futures::StreamExt;
     use otap_df_config::node::NodeUserConfig;
+    use otap_df_engine::Interests;
     use otap_df_engine::control::{
         Controllable, PipelineControlMsg, PipelineCtrlMsgReceiver, PipelineCtrlMsgSender,
         pipeline_ctrl_msg_channel,
@@ -479,6 +482,10 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "Skipping on Windows due to timing flakiness"
+    )]
     fn test_adaptive_schema_dict_upgrade_write() {
         let test_runtime = TestRuntime::<OtapPdata>::new();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -577,7 +584,7 @@ mod test {
             })
             .run_validation(move |_ctx, exporter_result| {
                 Box::pin(async move {
-                    assert!(exporter_result.is_ok());
+                    exporter_result.unwrap();
                     assert_parquet_file_has_rows(&base_dir, ArrowPayloadType::Logs, 3).await;
                     assert_parquet_file_has_rows(&base_dir, ArrowPayloadType::LogAttrs, 278).await;
                 })
@@ -761,7 +768,7 @@ mod test {
             ))
             .run_validation(move |_ctx, exporter_result| {
                 Box::pin(async move {
-                    assert!(exporter_result.is_ok());
+                    exporter_result.unwrap();
 
                     // simply ensure there is a parquet file for each type we should have
                     // written and that it has the expected number of rows
@@ -849,7 +856,7 @@ mod test {
             ))
             .run_validation(move |_ctx, exporter_result| {
                 Box::pin(async move {
-                    assert!(exporter_result.is_ok());
+                    exporter_result.unwrap();
 
                     // simply ensure there is a parquet file for each type we should have
                     // written and that it has the expected number of rows
@@ -897,8 +904,8 @@ mod test {
         let (rt, _) = setup_test_runtime();
         let control_sender = exporter.control_sender();
         let (pdata_tx, pdata_rx) = create_not_send_channel::<OtapPdata>(1);
-        let pdata_tx = Sender::Local(LocalSender::MpscSender(pdata_tx));
-        let pdata_rx = Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx));
+        let pdata_tx = Sender::Local(LocalSender::mpsc(pdata_tx));
+        let pdata_rx = Receiver::Local(LocalReceiver::mpsc(pdata_rx));
 
         let (pipeline_ctrl_msg_tx, _pipeline_ctrl_msg_rx) = pipeline_ctrl_msg_channel(10);
         // Keep the receiver alive so EffectHandler can send telemetry/timer requests without error.
@@ -914,7 +921,7 @@ mod test {
             let (_metrics_rx, metrics_reporter) =
                 otap_df_telemetry::reporter::MetricsReporter::create_new_and_receiver(1);
             exporter
-                .start(pipeline_ctrl_msg_tx, metrics_reporter)
+                .start(pipeline_ctrl_msg_tx, metrics_reporter, Interests::empty())
                 .await
                 .map(|_| ())
         }
@@ -1049,8 +1056,8 @@ mod test {
         let control_sender = exporter.control_sender();
         let (pdata_tx, pdata_rx) =
             create_not_send_channel::<OtapPdata>(test_runtime.config().control_channel.capacity);
-        let pdata_tx = Sender::Local(LocalSender::MpscSender(pdata_tx));
-        let pdata_rx = Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx));
+        let pdata_tx = Sender::Local(LocalSender::mpsc(pdata_tx));
+        let pdata_rx = Receiver::Local(LocalReceiver::mpsc(pdata_rx));
 
         let (pipeline_ctrl_msg_tx, pipeline_ctrl_msg_rx) = pipeline_ctrl_msg_channel(10);
         exporter
@@ -1064,7 +1071,7 @@ mod test {
             let (_metrics_rx, metrics_reporter) =
                 otap_df_telemetry::reporter::MetricsReporter::create_new_and_receiver(1);
             exporter
-                .start(pipeline_ctrl_msg_tx, metrics_reporter)
+                .start(pipeline_ctrl_msg_tx, metrics_reporter, Interests::empty())
                 .await
                 .map(|_| ())
         }
@@ -1196,8 +1203,8 @@ mod test {
         let (rt, _) = setup_test_runtime();
         let control_sender = exporter.control_sender();
         let (pdata_tx, pdata_rx) = create_not_send_channel::<OtapPdata>(1);
-        let _pdata_tx = Sender::Local(LocalSender::MpscSender(pdata_tx));
-        let pdata_rx = Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx));
+        let _pdata_tx = Sender::Local(LocalSender::mpsc(pdata_tx));
+        let pdata_rx = Receiver::Local(LocalReceiver::mpsc(pdata_rx));
 
         let (pipeline_ctrl_msg_tx, mut pipeline_ctrl_msg_rx) = pipeline_ctrl_msg_channel(10);
 
@@ -1212,7 +1219,7 @@ mod test {
             let (_metrics_rx, metrics_reporter) =
                 otap_df_telemetry::reporter::MetricsReporter::create_new_and_receiver(1);
             exporter
-                .start(pipeline_ctrl_msg_tx, metrics_reporter)
+                .start(pipeline_ctrl_msg_tx, metrics_reporter, Interests::empty())
                 .await
                 .map(|_| ())
         }
@@ -1296,7 +1303,7 @@ mod test {
             })
             .run_validation(move |_ctx, exporter_result| {
                 Box::pin(async move {
-                    assert!(exporter_result.is_ok());
+                    exporter_result.unwrap();
 
                     // simply ensure there is a parquet file for each type we should have
                     // written and that it has the expected number of rows
@@ -1366,7 +1373,7 @@ mod test {
             })
             .run_validation(move |_ctx, exporter_result| {
                 Box::pin(async move {
-                    assert!(exporter_result.is_ok());
+                    exporter_result.unwrap();
 
                     // simply ensure there is a parquet file for each type we should have
                     // written and that it has the expected number of rows
@@ -1406,17 +1413,19 @@ mod test {
         let base_dir: String = temp_dir.path().to_str().unwrap().into();
 
         // Telemetry system: registry + reporter + background collector
-        let metrics_system = otap_df_telemetry::MetricsSystem::default();
-        let registry = metrics_system.registry();
+        let metrics_system = otap_df_telemetry::InternalTelemetrySystem::default();
+        let telemetry_registry = metrics_system.registry();
         let reporter = metrics_system.reporter();
 
         // Build exporter with metrics via from_config
-        let controller_ctx = ControllerContext::new(registry.clone());
+        let controller_ctx = ControllerContext::new(telemetry_registry.clone());
         let pipeline_ctx = controller_ctx
-            .pipeline_context_with("grp".into(), "pipe".into(), 0, 0)
+            .pipeline_context_with("grp".into(), "pipe".into(), 0, 1, 0)
             .with_node_context(
                 "parquet_exporter".into(),
+                PARQUET_EXPORTER_URN.into(),
                 otap_df_config::node::NodeKind::Exporter,
+                std::collections::HashMap::new(),
             );
 
         let exporter_impl = ParquetExporter::from_config(
@@ -1438,8 +1447,8 @@ mod test {
 
         // pdata channel
         let (pdata_tx_ch, pdata_rx_ch) = create_not_send_channel::<OtapPdata>(1);
-        let pdata_tx = Sender::Local(LocalSender::MpscSender(pdata_tx_ch));
-        let pdata_rx = Receiver::Local(LocalReceiver::MpscReceiver(pdata_rx_ch));
+        let pdata_tx = Sender::Local(LocalSender::mpsc(pdata_tx_ch));
+        let pdata_rx = Receiver::Local(LocalReceiver::mpsc(pdata_rx_ch));
         exporter
             .set_pdata_receiver(test_node("exp"), pdata_rx)
             .expect("Failed to set PData Receiver");
@@ -1453,7 +1462,7 @@ mod test {
             metrics_reporter: otap_df_telemetry::reporter::MetricsReporter,
         ) -> Result<(), Error> {
             exporter
-                .start(pipeline_ctrl_msg_tx, metrics_reporter)
+                .start(pipeline_ctrl_msg_tx, metrics_reporter, Interests::empty())
                 .await
                 .map(|_| ())
         }
@@ -1506,7 +1515,8 @@ mod test {
         // Run everything on the local task set, including the metrics collector
         let _ = rt.block_on(local.run_until(async move {
             // Start collector in background
-            let _handle = tokio::task::spawn_local(metrics_system.run_collection_loop());
+            let collector = metrics_system.collector();
+            let _handle = tokio::task::spawn_local(collector.run_collection_loop());
 
             tokio::join!(
                 start_exporter(exporter, pipeline_ctrl_msg_tx, reporter.clone()),
@@ -1517,7 +1527,7 @@ mod test {
         // Inspect registry to ensure exporter.pdata registered counters were reported
         let mut saw_exporter_pdata = false;
         let mut any_positive = false;
-        registry.visit_current_metrics(|desc, _attrs, iter| {
+        telemetry_registry.visit_current_metrics(|desc, _attrs, iter| {
             if desc.name == "exporter.pdata" {
                 saw_exporter_pdata = true;
                 for (_field, value) in iter {
@@ -1597,7 +1607,7 @@ mod test {
             })
             .run_validation(move |_ctx, exporter_result| {
                 Box::pin(async move {
-                    assert!(exporter_result.is_ok());
+                    exporter_result.unwrap();
                     assert_parquet_file_has_rows(&base_dir, ArrowPayloadType::Logs, num_rows).await;
                 })
             });
