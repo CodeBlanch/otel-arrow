@@ -411,7 +411,7 @@ impl Hash for ValueOrRef<'_> {
                 [1].hash(state);
                 i.get_value().hash(state);
             }
-            ValueOrRef::IntegerOwned(i) =>{
+            ValueOrRef::IntegerOwned(i) => {
                 [1].hash(state);
                 i.get_value().hash(state);
             }
@@ -469,7 +469,7 @@ fn eq_str(left: &str, right: &ValueOrRef) -> bool {
     match right {
         ValueOrRef::StringRef(s) => left == *s,
         ValueOrRef::StringOwned(s) => left == s,
-        _ => false
+        _ => false,
     }
 }
 
@@ -477,7 +477,7 @@ fn eq_int(left: i64, right: &ValueOrRef) -> bool {
     match right {
         ValueOrRef::IntegerRef(i) => left == i.get_value(),
         ValueOrRef::IntegerOwned(i) => left == *i,
-        _ => false
+        _ => false,
     }
 }
 

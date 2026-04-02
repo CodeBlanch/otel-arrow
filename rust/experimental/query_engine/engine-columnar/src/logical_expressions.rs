@@ -77,9 +77,7 @@ where
             &execution_context.create_diagnostic_receiver_for_expression(e),
             execute_scalar_expression(execution_context, e.get_left())?,
             execute_scalar_expression(execution_context, e.get_right())?,
-            |l, r| {
-                Value::are_values_equal(e.get_query_location(), l, r, e.get_case_insensitive())
-            },
+            |l, r| Value::are_values_equal(e.get_query_location(), l, r, e.get_case_insensitive()),
         )?,
         LogicalExpression::GreaterThan(g) => compare(
             g.get_query_location(),
@@ -90,9 +88,9 @@ where
                 Ok(match (l, r) {
                     (Value::Null, _) => false,
                     (_, Value::Null) => false,
-                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? > 0
+                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? > 0,
                 })
-            }
+            },
         )?,
         LogicalExpression::GreaterThanOrEqualTo(g) => compare(
             g.get_query_location(),
@@ -104,9 +102,9 @@ where
                     (Value::Null, Value::Null) => true,
                     (Value::Null, _) => false,
                     (_, Value::Null) => false,
-                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? >= 0
+                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? >= 0,
                 })
-            }
+            },
         )?,
         LogicalExpression::Not(n) => {
             match execute_logical_expression(execution_context, n.get_inner_expression())? {
@@ -142,9 +140,8 @@ where
                         }
                     } else if let Some(right) = right.as_array() {
                         ResolvedBooleanValue::ArrayOwned(
-                            arrow::compute::and(
-                                left_array,
-                                right).expect("and operation failed"))
+                            arrow::compute::and(left_array, right).expect("and operation failed"),
+                        )
                     } else {
                         unreachable!("right wasn't a single or an array")
                     }
@@ -176,9 +173,8 @@ where
                         }
                     } else if let Some(right) = right.as_array() {
                         ResolvedBooleanValue::ArrayOwned(
-                            arrow::compute::or(
-                                left_array,
-                                right).expect("or operation failed"))
+                            arrow::compute::or(left_array, right).expect("or operation failed"),
+                        )
                     } else {
                         unreachable!("right wasn't a single or an array")
                     }
@@ -225,33 +221,33 @@ where
     let (left_single, left_dictionary) = match left {
         ResolvedValue::Single(s) => (Some(s), None),
         ResolvedValue::Dictionary(d) => (None, Some(d)),
-        _ => unreachable!()
+        _ => unreachable!(),
     };
 
     let (right_single, right_dictionary) = match right {
         ResolvedValue::Single(s) => (Some(s), None),
         ResolvedValue::Dictionary(d) => (None, Some(d)),
-        _ => unreachable!()
+        _ => unreachable!(),
     };
 
     let value = if let Some(left) = left_single {
         if let Some(right) = right_single {
             ResolvedBooleanValue::Single(compare(&left.to_value(), &right.to_value())?)
-        }
-        else {
+        } else {
             ResolvedBooleanValue::ArrayOwned(compare_single_to_dictionary(
                 diagnostic_receiver,
                 &left,
                 right_dictionary.expect("right is dictionary"),
-                compare)?)
+                compare,
+            )?)
         }
     } else if let Some(right) = right_single {
-        ResolvedBooleanValue::ArrayOwned(
-            compare_dictionary_to_single(
-                diagnostic_receiver,
-                left_dictionary.expect("left is dictionary"),
-                &right,
-                compare)?)
+        ResolvedBooleanValue::ArrayOwned(compare_dictionary_to_single(
+            diagnostic_receiver,
+            left_dictionary.expect("left is dictionary"),
+            &right,
+            compare,
+        )?)
     } else {
         ResolvedBooleanValue::ArrayOwned(compare_dictionary_to_dictionary(
             query_location,
@@ -277,12 +273,8 @@ where
 
     dictionary.transform_into_boolean(diagnostic_receiver, |_, v| {
         Ok(Some(match v {
-            None => {
-                compare(&Value::Null, &right)?
-            }
-            Some(v) => {
-                compare(&v.to_value(), &right)?
-            }
+            None => compare(&Value::Null, &right)?,
+            Some(v) => compare(&v.to_value(), &right)?,
         }))
     })
 }
@@ -300,12 +292,8 @@ where
 
     dictionary.transform_into_boolean(diagnostic_receiver, |_, v| {
         Ok(Some(match v {
-            None => {
-                compare(&left, &Value::Null)?
-            }
-            Some(v) => {
-                compare(&left, &v.to_value())?
-            }
+            None => compare(&left, &Value::Null)?,
+            Some(v) => compare(&left, &v.to_value())?,
         }))
     })
 }
@@ -354,8 +342,16 @@ where
                 let right_value = right_value_index.and_then(|i| right_values.get_value_at(i));
 
                 let value = compare(
-                    left_value.as_ref().map(|v| v.to_value()).as_ref().unwrap_or(&Value::Null),
-                    right_value.as_ref().map(|v| v.to_value()).as_ref().unwrap_or(&Value::Null),
+                    left_value
+                        .as_ref()
+                        .map(|v| v.to_value())
+                        .as_ref()
+                        .unwrap_or(&Value::Null),
+                    right_value
+                        .as_ref()
+                        .map(|v| v.to_value())
+                        .as_ref()
+                        .unwrap_or(&Value::Null),
                 )?;
 
                 vacant.insert(value);

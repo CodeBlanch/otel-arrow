@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    cell::{OnceCell, RefCell}, collections::hash_map::Entry, fmt::Display
+    cell::{OnceCell, RefCell},
+    collections::hash_map::Entry,
+    fmt::Display,
 };
 
-use ahash::{AHashMap};
+use ahash::AHashMap;
 use arrow::{
     array::*,
     buffer::{MutableBuffer, NullBuffer},
@@ -17,7 +19,7 @@ use data_engine_columnar::*;
 use crate::filter::{IdBitmap, filter_child_batch};
 
 pub struct OtapLogRecordBatchFactory {
-    diagnostic_level: Option<ColumnarEngineDiagnosticLevel>
+    diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
 }
 
 impl OtapLogRecordBatchFactory {
@@ -41,7 +43,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             let logs_schema = logs.schema_ref();
 
             let attributes = if let Some(id_column) = logs_schema.column_with_name("id")
-            && let Some(attributes_batch) = batches[3].as_ref() {
+                && let Some(attributes_batch) = batches[3].as_ref()
+            {
                 let ids = logs.column(id_column.0).as_primitive::<UInt16Type>();
 
                 Some(OtapAttributes::new(ids, attributes_batch))
@@ -62,7 +65,9 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     ) -> [Option<RecordBatch>; 4] {
         let filter_true_count = filter.true_count();
 
-        if let Some(logs) = batch.logs && filter_true_count > 0 {
+        if let Some(logs) = batch.logs
+            && filter_true_count > 0
+        {
             let number_of_logs_before_filter = logs.num_rows();
             if filter_true_count == number_of_logs_before_filter {
                 return [
@@ -70,7 +75,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     batch.scope.as_ref().map(|s| s.clone()),
                     Some(logs.clone()),
                     batch.attributes.as_ref().map(|a| a.batch.clone()),
-                ]
+                ];
             }
 
             let filtered_logs = filter::filter_record_batch(logs, filter).unwrap();
@@ -83,7 +88,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         batch.scope.as_ref().map(|s| s.clone()),
                         Some(filtered_logs),
                         batch.attributes.as_ref().map(|a| a.batch.clone()),
-                    ]
+                    ];
                 }
 
                 let mut ids = IdBitmap::new();
@@ -95,16 +100,23 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             .as_primitive::<UInt16Type>()
                             .iter()
                             .flatten()
-                            .map(|i| i.into()));
+                            .map(|i| i.into()),
+                    );
                 }
 
                 if ids.is_empty() {
                     return [None, None, Some(filtered_logs), None];
                 }
 
-                let resource = batch.resource.as_ref().and_then(|v| filter_child_batch(&ids, v));
+                let resource = batch
+                    .resource
+                    .as_ref()
+                    .and_then(|v| filter_child_batch(&ids, v));
 
-                let scope = batch.scope.as_ref().and_then(|v| filter_child_batch(&ids, v));
+                let scope = batch
+                    .scope
+                    .as_ref()
+                    .and_then(|v| filter_child_batch(&ids, v));
 
                 let attributes = batch
                     .attributes
@@ -178,7 +190,9 @@ impl<'record> RecordTable for OtapLogRecordBatch<'record> {
             }
         }
 
-        if let Some(logs) = self.logs && let Some(logs_schema) = self.logs_schema {
+        if let Some(logs) = self.logs
+            && let Some(logs_schema) = self.logs_schema
+        {
             if key == "SeverityText" || key == "severity_text" {
                 if let Some(severity_text_column) = logs_schema.column_with_name("severity_text") {
                     let severity_text_array = logs
@@ -229,7 +243,7 @@ impl Display for OtapLogRecordBatch<'_> {
 pub struct OtapAttributes<'record> {
     batch: &'record RecordBatch,
     ids: &'record PrimitiveArray<UInt16Type>,
-    id_to_record_index_map: OnceCell<PrimitiveArray::<UInt16Type>>,
+    id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
     cache: RefCell<AHashMap<Box<str>, Dictionary<'record>>>,
     attribute_parent_ids: &'record PrimitiveArray<UInt16Type>,
     attribute_keys:
@@ -290,7 +304,7 @@ impl<'record> OtapAttributes<'record> {
         }
     }
 
-    fn get_id_to_record_index_map(&self) -> &PrimitiveArray::<UInt16Type> {
+    fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
         // Note: id_map is an array of parent_ids (record identifier in the
         // attribute table) to the actual index of the record in the root table.
         self.id_to_record_index_map.get_or_init(|| {
@@ -465,11 +479,7 @@ impl<'record> OtapAttributes<'record> {
     }
     */
 
-    fn get_attribute_value_index(
-        &self,
-        attribute_index: usize,
-        attribute_type: u8
-    ) -> Option<u16> {
+    fn get_attribute_value_index(&self, attribute_index: usize, attribute_type: u8) -> Option<u16> {
         /*
         pub enum AttributeValueType {
             Empty = 0,
@@ -539,26 +549,27 @@ impl<'record> OtapAttributes<'record> {
         }
         */
         match attribute_type {
-            1 => {
-                ValueOrRef::StringRef(unsafe {
-                    self.attribute_string_values.value_unchecked(attribute_value_index as usize)
-                })
-            }
-            2 => {
-                ValueOrRef::IntegerOwned(unsafe {
-                    self.attribute_int_values.unwrap().value_unchecked(attribute_value_index as usize)
-                })
-            }
-            3 => {
-                ValueOrRef::DoubleOwned(unsafe {
-                    self.attribute_doubles.unwrap().values().value_unchecked(attribute_value_index as usize)
-                })
-            }
-            4 => {
-                ValueOrRef::BooleanOwned(unsafe {
-                    self.attribute_bools.unwrap().values().value_unchecked(attribute_value_index as usize)
-                })
-            }
+            1 => ValueOrRef::StringRef(unsafe {
+                self.attribute_string_values
+                    .value_unchecked(attribute_value_index as usize)
+            }),
+            2 => ValueOrRef::IntegerOwned(unsafe {
+                self.attribute_int_values
+                    .unwrap()
+                    .value_unchecked(attribute_value_index as usize)
+            }),
+            3 => ValueOrRef::DoubleOwned(unsafe {
+                self.attribute_doubles
+                    .unwrap()
+                    .values()
+                    .value_unchecked(attribute_value_index as usize)
+            }),
+            4 => ValueOrRef::BooleanOwned(unsafe {
+                self.attribute_bools
+                    .unwrap()
+                    .values()
+                    .value_unchecked(attribute_value_index as usize)
+            }),
             _ => unreachable!(),
         }
     }
@@ -584,7 +595,8 @@ impl<'record> RecordTable for OtapAttributes<'record> {
             let mut key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
             let keys = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
 
-            let mut null_buffer = MutableBuffer::from_len_zeroed(arrow::util::bit_util::ceil(record_count, 8));
+            let mut null_buffer =
+                MutableBuffer::from_len_zeroed(arrow::util::bit_util::ceil(record_count, 8));
             let nulls = null_buffer.typed_data_mut::<u8>().as_mut_ptr();
             let mut null_count = record_count;
 
@@ -602,21 +614,25 @@ impl<'record> RecordTable for OtapAttributes<'record> {
             for attribute_index in 0..attribute_count {
                 if unsafe { *attribute_keys.add(attribute_index) } == value_index {
                     let attribute_type = unsafe { *attribute_types.add(attribute_index) };
-                    if let Some(attribute_value_index) = self.get_attribute_value_index(attribute_index, attribute_type) {
-                        let lookup_key = ((attribute_type as usize) << 16) | attribute_value_index as usize;
+                    if let Some(attribute_value_index) =
+                        self.get_attribute_value_index(attribute_index, attribute_type)
+                    {
+                        let lookup_key =
+                            ((attribute_type as usize) << 16) | attribute_value_index as usize;
                         let index = match value_lookup.entry(lookup_key) {
-                            Entry::Occupied(occupied) => {
-                                occupied.into_mut()
-                            }
+                            Entry::Occupied(occupied) => occupied.into_mut(),
                             Entry::Vacant(vacant) => {
                                 let index = values.len();
-                                values.push(self.get_attribute_value(attribute_type, attribute_value_index));
+                                values.push(
+                                    self.get_attribute_value(attribute_type, attribute_value_index),
+                                );
                                 vacant.insert(index as u16)
                             }
                         };
 
                         let parent_id = unsafe { *attribute_parent_ids.add(attribute_index) };
-                        let record_index = unsafe { *id_to_record_index_map.add(parent_id as usize) };
+                        let record_index =
+                            unsafe { *id_to_record_index_map.add(parent_id as usize) };
 
                         unsafe { *keys.add(record_index as usize) = *index };
                         unsafe { arrow::util::bit_util::set_bit_raw(nulls, record_index as usize) };
@@ -632,17 +648,10 @@ impl<'record> RecordTable for OtapAttributes<'record> {
                 )
                 .into()
             } else {
-                PrimitiveArray::<UInt16Type>::new(
-                    key_buffer.into(),
-                    None,
-                )
-                .into()
+                PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
             };
 
-            Dictionary::new(
-                keys,
-                DictionaryValueArray::VecAnyOwned(values),
-            )
+            Dictionary::new(keys, DictionaryValueArray::VecAnyOwned(values))
         } else {
             let key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
 

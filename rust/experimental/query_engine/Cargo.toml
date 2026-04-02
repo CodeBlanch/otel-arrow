@@ -22,7 +22,7 @@ rust-version = "1.86.0"
 
 [workspace.dependencies]
 ahash = "0.8.12"
-arrow = "57.1.0"
+arrow = "58.1"
 bytes = "1.10.1"
 caseless = "0.2.2"
 chrono = "0.4.41"

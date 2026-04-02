@@ -54,9 +54,7 @@ where
                                     )
                                 },
                             );
-                            ResolvedValue::Single(ResolvedSingleValue::Owned(
-                                OwnedValue::Null,
-                            ))
+                            ResolvedValue::Single(ResolvedSingleValue::Owned(OwnedValue::Null))
                         }
                     })
                 },
@@ -65,9 +63,7 @@ where
                         &execution_context.create_diagnostic_receiver_for_expression(l),
                     )?))
                 },
-                |_| {
-                    todo!()
-                }
+                |_| todo!(),
             )?
         }
         ScalarExpression::Logical(_) => todo!(),
@@ -147,7 +143,7 @@ where
                             DictionaryValueArray::IndexAnyOwned(values),
                         ))))
                     },
-                    |_| todo!()
+                    |_| todo!(),
                 )?;
 
                 match next {

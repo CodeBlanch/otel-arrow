@@ -1,11 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use arrow::{
-    array::*,
-    compute::kernels::filter,
-    datatypes::*,
-};
+use arrow::{array::*, compute::kernels::filter, datatypes::*};
 
 /// Number of u64 words per page. Each page covers 65,536 IDs (one full u16 range).
 const ID_BITMAP_PAGE_WORDS: usize = 1024;
@@ -234,8 +230,7 @@ pub fn filter_child_batch(ids: &IdBitmap, child_batch: &RecordBatch) -> Option<R
 fn build_uint16_id_filter(
     id_column: &PrimitiveArray<UInt16Type>,
     id_set: &IdBitmap,
-) -> BooleanArray
-{
+) -> BooleanArray {
     let mut builder = BooleanBuilder::with_capacity(id_column.len());
     let mut seg_val = false;
     let mut seg_len = 0usize;

@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    cell::OnceCell, collections::hash_map::Entry, fmt::{Display, Write}, sync::Arc
+    cell::OnceCell,
+    collections::hash_map::Entry,
+    fmt::{Display, Write},
+    sync::Arc,
 };
 
 use ahash::{AHashMap, RandomState};
-use arrow::{array::*, buffer::{MutableBuffer}, datatypes::*};
+use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
 use data_engine_expressions::*;
-use indexmap::{IndexSet};
+use indexmap::IndexSet;
 
 use crate::*;
 
@@ -61,8 +64,12 @@ impl<'a> Dictionary<'a> {
     ) -> Result<Dictionary<'a>, ExpressionError> {
         self.transform_into_any(diagnostic_receiver, |d, v| {
             match v {
-                Some(ValueOrRef::StringOwned(s)) => Some(ValueOrRef::IntegerOwned(s.chars().count() as i64)),
-                Some(ValueOrRef::StringRef(s)) => Some(ValueOrRef::IntegerOwned(s.chars().count() as i64)),
+                Some(ValueOrRef::StringOwned(s)) => {
+                    Some(ValueOrRef::IntegerOwned(s.chars().count() as i64))
+                }
+                Some(ValueOrRef::StringRef(s)) => {
+                    Some(ValueOrRef::IntegerOwned(s.chars().count() as i64))
+                }
                 // todo: Map
                 // todo: Array
                 Some(v) => {
@@ -150,7 +157,6 @@ impl<'a> Dictionary<'a> {
         transform: FTransform,
     ) -> Result<Dictionary<'a>, ExpressionError>
     where
-
         FTransform: FnMut(&D, Option<ValueOrRef<'_>>) -> Option<ValueOrRef<'a>>,
     {
         let array = self.keys.as_array();
@@ -516,29 +522,29 @@ impl<'a> DictionaryValueArray<'a> {
     pub(crate) fn transform_into_vec<T, D: DiagnosticReceiver, FTransform>(
         self,
         diagnostic_receiver: &D,
-        transform: &mut FTransform) -> Result<Vec<Option<T>>, ExpressionError>
-        where FTransform: FnMut(&D, Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>
+        transform: &mut FTransform,
+    ) -> Result<Vec<Option<T>>, ExpressionError>
+    where
+        FTransform: FnMut(&D, Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
     {
         Ok(match self {
-            DictionaryValueArray::ArrayRef(a) => transform_array_into(diagnostic_receiver, transform, a)?,
-            DictionaryValueArray::VecAnyOwned(a) => {
-                a
-                    .into_iter()
-                    .map(|v| transform(diagnostic_receiver, Some(v)))
-                    .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+            DictionaryValueArray::ArrayRef(a) => {
+                transform_array_into(diagnostic_receiver, transform, a)?
             }
-            DictionaryValueArray::IndexAnyOwned(a) => {
-                a
-                    .into_iter()
-                    .map(|v| transform(diagnostic_receiver, Some(v)))
-                    .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-            }
+            DictionaryValueArray::VecAnyOwned(a) => a
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, Some(v)))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            DictionaryValueArray::IndexAnyOwned(a) => a
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, Some(v)))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
             DictionaryValueArray::Boolean => {
                 vec![
                     transform(diagnostic_receiver, Some(ValueOrRef::BooleanOwned(false)))?,
                     transform(diagnostic_receiver, Some(ValueOrRef::BooleanOwned(true)))?,
                 ]
-            },
+            }
         })
     }
 }
@@ -552,106 +558,127 @@ impl<'a, T: Array + 'a> From<&'a T> for DictionaryValueArray<'a> {
 pub(crate) fn transform_array_into<'a, T, D: DiagnosticReceiver, FTransform>(
     diagnostic_receiver: &D,
     mut transform: FTransform,
-    value: &'a dyn Array) -> Result<Vec<Option<T>>, ExpressionError>
-    where FTransform: FnMut(&D, Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>
+    value: &'a dyn Array,
+) -> Result<Vec<Option<T>>, ExpressionError>
+where
+    FTransform: FnMut(&D, Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
 {
     Ok(match value.data_type() {
-        DataType::Int8 => {
-            value
-                .as_primitive::<Int8Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::Int16 => {
-            value
-                .as_primitive::<Int16Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::Int32 => {
-            value
-                .as_primitive::<Int32Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::Int64 => {
-            value
-                .as_primitive::<Int64Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
+        DataType::Int8 => value
+            .as_primitive::<Int8Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::Int16 => value
+            .as_primitive::<Int16Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::Int32 => value
+            .as_primitive::<Int32Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::Int64 => value
+            .as_primitive::<Int64Type>()
+            .into_iter()
+            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v))))
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
-        DataType::UInt8 => {
-            value
-                .as_primitive::<UInt8Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::UInt16 => {
-            value
-                .as_primitive::<UInt16Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::UInt32 => {
-            value
-                .as_primitive::<UInt32Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::UInt64 => {
-            value
-                .as_primitive::<UInt64Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
+        DataType::UInt8 => value
+            .as_primitive::<UInt8Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::UInt16 => value
+            .as_primitive::<UInt16Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::UInt32 => value
+            .as_primitive::<UInt32Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::UInt64 => value
+            .as_primitive::<UInt64Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::IntegerOwned(v as i64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
-        DataType::Float16 => {
-            value
-                .as_primitive::<Float16Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(f64::from(v)))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::Float32 => {
-            value
-                .as_primitive::<Float32Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(v as f64))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::Float64 => {
-            value
-                .as_primitive::<Float64Type>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(v))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
+        DataType::Float16 => value
+            .as_primitive::<Float16Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::DoubleOwned(f64::from(v))),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::Float32 => value
+            .as_primitive::<Float32Type>()
+            .into_iter()
+            .map(|v| {
+                transform(
+                    diagnostic_receiver,
+                    v.map(|v| ValueOrRef::DoubleOwned(v as f64)),
+                )
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::Float64 => value
+            .as_primitive::<Float64Type>()
+            .into_iter()
+            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(v))))
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
-        DataType::Utf8 => {
-            value
-                .as_string::<i32>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
-        DataType::LargeUtf8 => {
-            value
-                .as_string::<i64>()
-                .into_iter()
-                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-        },
+        DataType::Utf8 => value
+            .as_string::<i32>()
+            .into_iter()
+            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        DataType::LargeUtf8 => value
+            .as_string::<i64>()
+            .into_iter()
+            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
-        _ => todo!()
+        _ => todo!(),
     })
 }
 
@@ -767,13 +794,14 @@ where
         let mut null_value = OnceCell::new();
         for (index, value_index) in keys.iter().enumerate() {
             let v = if let Some(value_index) = value_index {
-                unsafe { transformered_values.get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index)) }
+                unsafe {
+                    transformered_values
+                        .get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
+                }
             } else {
-                match null_value.get_or_init(|| {
-                    transform(diagnostic_receiver, None)
-                }) {
+                match null_value.get_or_init(|| transform(diagnostic_receiver, None)) {
                     Err(_) => return Err(null_value.take().unwrap().unwrap_err()),
-                    Ok(v) => v
+                    Ok(v) => v,
                 }
             };
 
@@ -790,7 +818,10 @@ where
 
         for index in 0..key_length {
             let value_index = unsafe { *values.add(index) };
-            if let Some(v) = unsafe { transformered_values.get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index)) } {
+            if let Some(v) = unsafe {
+                transformered_values
+                    .get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
+            } {
                 if *v {
                     unsafe { arrow::util::bit_util::set_bit_raw(key_builder, index) };
                 }
@@ -802,7 +833,8 @@ where
 
     Ok(BooleanArray::new(
         BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
-        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish())))
+        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
+    ))
 }
 
 fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_length: usize) {
@@ -845,11 +877,14 @@ where
     let mut null_buffer = None;
 
     let mut value_index_lookup = AHashMap::with_capacity(value_length);
-    let mut transformed_values = IndexSet::with_capacity_and_hasher(value_length, RandomState::new());
+    let mut transformed_values =
+        IndexSet::with_capacity_and_hasher(value_length, RandomState::new());
     let mut null_index = None;
 
     for (key_index, value_index) in keys.into_iter().enumerate() {
-        if let Some(value_index) = value_index.map(|v| <K as ArrowPrimitiveType>::Native::as_usize(v)) {
+        if let Some(value_index) =
+            value_index.map(|v| <K as ArrowPrimitiveType>::Native::as_usize(v))
+        {
             match value_index_lookup.entry(value_index) {
                 Entry::Occupied(o) => {
                     if let Some(value_index) = o.get() {
@@ -900,7 +935,9 @@ where
     Ok(Dictionary {
         keys: PrimitiveArray::<K>::new(
             key_buffer.into(),
-            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish())).into(),
+            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
+        )
+        .into(),
         values: DictionaryValueArray::IndexAnyOwned(transformed_values),
     })
 }

@@ -25,11 +25,12 @@ impl<'a> ResolvedValue<'a> {
     where
         FSingle: FnMut(ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
         FDictionary: FnMut(Dictionary<'a>) -> Result<FRet, ExpressionError>,
-        FTable: FnMut(&'a dyn RecordTable) -> Result<FRet, ExpressionError> {
+        FTable: FnMut(&'a dyn RecordTable) -> Result<FRet, ExpressionError>,
+    {
         match self {
             ResolvedValue::Single(single) => when_single(single),
             ResolvedValue::Dictionary(dictionary) => when_dictionary(dictionary),
-            ResolvedValue::Table(table) => when_table(table)
+            ResolvedValue::Table(table) => when_table(table),
         }
     }
 }

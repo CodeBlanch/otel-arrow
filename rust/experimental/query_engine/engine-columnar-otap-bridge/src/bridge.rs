@@ -7,7 +7,7 @@ use arrow::array::RecordBatch;
 use data_engine_columnar::*;
 use data_engine_expressions::*;
 use data_engine_kql_parser::*;
-use otap_df_pdata::otap::{Logs, OtapBatchStore};
+use otap_df_pdata::otap::{Logs, OtapBatchStore, raw_batch_store::RawLogsStore};
 
 use crate::{logs::*, *};
 
@@ -68,7 +68,7 @@ pub struct BridgeResponse<'a, T> {
     pub included_records: T,
     pub included_record_count: usize,
     pub dropped_record_count: usize,
-    pub diagnostics: BridgeDiagnostics<'a>
+    pub diagnostics: BridgeDiagnostics<'a>,
 }
 
 #[derive(Debug)]
@@ -93,7 +93,11 @@ impl<'a> BridgeDiagnostics<'a> {
 
 impl Display for BridgeDiagnostics<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        format_diagnostics(self.pipeline.get_pipeline().get_query(), &self.diagnostics, f)
+        format_diagnostics(
+            self.pipeline.get_pipeline().get_query(),
+            &self.diagnostics,
+            f,
+        )
     }
 }
 
@@ -131,27 +135,35 @@ pub fn process_otap_logs_using_pipeline<'a>(
 
     let batches = otap_logs.into_batches();
 
-    batch.push_records(
-        factory,
-        batches,
-    );
+    batch.push_records(factory, batches);
 
     let results = batch.flush();
 
-    let mut logs = Logs::new();
+    //let mut logs = Logs::new();
+    let mut logs = RawLogsStore::new();
 
     if results.included_batches.len() > 0 {
         let batches = logs.batches_mut();
-        for (index, batch) in results.included_batches.into_iter().next().unwrap().into_iter().enumerate() {
+        for (index, batch) in results
+            .included_batches
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
             batches[index] = batch;
         }
     }
 
     Ok(BridgeResponse {
-        included_records: logs,
+        included_records: logs.try_into().unwrap(),
         included_record_count: results.included_record_count,
         dropped_record_count: results.dropped_record_count,
-        diagnostics: BridgeDiagnostics { pipeline, diagnostics: results.diagnostics }
+        diagnostics: BridgeDiagnostics {
+            pipeline,
+            diagnostics: results.diagnostics,
+        },
     })
 }
 
@@ -242,7 +254,14 @@ fn build_log_record_schema(
 mod tests {
     use bytes::Bytes;
     use data_engine_kql_parser::{KqlParser, Parser};
-    use otap_df_pdata::{otap::OtapBatchStore, proto::OtlpProtoMessage, testing::{fixtures::logs_with_varying_attributes_and_properties, round_trip::otlp_to_otap}, *};
+    use otap_df_pdata::{
+        otap::OtapBatchStore,
+        proto::OtlpProtoMessage,
+        testing::{
+            fixtures::logs_with_varying_attributes_and_properties, round_trip::otlp_to_otap,
+        },
+        *,
+    };
 
     use super::*;
 
@@ -309,8 +328,8 @@ mod tests {
         assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
 
         let pipeline = KqlParser::parse("source | where severity_text == 'Info'")
-        //let pipeline = KqlParser::parse("source | where severity_text != 'aInfo' or false")
-        //let pipeline = KqlParser::parse("source | where thing > 0 and thing2 == 2")
+            //let pipeline = KqlParser::parse("source | where severity_text != 'aInfo' or false")
+            //let pipeline = KqlParser::parse("source | where thing > 0 and thing2 == 2")
             .unwrap()
             .pipeline;
 
@@ -338,14 +357,14 @@ mod tests {
         println!("{results}");
     }
 
-fn generate_logs_batch(batch_size: usize) -> Logs {
-    let logs_data = logs_with_varying_attributes_and_properties(batch_size);
-    let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
-    match pdata {
-        OtapArrowRecords::Logs(logs) => logs,
-        _ => panic!()
+    fn generate_logs_batch(batch_size: usize) -> Logs {
+        let logs_data = logs_with_varying_attributes_and_properties(batch_size);
+        let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
+        match pdata {
+            OtapArrowRecords::Logs(logs) => logs,
+            _ => panic!(),
+        }
     }
-}
 
     #[test]
     fn test_engine_filter_attribute() {
@@ -378,8 +397,7 @@ fn generate_logs_batch(batch_size: usize) -> Logs {
 
         let engine = ColumnarEngine::new_with_options(
             pipeline,
-            ColumnarEngineOptions::new()
-                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Warn),
+            ColumnarEngineOptions::new().with_diagnostic_level(ColumnarEngineDiagnosticLevel::Warn),
         );
 
         let mut batch = engine.begin_batch().unwrap();
