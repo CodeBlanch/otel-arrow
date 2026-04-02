@@ -188,14 +188,14 @@ where
             &execution_context.create_diagnostic_receiver_for_expression(c),
             execute_scalar_expression(execution_context, c.get_haystack())?,
             execute_scalar_expression(execution_context, c.get_needle())?,
-            |l, r| Value::contains(c.get_query_location(), &l, &r, c.get_case_insensitive()),
+            |l, r| Value::contains(c.get_query_location(), l, r, c.get_case_insensitive()),
         )?,
         LogicalExpression::Matches(m) => compare(
             m.get_query_location(),
             &execution_context.create_diagnostic_receiver_for_expression(m),
             execute_scalar_expression(execution_context, m.get_haystack())?,
             execute_scalar_expression(execution_context, m.get_pattern())?,
-            |l, r| Value::matches(m.get_query_location(), &l, &r),
+            |l, r| Value::matches(m.get_query_location(), l, r),
         )?,
     };
 
