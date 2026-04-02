@@ -45,7 +45,7 @@ impl OwnedValue {
                     if let Some(i) = n.as_i64() {
                         Ok(OwnedValue::Integer(i))
                     } else {
-                        match n.as_f64().map(|f| OwnedValue::Double(f)) {
+                        match n.as_f64().map(OwnedValue::Double) {
                             Some(v) => Ok(v),
                             None => Err(ExpressionError::ParseError(
                                 query_location.clone(),

@@ -3,7 +3,6 @@
 
 use std::{fmt::Display, sync::LazyLock};
 
-use arrow::array::RecordBatch;
 use data_engine_columnar::*;
 use data_engine_expressions::*;
 use data_engine_kql_parser::*;
@@ -59,7 +58,7 @@ pub struct BridgePipeline {
 
 impl BridgePipeline {
     pub fn get_pipeline(&self) -> &PipelineExpression {
-        &self.engine.get_pipeline()
+        self.engine.get_pipeline()
     }
 }
 
@@ -142,7 +141,7 @@ pub fn process_otap_logs_using_pipeline<'a>(
     //let mut logs = Logs::new();
     let mut logs = RawLogsStore::new();
 
-    if results.included_batches.len() > 0 {
+    if !results.included_batches.is_empty() {
         let batches = logs.batches_mut();
         for (index, batch) in results
             .included_batches
@@ -295,7 +294,7 @@ mod tests {
 
         let mut batch = engine.begin_batch().unwrap();
 
-        batch.push_records(&mut OtapLogRecordBatchFactory::new(), batches);
+        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
 
         let results = batch.flush();
 
@@ -341,7 +340,7 @@ mod tests {
 
         let mut batch = engine.begin_batch().unwrap();
 
-        batch.push_records(&mut OtapLogRecordBatchFactory::new(), batches);
+        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
 
         let results = batch.flush();
 
@@ -402,7 +401,7 @@ mod tests {
 
         let mut batch = engine.begin_batch().unwrap();
 
-        batch.push_records(&mut OtapLogRecordBatchFactory::new(), batches);
+        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
 
         let results = batch.flush();
 

@@ -71,8 +71,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             let number_of_logs_before_filter = logs.num_rows();
             if filter_true_count == number_of_logs_before_filter {
                 return [
-                    batch.resource.as_ref().map(|r| r.clone()),
-                    batch.scope.as_ref().map(|s| s.clone()),
+                    batch.resource.clone(),
+                    batch.scope.clone(),
                     Some(logs.clone()),
                     batch.attributes.as_ref().map(|a| a.batch.clone()),
                 ];
@@ -84,8 +84,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             if number_of_logs_after_filter > 0 {
                 if number_of_logs_before_filter == number_of_logs_after_filter {
                     return [
-                        batch.resource.as_ref().map(|r| r.clone()),
-                        batch.scope.as_ref().map(|s| s.clone()),
+                        batch.resource.clone(),
+                        batch.scope.clone(),
                         Some(filtered_logs),
                         batch.attributes.as_ref().map(|a| a.batch.clone()),
                     ];

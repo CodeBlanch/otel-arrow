@@ -32,13 +32,13 @@ fn bench_log_pipeline(
             let batch = generate_logs_batch(*batch_size);
             let pipeline = parse_kql_logs_query_into_pipeline(bench_pipeline_kql, None)
                 .expect("can parse pipeline");
-            let mut factory = OtapLogRecordBatchFactory::new_with_options(Some(
+            let factory = OtapLogRecordBatchFactory::new_with_options(Some(
                 ColumnarEngineDiagnosticLevel::Warn,
             ));
             b.iter_with_setup(
                 || batch.clone(),
                 |batch| {
-                    process_otap_logs_using_pipeline(&pipeline, &mut factory, batch)
+                    process_otap_logs_using_pipeline(&pipeline, &factory, batch)
                         .expect("doesn't fail")
                 },
             );

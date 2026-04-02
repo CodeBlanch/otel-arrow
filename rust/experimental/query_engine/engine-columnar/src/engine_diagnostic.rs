@@ -131,8 +131,10 @@ impl<TRecords: ColumnarRecords> DiagnosticReceiver
     }
 }
 
+#[cfg(test)]
 pub(crate) struct NoopDiagnosticReceiver {}
 
+#[cfg(test)]
 impl DiagnosticReceiver for NoopDiagnosticReceiver {
     fn add_diagnostic_if_enabled<F>(
         &self,
