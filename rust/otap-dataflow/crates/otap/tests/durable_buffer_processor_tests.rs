@@ -20,13 +20,16 @@ use otap_df_config::observed_state::{ObservedStateSettings, SendPolicy};
 use otap_df_config::pipeline::{PipelineConfig, PipelineConfigBuilder, PipelineType};
 use otap_df_config::policy::{ChannelCapacityPolicy, TelemetryPolicy};
 use otap_df_config::{DeployedPipelineKey, PipelineGroupId, PipelineId};
+use otap_df_core_nodes::exporters::error_exporter::ERROR_EXPORTER_URN;
+use otap_df_core_nodes::exporters::noop_exporter::NOOP_EXPORTER_URN;
+use otap_df_core_nodes::processors::durable_buffer_processor::DURABLE_BUFFER_URN;
+use otap_df_core_nodes::receivers::fake_data_generator::OTAP_FAKE_DATA_GENERATOR_URN;
 use otap_df_engine::context::ControllerContext;
-use otap_df_engine::control::{PipelineControlMsg, pipeline_ctrl_msg_channel};
+use otap_df_engine::control::{
+    RuntimeControlMsg, pipeline_completion_msg_channel, runtime_ctrl_msg_channel,
+};
 use otap_df_engine::entity_context::set_pipeline_entity_key;
 use otap_df_otap::OTAP_PIPELINE_FACTORY;
-use otap_df_otap::durable_buffer_processor::DURABLE_BUFFER_URN;
-use otap_df_otap::fake_data_generator::OTAP_FAKE_DATA_GENERATOR_URN;
-use otap_df_otap::noop_exporter::NOOP_EXPORTER_URN;
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use otap_df_state::store::ObservedStateStore;
 use otap_df_telemetry::InternalTelemetrySystem;
@@ -40,9 +43,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
-
-/// URN for the error exporter (always NACKs).
-const ERROR_EXPORTER_URN: &str = "urn:otel:exporter:error";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test Configuration Builder
@@ -287,6 +287,7 @@ fn run_pipeline_with_condition<F>(
         max_duration,
         shutdown_deadline,
         shutdown_condition,
+        false,
     );
 }
 
@@ -430,6 +431,11 @@ impl CollectedMetrics {
 /// Returns the collected metrics from all `CollectTelemetry` cycles during the pipeline run.
 /// Uses a dedicated `MetricsReporter` channel to intercept metric snapshots rather than
 /// letting them flow into the `InternalCollector` (which doesn't run in test mode).
+///
+/// When `wait_for_telemetry` is true and the shutdown condition fires, the pipeline
+/// continues running for ~1.5 s so that at least one `CollectTelemetry` cycle flushes
+/// metrics to the reporter channel before shutdown. Without this, fast pipelines on
+/// slow CI may shut down before any metrics snapshot is produced.
 fn run_pipeline_collecting_metrics<F>(
     config: PipelineConfig,
     pipeline_group_id: &PipelineGroupId,
@@ -437,6 +443,7 @@ fn run_pipeline_collecting_metrics<F>(
     max_duration: Duration,
     shutdown_deadline: Duration,
     shutdown_condition: Option<F>,
+    wait_for_telemetry: bool,
 ) -> CollectedMetrics
 where
     F: Fn() -> bool + Send + 'static,
@@ -464,9 +471,11 @@ where
         )
         .expect("failed to build runtime pipeline");
 
-    let (pipeline_ctrl_tx, pipeline_ctrl_rx) =
-        pipeline_ctrl_msg_channel(channel_capacity_policy.control.pipeline);
-    let pipeline_ctrl_tx_for_shutdown = pipeline_ctrl_tx.clone();
+    let (runtime_ctrl_tx, runtime_ctrl_rx) =
+        runtime_ctrl_msg_channel(channel_capacity_policy.control.pipeline);
+    let (pipeline_completion_tx, pipeline_completion_rx) =
+        pipeline_completion_msg_channel(channel_capacity_policy.control.completion);
+    let runtime_ctrl_tx_for_shutdown = runtime_ctrl_tx.clone();
     let observed_state_store =
         ObservedStateStore::new(&ObservedStateSettings::default(), registry.clone());
 
@@ -476,29 +485,43 @@ where
         core_id: 0,
     };
     // Create a metrics reporter with our own receiver so we can inspect metrics.
-    // The channel is large enough to hold many telemetry collection cycles.
-    let (metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1000);
+    // Use a very large channel so it never overflows, even on extremely slow CI
+    // where many telemetry snapshots accumulate before the test drains them.
+    let (metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1_000_000);
     let event_reporter = observed_state_store.reporter(SendPolicy::default());
 
     let shutdown_handle = std::thread::spawn(move || {
         // Either poll the condition or wait for max_duration, whichever comes first.
         let poll_interval = Duration::from_millis(10);
         let start = Instant::now();
+        let mut condition_triggered = false;
         loop {
             if start.elapsed() >= max_duration {
                 break;
             }
             if let Some(ref condition) = shutdown_condition {
                 if condition() {
+                    condition_triggered = true;
                     break;
                 }
             }
             std::thread::sleep(poll_interval);
         }
+
+        // When a shutdown condition triggered and the caller needs metrics,
+        // wait for at least one telemetry collection cycle (1s interval +
+        // margin) so that metrics snapshots are flushed to the reporter
+        // channel before shutdown. Without this, fast tests on slow CI may
+        // shut down before any CollectTelemetry fires, resulting in empty
+        // metrics.
+        if condition_triggered && wait_for_telemetry {
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+
         let deadline = Instant::now() + shutdown_deadline;
         // Try to send shutdown request. If the channel is closed, the pipeline
         // has already terminated (e.g., data generator finished), which is fine.
-        let _ = pipeline_ctrl_tx_for_shutdown.try_send(PipelineControlMsg::Shutdown {
+        let _ = runtime_ctrl_tx_for_shutdown.try_send(RuntimeControlMsg::Shutdown {
             deadline,
             reason: "test shutdown".to_owned(),
         });
@@ -512,8 +535,11 @@ where
             pipeline_ctx,
             event_reporter,
             metrics_reporter,
-            pipeline_ctrl_tx,
-            pipeline_ctrl_rx,
+            Duration::from_secs(1),
+            runtime_ctrl_tx,
+            runtime_ctrl_rx,
+            pipeline_completion_tx,
+            pipeline_completion_rx,
         )
     };
 
@@ -731,9 +757,11 @@ where
         )
         .expect("failed to build runtime pipeline");
 
-    let (pipeline_ctrl_tx, pipeline_ctrl_rx) =
-        pipeline_ctrl_msg_channel(channel_capacity_policy.control.pipeline);
-    let pipeline_ctrl_tx_for_shutdown = pipeline_ctrl_tx.clone();
+    let (runtime_ctrl_tx, runtime_ctrl_rx) =
+        runtime_ctrl_msg_channel(channel_capacity_policy.control.pipeline);
+    let (pipeline_completion_tx, pipeline_completion_rx) =
+        pipeline_completion_msg_channel(channel_capacity_policy.control.completion);
+    let runtime_ctrl_tx_for_shutdown = runtime_ctrl_tx.clone();
     let observed_state_store =
         ObservedStateStore::new(&ObservedStateSettings::default(), registry.clone());
 
@@ -784,7 +812,7 @@ where
         let snapshot = capture_durable_buffer_metrics(&capture_registry);
 
         let deadline = Instant::now() + shutdown_deadline;
-        let _ = pipeline_ctrl_tx_for_shutdown.try_send(PipelineControlMsg::Shutdown {
+        let _ = runtime_ctrl_tx_for_shutdown.try_send(RuntimeControlMsg::Shutdown {
             deadline,
             reason: "test shutdown (metrics capture)".to_owned(),
         });
@@ -800,8 +828,11 @@ where
             pipeline_ctx,
             event_reporter,
             metrics_reporter,
-            pipeline_ctrl_tx,
-            pipeline_ctrl_rx,
+            Duration::from_secs(1),
+            runtime_ctrl_tx,
+            runtime_ctrl_rx,
+            pipeline_completion_tx,
+            pipeline_completion_rx,
         )
     };
 
@@ -888,6 +919,7 @@ fn test_durable_buffer_retries_on_nack() {
         Duration::from_secs(10), // generous max timeout for CI
         Duration::from_secs(1),
         Some(move || delivered_counter.load(Ordering::Relaxed) > 0),
+        true, // wait for telemetry cycle before shutdown so metrics are populated
     );
 
     let nacks_before_flip = flip_handle.join().expect("flip thread panicked");
@@ -1672,9 +1704,12 @@ fn test_durable_buffer_permanent_nack_rejects_without_retry() {
 
     // Spawn a thread to:
     // 1. Wait for permanent NACKs to occur
-    // 2. Switch to ACK mode to verify pipeline still works
+    // 2. Switch to ACK mode so the pipeline can deliver data and shut down
+    //
+    // Note: we do NOT wait for delivery here. The pipeline shutdown condition
+    // (`counter > 0`) handles that with a generous timeout. Adding a second,
+    // tighter timeout in this thread caused failures on slow CI (see #2354).
     let flip_test_id = test_id.to_owned();
-    let flip_counter = counter.clone();
     let flip_handle = std::thread::spawn(move || {
         // Wait for at least 3 permanent NACKs
         let permanent_nacks_observed = wait_for_condition(
@@ -1691,19 +1726,10 @@ fn test_durable_buffer_permanent_nack_rejects_without_retry() {
         let permanent_nacks_before = flaky_exporter::permanent_nack_count_by_id(&flip_test_id);
         let transient_nacks_before = flaky_exporter::nack_count_by_id(&flip_test_id);
 
-        // Switch to ACK mode - new data should be delivered
+        // Switch to ACK mode - new data should be delivered.
+        // The pipeline shutdown condition gates on delivered_counter > 0, so delivery
+        // is verified there (with a 15 s ceiling) rather than here.
         flaky_exporter::set_should_ack_by_id(&flip_test_id, true);
-
-        // Wait for some data to be delivered in ACK mode
-        let delivered = wait_for_condition(
-            || flip_counter.load(Ordering::Relaxed) > 0,
-            Duration::from_secs(5),
-            Duration::from_millis(10),
-        );
-        assert!(
-            delivered,
-            "Expected data to be delivered after switching to ACK mode"
-        );
 
         (permanent_nacks_before, transient_nacks_before)
     });
@@ -1717,6 +1743,7 @@ fn test_durable_buffer_permanent_nack_rejects_without_retry() {
         Duration::from_secs(15),
         Duration::from_secs(1),
         Some(move || delivered_counter.load(Ordering::Relaxed) > 0),
+        true, // wait for telemetry cycle before shutdown so metrics are populated
     );
 
     let (_permanent_nacks, transient_nacks) = flip_handle.join().expect("flip thread panicked");
@@ -1778,15 +1805,13 @@ fn test_durable_buffer_permanent_nack_rejects_without_retry() {
     );
 
     // Validate per-item metrics: permanent NACKs should reject items, not requeue them.
-    // This test uses 50% logs + 50% traces, so both log and span counters should be non-zero.
+    // Each bundle carries a single signal type, so with only a handful of permanent
+    // NACKs it is possible (~25%) that all NACKed bundles are the same type.
+    // Assert on the aggregate rather than expecting both counters to be non-zero.
     assert!(
-        metrics.rejected_log_records() > 0,
-        "Expected rejected_log_records metric > 0 (items permanently rejected), got {}",
-        metrics.rejected_log_records()
-    );
-    assert!(
-        metrics.rejected_spans() > 0,
-        "Expected rejected_spans metric > 0 (items permanently rejected), got {}",
+        metrics.rejected_log_records() + metrics.rejected_spans() > 0,
+        "Expected some items permanently rejected, got rejected_log_records={}, rejected_spans={}",
+        metrics.rejected_log_records(),
         metrics.rejected_spans()
     );
     assert_eq!(
@@ -1808,11 +1833,13 @@ fn test_durable_buffer_permanent_nack_rejects_without_retry() {
         metrics.requeued_spans()
     );
 
-    // Validate: items were produced (sent downstream)
+    // Validate: items were produced (sent downstream).
+    // Signal type is random per-bundle, so check aggregate.
     assert!(
-        metrics.produced_log_records() > 0,
-        "Expected produced_log_records metric > 0 (items sent downstream), got {}",
-        metrics.produced_log_records()
+        metrics.produced_log_records() + metrics.produced_spans() > 0,
+        "Expected some items produced, got produced_log_records={}, produced_spans={}",
+        metrics.produced_log_records(),
+        metrics.produced_spans()
     );
 
     // Validate: queued gauges should reflect that permanent NACKs decremented them.
@@ -1903,7 +1930,6 @@ fn test_durable_buffer_mixed_transient_and_permanent_nacks() {
         .build(&pipeline_group_id, &pipeline_id);
 
     let flip_test_id = test_id.to_owned();
-    let flip_counter = counter.clone();
     let flip_handle = std::thread::spawn(move || {
         // Phase 1: Wait for transient NACKs
         let transient_observed = wait_for_condition(
@@ -1933,18 +1959,11 @@ fn test_durable_buffer_mixed_transient_and_permanent_nacks() {
         );
         let permanent_nacks_phase2 = flaky_exporter::permanent_nack_count_by_id(&flip_test_id);
 
-        // Phase 3: Switch to ACK mode
+        // Phase 3: Switch to ACK mode.
+        // The pipeline shutdown condition gates on delivered_counter > 0 with a 15 s
+        // ceiling, so delivery is verified there rather than here. Waiting
+        // here with a tighter timeout caused failures on slow CI (see #2354).
         flaky_exporter::set_should_ack_by_id(&flip_test_id, true);
-
-        let delivered = wait_for_condition(
-            || flip_counter.load(Ordering::Relaxed) > 0,
-            Duration::from_secs(5),
-            Duration::from_millis(10),
-        );
-        assert!(
-            delivered,
-            "Expected data delivery after switching to ACK mode"
-        );
 
         (transient_nacks_phase1, permanent_nacks_phase2)
     });
@@ -1957,6 +1976,7 @@ fn test_durable_buffer_mixed_transient_and_permanent_nacks() {
         Duration::from_secs(15),
         Duration::from_secs(1),
         Some(move || delivered_counter.load(Ordering::Relaxed) > 0),
+        true, // wait for telemetry cycle before shutdown so metrics are populated
     );
 
     let (transient_nacks, permanent_nacks) = flip_handle.join().expect("flip thread panicked");

@@ -46,7 +46,7 @@ impl LogsService for LogsServiceMock {
 
 #[tokio::test]
 async fn otlp_exporter_connects_with_mtls() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    otap_df_otap::crypto::ensure_crypto_provider();
 
     // Generate CA, server cert, client cert.
     let ca = generate_ca("Test CA");
@@ -133,7 +133,7 @@ async fn otlp_exporter_connects_with_mtls() {
 
 #[tokio::test]
 async fn otlp_exporter_fails_with_invalid_ca_pem() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    otap_df_otap::crypto::ensure_crypto_provider();
 
     // Generate CA and server cert.
     let ca = generate_ca("Test CA");
@@ -190,6 +190,7 @@ async fn otlp_exporter_fails_with_invalid_ca_pem() {
 
 #[tokio::test]
 async fn otlp_exporter_allows_http_with_tls_config() {
+    otap_df_otap::crypto::ensure_crypto_provider();
     let settings = GrpcClientSettings {
         grpc_endpoint: "http://localhost:4317".to_string(),
         tls: Some(TlsClientConfig {
@@ -208,6 +209,7 @@ async fn otlp_exporter_allows_http_with_tls_config() {
 
 #[tokio::test]
 async fn otlp_exporter_fails_partial_mtls() {
+    otap_df_otap::crypto::ensure_crypto_provider();
     let settings = GrpcClientSettings {
         grpc_endpoint: "https://localhost:4317".to_string(),
         tls: Some(TlsClientConfig {
@@ -237,7 +239,7 @@ async fn otlp_exporter_fails_partial_mtls() {
 
 #[tokio::test]
 async fn otlp_exporter_connects_with_tls_only() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    otap_df_otap::crypto::ensure_crypto_provider();
 
     // Generate CA and server cert (no client cert needed for TLS-only).
     let ca = generate_ca("Test CA");

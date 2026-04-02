@@ -32,7 +32,7 @@
 //! in parallel on different cores, each with its own processor instance.
 
 use crate::Interests;
-use crate::control::{AckMsg, NackMsg, PipelineCtrlMsgSender};
+use crate::control::{AckMsg, NackMsg, RuntimeCtrlMsgSender};
 use crate::effect_handler::{
     EffectHandlerCore, SourceTagging, TelemetryTimerCancelHandle, TimerCancelHandle,
 };
@@ -88,6 +88,14 @@ pub trait Processor<PData> {
         msg: Message<PData>,
         effect_handler: &mut EffectHandler<PData>,
     ) -> Result<(), Error>;
+
+    /// Returns whether the engine should deliver pdata messages to this processor right now.
+    ///
+    /// When this returns `false` the engine pauses pdata delivery and only forwards control
+    /// messages (acks/nacks) until the processor signals it is ready again. Defaults to `true`.
+    fn accept_pdata(&self) -> bool {
+        true
+    }
 }
 
 /// A `Send` implementation of the EffectHandler.
@@ -222,22 +230,6 @@ impl<PData> EffectHandler<PData> {
         self.core.start_periodic_telemetry(duration).await
     }
 
-    /// Send an Ack to the pipeline controller for context unwinding.
-    pub async fn route_ack(&self, ack: AckMsg<PData>) -> Result<(), Error>
-    where
-        PData: crate::Unwindable,
-    {
-        self.core.route_ack(ack).await
-    }
-
-    /// Send a Nack to the pipeline controller for context unwinding.
-    pub async fn route_nack(&self, nack: NackMsg<PData>) -> Result<(), Error>
-    where
-        PData: crate::Unwindable,
-    {
-        self.core.route_nack(nack).await
-    }
-
     /// Delay data.
     pub async fn delay_data(&self, when: Instant, data: Box<PData>) -> Result<(), PData> {
         self.core.delay_data(when, data).await
@@ -252,19 +244,42 @@ impl<PData> EffectHandler<PData> {
         self.core.report_metrics(metrics)
     }
 
-    /// Sets the pipeline control message sender for this effect handler.
+    /// Sets the runtime control message sender for this effect handler.
     ///
     /// Primarily used by tests and manual harnesses that construct an EffectHandler directly;
     /// the engine wiring sets this automatically in `prepare_runtime`.
-    pub fn set_pipeline_ctrl_msg_sender(
+    pub fn set_runtime_ctrl_msg_sender(
         &mut self,
-        pipeline_ctrl_msg_sender: PipelineCtrlMsgSender<PData>,
+        runtime_ctrl_msg_sender: RuntimeCtrlMsgSender<PData>,
     ) {
         self.core
-            .set_pipeline_ctrl_msg_sender(pipeline_ctrl_msg_sender);
+            .set_runtime_ctrl_msg_sender(runtime_ctrl_msg_sender);
     }
 
     // More methods will be added in the future as needed.
+
+    /// Sets the pipeline result message sender for this effect handler.
+    ///
+    /// Primarily used by tests and manual harnesses that construct an EffectHandler directly;
+    /// the engine wiring sets this automatically in `prepare_runtime`.
+    pub fn set_pipeline_completion_msg_sender(
+        &mut self,
+        pipeline_completion_msg_sender: crate::control::PipelineCompletionMsgSender<PData>,
+    ) {
+        self.core
+            .set_pipeline_completion_msg_sender(pipeline_completion_msg_sender);
+    }
+}
+
+#[async_trait(?Send)]
+impl<PData: crate::Unwindable> crate::_private::AckNackRouting<PData> for EffectHandler<PData> {
+    async fn route_ack(&self, ack: AckMsg<PData>) -> Result<(), Error> {
+        self.core.route_ack(ack).await
+    }
+
+    async fn route_nack(&self, nack: NackMsg<PData>) -> Result<(), Error> {
+        self.core.route_nack(nack).await
+    }
 }
 
 #[cfg(test)]
@@ -297,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_handler_try_send_message_channel_full() {
+    fn effect_handler_try_send_message_inbox_full() {
         // Create a channel with capacity 1
         let (tx, _rx) = tokio::sync::mpsc::channel::<u64>(1);
         let mut senders = HashMap::new();

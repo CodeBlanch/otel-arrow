@@ -1,6 +1,6 @@
 
 {% set suv_exporter_type = suv_exporter_type | default("otlp") -%}
-{% set suv_exporter_plugin_urn = "urn:otel:exporter:otlp" -%}
+{% set suv_exporter_plugin_urn = "urn:otel:exporter:otlp_grpc" -%}
 {% if suv_exporter_type == "otap" -%}
   {% set suv_exporter_plugin_urn = "urn:otel:exporter:otap" -%}
 {% endif -%}
@@ -46,10 +46,18 @@
         - "control_port{{ loop.index }}"
 {% endfor %}
       config:
+{% if custom_suv_exporter %}
+    suv_exporter:
+{{ custom_suv_exporter | indent(6, true) }}
+{% else %}
     suv_exporter:
       type: {{ suv_exporter_plugin_urn }}
       config:
+{% if tls_enabled %}
+        grpc_endpoint: https://127.0.0.1:{{ suv_port }}
+{% else %}
         grpc_endpoint: http://127.0.0.1:{{ suv_port }}
+{% endif %}
 {% if suv_exporter_type == "otap" -%}
         compression_method: none
         arrow:
@@ -65,9 +73,10 @@
           key_file: '{{ tls_client_key }}'
 {% endif %}
 {% endif %}
+{% endif %}
 {% for control_port in control_ports %}
     control_exporter{{ loop.index }}:
-      type: "urn:otel:exporter:otlp"
+      type: "urn:otel:exporter:otlp_grpc"
       config:
         grpc_endpoint: http://127.0.0.1:{{ control_port }}
 {% endfor %}

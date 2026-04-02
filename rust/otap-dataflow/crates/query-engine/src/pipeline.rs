@@ -4,6 +4,7 @@
 //! This module defines the top-level API for executing data transformation pipelines on
 //! streaming telemetry data in the OTAP columnar format.
 
+use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use async_trait::async_trait;
 use data_engine_expressions::PipelineExpression;
@@ -23,6 +24,7 @@ use crate::pipeline::planner::PipelinePlanner;
 use crate::pipeline::state::ExecutionState;
 use crate::table::RecordBatchPartitionStream;
 
+mod apply_attrs;
 mod assign;
 mod attributes;
 mod conditional;
@@ -63,6 +65,58 @@ pub trait PipelineStage {
         task_context: Arc<TaskContext>,
         exec_options: &mut ExecutionState,
     ) -> Result<OtapArrowRecords>;
+
+    /// Execute this stage of the pipeline on a [`RecordBatch`] containing a set of attributes.
+    ///
+    /// Not all pipeline stages are required to support this, and the default is that it is not
+    /// supported. If an type chooses to implement this, it should also implement
+    /// `supports_exec_on_attributes` and return `true`.
+    async fn execute_on_attributes(
+        &mut self,
+        _attrs_record_batch: RecordBatch,
+        _session_context: &SessionContext,
+        _config_options: &ConfigOptions,
+        _task_context: Arc<TaskContext>,
+        _exec_options: &mut ExecutionState,
+    ) -> Result<RecordBatch> {
+        return Err(Error::ExecutionError {
+            cause: "Unexpected invocation of pipeline stage that does not support processing attributes".into()
+        });
+    }
+
+    /// Returns a flag indicating that this stage of the pipeline on a [`RecordBatch`] containing
+    /// a set of attributes. This will be used during planning to determine if invalid pipeline
+    /// stages have been specified in a pipeline handling attributes record batches.
+    ///
+    /// If a type chooses to implement this method and return true, it should also add an
+    /// implementation for `execute_on_attributes`.
+    fn supports_exec_on_attributes(&self) -> bool {
+        false
+    }
+
+    /// When pipeline stages execute within the context of a conditional branch, they will only see
+    /// the batch that is local to that branch. However, there may be cases where some global state
+    /// may need to be maintained across branches. This method provides an opportunity to
+    /// initialize the state. It will be called with the OTAP batch that is the input to the
+    /// conditional pipeline stage.
+    fn init_state_for_conditional_branch(
+        &mut self,
+        _otap_batch: &OtapArrowRecords,
+        _exec_state: &mut ExecutionState,
+    ) -> Result<()> {
+        // default is to do nothing
+        Ok(())
+    }
+
+    /// Implementation of this trait method can be used to clear any state that was added in
+    /// [`init_state_for_conditional_branch`]
+    fn clear_state_for_conditional_branch(
+        &mut self,
+        _exec_state: &mut ExecutionState,
+    ) -> Result<()> {
+        // default is to do nothing
+        Ok(())
+    }
 }
 
 type BoxedPipelineStage = Box<dyn PipelineStage>;
@@ -142,11 +196,11 @@ impl PipelineStage for DataFusionPipelineStage {
             }
             1 => {
                 let new_rb = batches.into_iter().next().expect("batches not empty");
-                otap_batch.set(self.payload_type, new_rb)
+                otap_batch.set(self.payload_type, new_rb)?;
             }
             _ => {
                 let new_rb = concat_batches(batches[0].schema_ref(), &batches)?;
-                otap_batch.set(self.payload_type, new_rb)
+                otap_batch.set(self.payload_type, new_rb)?;
             }
         };
 
@@ -171,7 +225,9 @@ pub struct PlannedPipeline {
 }
 
 impl PlannedPipeline {
-    fn new(stages: Vec<Box<dyn PipelineStage>>, session_context: SessionContext) -> Self {
+    /// Create a new instance of [`PlannedPipeline`]
+    #[must_use]
+    pub fn new(stages: Vec<Box<dyn PipelineStage>>, session_context: SessionContext) -> Self {
         let state = session_context.state();
         let task_context = Arc::new(TaskContext::from(&state));
         let config_options = session_context.copied_config().options().clone();
@@ -299,6 +355,8 @@ mod test {
     use otap_df_pdata::{OtapPayload, OtlpProtoBytes};
     use prost::Message;
 
+    use crate::parser::default_parser_options;
+
     use super::*;
 
     /// helper function for converting [`OtapArrowRecords`] to [`LogsData`]
@@ -323,7 +381,8 @@ mod test {
     }
 
     pub async fn exec_logs_pipeline<P: Parser>(query: &str, logs_data: LogsData) -> LogsData {
-        let parser_result = P::parse(query).unwrap();
+        let options = default_parser_options();
+        let parser_result = P::parse_with_options(query, options).unwrap();
         exec_logs_pipeline_expr(parser_result.pipeline, logs_data).await
     }
 
@@ -335,6 +394,28 @@ mod test {
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(otap_batch).await.unwrap();
         otap_to_logs_data(result)
+    }
+
+    pub async fn exec_metrics_pipeline<P: Parser>(
+        query: &str,
+        metrics_data: MetricsData,
+    ) -> MetricsData {
+        let parser_result = P::parse(query).unwrap();
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
+        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let result = pipeline.execute(otap_batch).await.unwrap();
+        otap_to_metrics_data(result)
+    }
+
+    pub async fn exec_traces_pipeline<P: Parser>(
+        query: &str,
+        traces_data: TracesData,
+    ) -> TracesData {
+        let parser_result = P::parse(query).unwrap();
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Traces(traces_data));
+        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let result = pipeline.execute(otap_batch).await.unwrap();
+        otap_to_traces_data(result)
     }
 
     #[tokio::test]

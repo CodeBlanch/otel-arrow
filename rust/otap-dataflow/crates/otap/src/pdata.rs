@@ -125,7 +125,7 @@ impl Context {
     /// Used to decide whether an ack/nack should be sent to the controller.
     ///
     /// TODO: The assumption here is that any stack with frames should be
-    /// sent to the pipeline controller, though there are a odd cases where
+    /// sent to the runtime control manager, though there are odd cases where
     /// it is not required (e.g., only SOURCE_TAGGING). This could also be
     /// tightened by differentiating whether an Ack or Nack is impending.
     #[must_use]
@@ -152,6 +152,14 @@ impl Context {
             }
         }
         false
+    }
+
+    /// Are there any subscribers interested in ACK or NACK notifications?
+    #[must_use]
+    pub fn has_ack_or_nack_subscribers(&self) -> bool {
+        self.stack
+            .iter()
+            .any(|f| (f.interests & Interests::ACKS_OR_NACKS) != Interests::empty())
     }
 
     /// Set the source node for this context.
@@ -384,6 +392,19 @@ impl OtapPdata {
         &self.payload
     }
 
+    /// Clone this pdata while resetting transport context to default.
+    ///
+    /// This is used at transport boundaries (for example topic hops between
+    /// pipelines) where in-process Ack/Nack routing state must not leak across
+    /// boundaries.
+    #[must_use]
+    pub fn clone_without_context(&self) -> Self {
+        Self {
+            context: Context::default(),
+            payload: self.payload.clone(),
+        }
+    }
+
     /// Splits the context and payload from this request, consuming it.
     #[must_use]
     pub fn into_parts(self) -> (Context, OtapPayload) {
@@ -487,6 +508,12 @@ impl OtapPdata {
     pub fn get_source_node(&self) -> Option<usize> {
         self.context.source_node()
     }
+
+    /// Returns `true` when this message has at least one upstream Ack/Nack interest.
+    #[must_use]
+    pub fn has_ack_or_nack_interests(&self) -> bool {
+        self.context.has_ack_or_nack_subscribers()
+    }
 }
 
 /* -------- Producer effect handler extensions (shared, local) -------- */
@@ -531,11 +558,15 @@ impl_producer_ext!(
 // when the context stack is empty (nothing to unwind).
 
 /// Implements `ConsumerEffectHandlerExtension<OtapPdata>` for an EffectHandler type.
+///
+/// TODO: notify_ack and notify_nack should in most cases not return an error,
+/// we expect the extension to automatically count lost Ack and Nack messages.
 macro_rules! impl_consumer_ext {
     ($handler:ty) => {
         #[async_trait(?Send)]
         impl ConsumerEffectHandlerExtension<OtapPdata> for $handler {
             async fn notify_ack(&self, mut ack: AckMsg<OtapPdata>) -> Result<(), Error> {
+                use otap_df_engine::_private::AckNackRouting;
                 if ack.accepted.has_timing(Interests::ACKS) {
                     ack.unwind.return_time_ns = nanos_since_birth();
                 }
@@ -543,6 +574,7 @@ macro_rules! impl_consumer_ext {
             }
 
             async fn notify_nack(&self, mut nack: NackMsg<OtapPdata>) -> Result<(), Error> {
+                use otap_df_engine::_private::AckNackRouting;
                 if nack.refused.has_timing(Interests::NACKS) {
                     nack.unwind.return_time_ns = nanos_since_birth();
                 }
@@ -652,13 +684,18 @@ mod test {
 
     use crate::testing::{TestCallData, create_test_pdata, next_ack, next_nack};
     use otap_df_channel::mpsc::Channel as LocalChannel;
-    use otap_df_engine::control::pipeline_ctrl_msg_channel;
+    use otap_df_engine::ConsumerEffectHandlerExtension;
+    use otap_df_engine::control::{
+        PipelineCompletionMsg, pipeline_completion_msg_channel, runtime_ctrl_msg_channel,
+    };
     use otap_df_engine::effect_handler::SourceTagging;
+    use otap_df_engine::local::exporter::EffectHandler as LocalExporterEffectHandler;
     use otap_df_engine::local::message::LocalSender;
     use otap_df_engine::local::processor::EffectHandler as LocalProcessorEffectHandler;
     use otap_df_engine::local::receiver::EffectHandler as LocalReceiverEffectHandler;
     use otap_df_engine::message::Sender;
     use otap_df_engine::node::NodeId;
+    use otap_df_engine::shared::exporter::EffectHandler as SharedExporterEffectHandler;
     use otap_df_engine::shared::message::SharedSender;
     use otap_df_engine::shared::processor::EffectHandler as SharedProcessorEffectHandler;
     use otap_df_engine::shared::receiver::EffectHandler as SharedReceiverEffectHandler;
@@ -677,7 +714,7 @@ mod test {
         let mut senders = HashMap::new();
         let _ = senders.insert("out".into(), SharedSender::mpsc(tx));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = SharedReceiverEffectHandler::new(
             NodeId {
@@ -768,7 +805,7 @@ mod test {
         let _ = senders.insert("a".into(), SharedSender::mpsc(a_tx));
         let _ = senders.insert("b".into(), SharedSender::mpsc(b_tx));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = SharedReceiverEffectHandler::new(
             NodeId {
@@ -858,7 +895,7 @@ mod test {
         let _ = senders.insert("a".into(), SharedSender::mpsc(a_tx));
         let _ = senders.insert("b".into(), SharedSender::mpsc(b_tx));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = SharedReceiverEffectHandler::new(
             NodeId {
@@ -1006,7 +1043,7 @@ mod test {
         let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
         let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = LocalReceiverEffectHandler::new(
             NodeId {
@@ -1036,7 +1073,7 @@ mod test {
         let mut senders = HashMap::new();
         let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = LocalReceiverEffectHandler::new(
             NodeId {
@@ -1068,7 +1105,7 @@ mod test {
         let _ = senders.insert("a".into(), Sender::Local(LocalSender::mpsc(a_tx)));
         let _ = senders.insert("b".into(), Sender::Local(LocalSender::mpsc(b_tx)));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = LocalReceiverEffectHandler::new(
             NodeId {
@@ -1099,7 +1136,7 @@ mod test {
         let mut senders = HashMap::new();
         let _ = senders.insert("out".into(), Sender::Local(LocalSender::mpsc(tx)));
 
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let mut handler = LocalReceiverEffectHandler::new(
             NodeId {
@@ -1467,6 +1504,33 @@ mod test {
         assert_eq!(ack_msg.accepted.num_items(), 1);
     }
 
+    #[test]
+    fn test_clone_without_context_resets_ack_nack_routing_state() {
+        let (test_data, pdata) = create_test();
+        let pdata = pdata
+            .test_subscribe_to(
+                Interests::ACKS | Interests::NACKS | Interests::RETURN_DATA,
+                test_data.into(),
+                101,
+            )
+            .add_source_node(202);
+        assert!(pdata.has_subscribers());
+        assert_eq!(pdata.get_source_node(), Some(202));
+
+        let cloned = pdata.clone_without_context();
+        assert!(!cloned.has_subscribers());
+        assert_eq!(cloned.get_source_node(), None);
+
+        let ack = AckMsg::new(cloned.clone());
+        assert!(next_ack(ack).is_none(), "reset context must not route acks");
+
+        let nack = NackMsg::new("test", cloned);
+        assert!(
+            next_nack(nack).is_none(),
+            "reset context must not route nacks"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // W13 — Interests gating tests for push_entry_frame / subscribe_to
     // -----------------------------------------------------------------------
@@ -1629,5 +1693,242 @@ mod test {
             node_id, 0,
             "CONSUMER_METRICS entry frame is skipped; ack routes to subscriber at node 0"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // notify_ack/nack stamps return_time_ns; raw route_ack/nack does not
+    // -----------------------------------------------------------------------
+
+    /// Helper: build an OtapPdata with ENTRY_TIMESTAMP | ACKS so has_timing(ACKS) is true.
+    fn pdata_with_timed_ack_frame() -> OtapPdata {
+        create_test_pdata().test_subscribe_to(
+            Interests::ENTRY_TIMESTAMP | Interests::ACKS,
+            CallData::default(),
+            42,
+        )
+    }
+
+    /// Helper: build an OtapPdata with ENTRY_TIMESTAMP | NACKS so has_timing(NACKS) is true.
+    fn pdata_with_timed_nack_frame() -> OtapPdata {
+        create_test_pdata().test_subscribe_to(
+            Interests::ENTRY_TIMESTAMP | Interests::NACKS,
+            CallData::default(),
+            42,
+        )
+    }
+
+    /// Helper: build a local processor EffectHandler wired to a completion channel.
+    fn create_local_processor_with_completion_channel() -> (
+        LocalProcessorEffectHandler<OtapPdata>,
+        otap_df_engine::shared::message::SharedReceiver<PipelineCompletionMsg<OtapPdata>>,
+    ) {
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let mut eh = LocalProcessorEffectHandler::new(
+            NodeId {
+                index: 1,
+                name: "test_proc".into(),
+            },
+            HashMap::new(),
+            None,
+            metrics_reporter,
+        );
+        let (completion_tx, completion_rx) = pipeline_completion_msg_channel(4);
+        eh.set_pipeline_completion_msg_sender(completion_tx);
+        (eh, completion_rx)
+    }
+
+    /// Helper: build a local exporter EffectHandler wired to a completion channel.
+    fn create_local_exporter_with_completion_channel() -> (
+        LocalExporterEffectHandler<OtapPdata>,
+        otap_df_engine::shared::message::SharedReceiver<PipelineCompletionMsg<OtapPdata>>,
+    ) {
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let mut eh = LocalExporterEffectHandler::new(
+            NodeId {
+                index: 2,
+                name: "test_local_exp".into(),
+            },
+            metrics_reporter,
+        );
+        let (completion_tx, completion_rx) = pipeline_completion_msg_channel(4);
+        eh.set_pipeline_completion_msg_sender(completion_tx);
+        (eh, completion_rx)
+    }
+
+    /// Helper: build a shared processor EffectHandler wired to a completion channel.
+    fn create_shared_processor_with_completion_channel() -> (
+        SharedProcessorEffectHandler<OtapPdata>,
+        otap_df_engine::shared::message::SharedReceiver<PipelineCompletionMsg<OtapPdata>>,
+    ) {
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let mut eh = SharedProcessorEffectHandler::new(
+            NodeId {
+                index: 3,
+                name: "test_shared_proc".into(),
+            },
+            HashMap::new(),
+            None,
+            metrics_reporter,
+        );
+        let (completion_tx, completion_rx) = pipeline_completion_msg_channel(4);
+        eh.set_pipeline_completion_msg_sender(completion_tx);
+        (eh, completion_rx)
+    }
+
+    /// Helper: build a shared exporter EffectHandler wired to a completion channel.
+    fn create_shared_exporter_with_completion_channel() -> (
+        SharedExporterEffectHandler<OtapPdata>,
+        otap_df_engine::shared::message::SharedReceiver<PipelineCompletionMsg<OtapPdata>>,
+    ) {
+        let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
+        let mut eh = SharedExporterEffectHandler::new(
+            NodeId {
+                index: 4,
+                name: "test_shared_exp".into(),
+            },
+            metrics_reporter,
+        );
+        let (completion_tx, completion_rx) = pipeline_completion_msg_channel(4);
+        eh.set_pipeline_completion_msg_sender(completion_tx);
+        (eh, completion_rx)
+    }
+
+    // -- Local processor --
+
+    #[tokio::test]
+    async fn local_processor_notify_ack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_local_processor_with_completion_channel();
+
+        let pdata = pdata_with_timed_ack_frame();
+        let ack = AckMsg::new(pdata);
+        assert_eq!(ack.unwind.return_time_ns, 0, "precondition: initially zero");
+
+        eh.notify_ack(ack).await.expect("notify_ack should succeed");
+
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverAck { ack } => {
+                assert_ne!(
+                    ack.unwind.return_time_ns, 0,
+                    "notify_ack must stamp return_time_ns when has_timing is true"
+                );
+            }
+            other => panic!("expected DeliverAck, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_processor_notify_nack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_local_processor_with_completion_channel();
+
+        let pdata = pdata_with_timed_nack_frame();
+        let nack = NackMsg::new("test", pdata);
+        assert_eq!(
+            nack.unwind.return_time_ns, 0,
+            "precondition: initially zero"
+        );
+
+        eh.notify_nack(nack)
+            .await
+            .expect("notify_nack should succeed");
+
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverNack { nack } => {
+                assert_ne!(
+                    nack.unwind.return_time_ns, 0,
+                    "notify_nack must stamp return_time_ns when has_timing is true"
+                );
+            }
+            other => panic!("expected DeliverNack, got {other:?}"),
+        }
+    }
+
+    // -- Local exporter --
+
+    #[tokio::test]
+    async fn local_exporter_notify_ack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_local_exporter_with_completion_channel();
+        let ack = AckMsg::new(pdata_with_timed_ack_frame());
+        eh.notify_ack(ack).await.expect("notify_ack should succeed");
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverAck { ack } => {
+                assert_ne!(ack.unwind.return_time_ns, 0);
+            }
+            other => panic!("expected DeliverAck, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_exporter_notify_nack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_local_exporter_with_completion_channel();
+        let nack = NackMsg::new("test", pdata_with_timed_nack_frame());
+        eh.notify_nack(nack)
+            .await
+            .expect("notify_nack should succeed");
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverNack { nack } => {
+                assert_ne!(nack.unwind.return_time_ns, 0);
+            }
+            other => panic!("expected DeliverNack, got {other:?}"),
+        }
+    }
+
+    // -- Shared processor --
+
+    #[tokio::test]
+    async fn shared_processor_notify_ack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_shared_processor_with_completion_channel();
+        let ack = AckMsg::new(pdata_with_timed_ack_frame());
+        eh.notify_ack(ack).await.expect("notify_ack should succeed");
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverAck { ack } => {
+                assert_ne!(ack.unwind.return_time_ns, 0);
+            }
+            other => panic!("expected DeliverAck, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_processor_notify_nack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_shared_processor_with_completion_channel();
+        let nack = NackMsg::new("test", pdata_with_timed_nack_frame());
+        eh.notify_nack(nack)
+            .await
+            .expect("notify_nack should succeed");
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverNack { nack } => {
+                assert_ne!(nack.unwind.return_time_ns, 0);
+            }
+            other => panic!("expected DeliverNack, got {other:?}"),
+        }
+    }
+
+    // -- Shared exporter --
+
+    #[tokio::test]
+    async fn shared_exporter_notify_ack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_shared_exporter_with_completion_channel();
+        let ack = AckMsg::new(pdata_with_timed_ack_frame());
+        eh.notify_ack(ack).await.expect("notify_ack should succeed");
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverAck { ack } => {
+                assert_ne!(ack.unwind.return_time_ns, 0);
+            }
+            other => panic!("expected DeliverAck, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_exporter_notify_nack_stamps_return_time() {
+        let (eh, mut completion_rx) = create_shared_exporter_with_completion_channel();
+        let nack = NackMsg::new("test", pdata_with_timed_nack_frame());
+        eh.notify_nack(nack)
+            .await
+            .expect("notify_nack should succeed");
+        match completion_rx.recv().await.expect("completion message") {
+            PipelineCompletionMsg::DeliverNack { nack } => {
+                assert_ne!(nack.unwind.return_time_ns, 0);
+            }
+            other => panic!("expected DeliverNack, got {other:?}"),
+        }
     }
 }

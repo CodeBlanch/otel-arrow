@@ -46,7 +46,7 @@ groups:
             type: processor:batch
             config: {}
           otlp/export:
-            type: exporter:otlp
+            type: exporter:otlp_grpc
             config:
               grpc_endpoint: "http://127.0.0.1:4318"
         connections:
@@ -68,7 +68,8 @@ A **pipeline group** is a logical container for related pipelines.
 
 - It scopes a set of pipelines under one group id.
 - It can define group-level `policies` applied to pipelines in that group.
-- It is the intermediate level between root defaults and pipeline-specific overrides.
+- It is the intermediate level between root defaults and
+  pipeline-specific overrides.
 
 A **pipeline** is an executable dataflow graph.
 
@@ -148,10 +149,22 @@ Important behavior:
 
 `engine` is the home for engine-wide settings:
 
+- `topics`
 - `http_admin`
 - `telemetry`
 - `observed_state`
 - `observability`
+
+### Engine Topic Settings
+
+Engine-wide topic runtime defaults are declared at `engine.topics`.
+
+- `engine.topics.impl_selection`:
+  - `auto` (default): infer the most efficient runtime variant from topology
+  - `force_mixed`: disable topology-based optimization and always use the
+    mixed implementation
+
+Per-topic `topics.*.impl_selection` overrides this engine-wide default when set.
 
 ### Observability Pipeline
 
@@ -185,7 +198,8 @@ Optional observability policies are supported at:
 
 ## Policy Hierarchy
 
-Policies include channel capacity, health, runtime telemetry, and resources controls:
+Policies include channel capacity, health, runtime telemetry, and
+resources controls:
 
 ```yaml
 policies:
@@ -193,13 +207,14 @@ policies:
       control:
         node: 256
         pipeline: 256
+        completion: 512
       pdata: 128
   health:
     # optional overrides; defaults are applied when omitted
   telemetry:
     pipeline_metrics: true
     tokio_metrics: true
-    channel_metrics: true
+    runtime_metrics: basic
   resources:
     core_allocation:
       type: all_cores
@@ -217,11 +232,31 @@ Defaults at top-level:
 
 - `channel_capacity.control.node = 256`
 - `channel_capacity.control.pipeline = 256`
+- `channel_capacity.control.completion = 512`
 - `channel_capacity.pdata = 128`
 - `telemetry.pipeline_metrics = true`
 - `telemetry.tokio_metrics = true`
-- `telemetry.channel_metrics = true`
+- `telemetry.runtime_metrics = basic`
 - `resources.core_allocation = all_cores`
+
+Control channel keys:
+
+- `node`: per-node control inboxes
+- `pipeline`: shared pipeline-runtime orchestration channel
+- `completion`: shared Ack/Nack completion channel
+
+Telemetry policy notes:
+
+- `telemetry.runtime_metrics` accepts `none`, `basic`, `normal`, or `detailed`
+- this level now gates:
+  - channel endpoint transport metrics
+  - per-node produced/consumed outcome metrics
+  - shared pipeline control-plane metrics such as `pipeline.runtime_control`
+    and `pipeline.completion`
+- `basic` exports gauges and transport counters
+- `normal` adds message and phase counters
+- `detailed` adds latency/duration summaries and completion unwind-depth
+  distribution
 
 Resolution semantics:
 
@@ -252,26 +287,100 @@ Topics are declared in two places:
 - global scope: `topics.<name>`
 - group scope: `groups.<group>.topics.<name>`
 
-Current topic policy support:
+General topic capabilities:
+
+- Inter-pipeline decoupling between ingest, transform, and egress stages.
+- Balanced worker-pool processing with one logical stream per subscription
+  group.
+- Broadcast fan-out / tap pipelines where multiple downstream consumers
+  observe the same stream.
+- Mixed topologies where one topic serves both balanced and broadcast consumers.
+
+Topic wiring must remain acyclic across topic hops. During startup, the
+controller rejects feedback loops that involve declared topics, including:
+
+- same-pipeline loops such as `receiver:topic -> ... -> exporter:topic`
+- cross-pipeline loops where one pipeline eventually routes back into an
+  earlier topic
+
+Current topic declaration shape:
 
 ```yaml
 topics:
   raw_signals:
     description: "raw ingest stream"
+    backend: in_memory
+    impl_selection: auto
     policies:
-      queue_capacity: 1000
-      queue_on_full: drop_newest
+      balanced:
+        queue_capacity: 1000
+        on_full: drop_newest
+      broadcast:
+        queue_capacity: 1000
+        on_lag: drop_oldest
+      ack_propagation:
+        mode: auto
+        max_in_flight: 1024
+        timeout: 30s
 ```
 
-Supported `queue_on_full` values:
+Supported `backend` values:
+
+- `in_memory` (default, currently implemented)
+- `quiver` (accepted by config, not implemented by the runtime yet)
+
+Unsupported backend or policy combinations are rejected during startup topic
+declaration with explicit errors.
+
+Supported `impl_selection` values:
+
+- `auto`
+- `force_mixed`
+
+Supported `balanced.on_full` values:
 
 - `block`
 - `drop_newest`
 
+Supported `broadcast.on_lag` values:
+
+- `drop_oldest`
+- `disconnect`
+
+Supported `ack_propagation` fields:
+
+- `mode`:
+  - `disabled`
+  - `auto`
+- `max_in_flight` (default: `1024`, must be > 0)
+- `timeout` (default: `30s`)
+
+`balanced.on_full` applies to balanced delivery paths. `broadcast.on_lag`
+applies to broadcast delivery paths. `ack_propagation.mode` applies to the
+topic hop as a whole and controls whether Ack/Nack can be bridged across
+pipelines. `ack_propagation.max_in_flight` and `ack_propagation.timeout`
+govern tracked publish outcomes per publisher handle when Ack/Nack propagation
+is enabled.
+
+Current limitation: in broadcast mode, `ack_propagation.mode: auto` does not
+aggregate acknowledgements across all subscribers. The first broadcast
+subscriber Ack/Nack resolves the upstream message, so upstream completion does
+not mean all broadcast subscribers processed the message. This matters
+especially with `broadcast.on_lag: drop_oldest`, where one subscriber may miss
+a message that another subscriber still Acks upstream. Future enhancements are
+tracked in [GH-2252](https://github.com/open-telemetry/otel-arrow/issues/2252).
+
 Topic defaults:
 
-- `policies.queue_capacity = 128`
-- `policies.queue_on_full = block`
+- `backend = in_memory`
+- `impl_selection = engine.topics.impl_selection` (whose default is `auto`)
+- `policies.balanced.queue_capacity = 128`
+- `policies.balanced.on_full = block`
+- `policies.broadcast.queue_capacity = 128`
+- `policies.broadcast.on_lag = drop_oldest`
+- `policies.ack_propagation.mode = disabled`
+- `policies.ack_propagation.max_in_flight = 1024`
+- `policies.ack_propagation.timeout = 30s`
 
 `exporter:topic` may locally override full-queue behavior:
 
@@ -287,9 +396,13 @@ nodes:
 Exporter-local `queue_on_full` behavior:
 
 - optional (`block` or `drop_newest`)
-- precedence: exporter `config.queue_on_full` -> topic `policies.queue_on_full`
-  -> default `block`
-- `queue_capacity` remains topic-declaration-only (no exporter-local override)
+- precedence: exporter `config.queue_on_full` ->
+  topic `policies.balanced.on_full` -> default `block`
+- queue capacities remain topic-declaration-only (no exporter-local override)
+- broadcast lag handling remains topic-declaration-only via
+  `policies.broadcast.on_lag`
+- Ack/Nack tracking limits remain topic-declaration-only via
+  `policies.ack_propagation`
 
 ## Output Ports
 
@@ -327,7 +440,7 @@ groups:
             config: {}
 
           logs_exporter:
-            type: exporter:otlp
+            type: exporter:otlp_grpc
             config:
               grpc_endpoint: "http://127.0.0.1:4318"
 
@@ -377,8 +490,11 @@ Config loading validates:
 - Missing source/destination nodes in connections.
 - Graph cycles.
 - Source output selector validity when node `outputs` is declared.
-- Non-zero channel capacities (`control.node`, `control.pipeline`, `pdata`).
-- Non-zero topic queue capacity (`topics.*.policies.queue_capacity`).
+- Non-zero channel capacities (`control.node`, `control.pipeline`,
+  `control.completion`, `pdata`).
+- Non-zero topic queue capacities
+  (`topics.*.policies.balanced.queue_capacity`,
+  `topics.*.policies.broadcast.queue_capacity`).
 - Root schema version compatibility (`version: otel_dataflow/v1`).
 - Observability constraints (`engine.observability.pipeline.policies.resources`
   is rejected).

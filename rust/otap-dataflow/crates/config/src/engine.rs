@@ -14,8 +14,8 @@ use crate::observed_state::ObservedStateSettings;
 use crate::pipeline::telemetry::TelemetryConfig;
 use crate::pipeline::{PipelineConfig, PipelineConnection, PipelineNodes};
 use crate::pipeline_group::PipelineGroupConfig;
-use crate::policy::{ChannelCapacityPolicy, Policies, ResourcesPolicy, TelemetryPolicy};
-use crate::topic::TopicSpec;
+use crate::policy::{ChannelCapacityPolicy, Policies, TelemetryPolicy};
+use crate::topic::{TopicImplSelectionPolicy, TopicSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -70,9 +70,22 @@ pub struct EngineConfig {
     #[serde(default)]
     pub observed_state: ObservedStateSettings,
 
+    /// Engine-wide topic runtime settings.
+    #[serde(default)]
+    pub topics: EngineTopicsConfig,
+
     /// Engine observability declarations.
     #[serde(default)]
     pub observability: EngineObservabilityConfig,
+}
+
+/// Engine-wide topic runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EngineTopicsConfig {
+    /// Default topic implementation selection policy.
+    #[serde(default)]
+    pub impl_selection: TopicImplSelectionPolicy,
 }
 
 /// Engine observability declarations.
@@ -123,24 +136,24 @@ impl EngineObservabilityPipelineConfig {
 #[serde(deny_unknown_fields)]
 pub struct EngineObservabilityPolicies {
     /// Channel capacity policy.
-    #[serde(default)]
-    pub channel_capacity: ChannelCapacityPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) channel_capacity: Option<ChannelCapacityPolicy>,
     /// Health policy used by observed-state liveness/readiness evaluation.
-    #[serde(default)]
-    pub health: HealthPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) health: Option<HealthPolicy>,
     /// Runtime telemetry policy controlling pipeline-local metric collection.
-    #[serde(default)]
-    pub telemetry: TelemetryPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) telemetry: Option<TelemetryPolicy>,
 }
 
 impl EngineObservabilityPolicies {
     #[must_use]
-    fn into_policies(self) -> Policies {
+    pub(crate) fn into_policies(self) -> Policies {
         Policies {
             channel_capacity: self.channel_capacity,
             health: self.health,
             telemetry: self.telemetry,
-            resources: Some(ResourcesPolicy::default()),
+            resources: None,
         }
     }
 
@@ -176,7 +189,10 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn valid_engine_yaml(version: &str) -> String {
         format!(
@@ -206,10 +222,12 @@ groups:
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
+        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "otap-df-config-engine-tests-{}-{}.{}",
+            "otap-df-config-engine-tests-{}-{}-{}.{}",
             std::process::id(),
             suffix,
+            sequence,
             ext
         ));
         fs::write(&path, contents).expect("failed to write temporary test file");
@@ -331,18 +349,20 @@ groups:
     fn from_yaml_uses_default_top_level_channel_capacity_policy() {
         let yaml = valid_engine_yaml(ENGINE_CONFIG_VERSION_V1);
         let config = OtelDataflowSpec::from_yaml(&yaml).expect("should parse");
-        assert_eq!(config.policies.channel_capacity.control.node, 256);
-        assert_eq!(config.policies.channel_capacity.control.pipeline, 256);
-        assert_eq!(config.policies.channel_capacity.pdata, 128);
-        assert_eq!(config.policies.health, HealthPolicy::default());
-        assert!(config.policies.telemetry.pipeline_metrics);
-        assert!(config.policies.telemetry.tokio_metrics);
+        let defaults = Policies::resolve([&config.policies]);
+        assert_eq!(defaults.channel_capacity.control.node, 256);
+        assert_eq!(defaults.channel_capacity.control.pipeline, 256);
+        assert_eq!(defaults.channel_capacity.control.completion, 512);
+        assert_eq!(defaults.channel_capacity.pdata, 128);
+        assert_eq!(defaults.health, HealthPolicy::default());
+        assert!(defaults.telemetry.pipeline_metrics);
+        assert!(defaults.telemetry.tokio_metrics);
         assert_eq!(
-            config.policies.telemetry.channel_metrics,
+            defaults.telemetry.runtime_metrics,
             crate::policy::MetricLevel::Basic
         );
         assert_eq!(
-            config.policies.effective_resources().core_allocation,
+            defaults.resources.core_allocation,
             crate::policy::CoreAllocation::AllCores
         );
     }
@@ -356,11 +376,12 @@ policies:
       control:
         node: 200
         pipeline: 201
+        completion: 203
       pdata: 202
   health:
     ready_if: [Running]
   telemetry:
-    channel_metrics: none
+    runtime_metrics: none
   resources:
     core_allocation:
       type: core_count
@@ -373,11 +394,12 @@ groups:
           control:
             node: 150
             pipeline: 151
+            completion: 153
           pdata: 152
       health:
         ready_if: [Running, Updating]
       telemetry:
-        channel_metrics: basic
+        runtime_metrics: basic
       resources:
         core_allocation:
           type: core_count
@@ -389,11 +411,12 @@ groups:
               control:
                 node: 50
                 pipeline: 51
+                completion: 53
               pdata: 52
           health:
             ready_if: [Failed]
           telemetry:
-            channel_metrics: none
+            runtime_metrics: none
           resources:
             core_allocation:
               type: core_count
@@ -465,9 +488,10 @@ groups:
             .expect("g1/p1 should be resolved");
         assert_eq!(p1_resolved.policies.channel_capacity.control.node, 50);
         assert_eq!(p1_resolved.policies.channel_capacity.control.pipeline, 51);
+        assert_eq!(p1_resolved.policies.channel_capacity.control.completion, 53);
         assert_eq!(p1_resolved.policies.channel_capacity.pdata, 52);
         assert_eq!(
-            p1_resolved.policies.effective_resources().core_allocation,
+            p1_resolved.policies.resources.core_allocation,
             crate::policy::CoreAllocation::CoreCount { count: 2 }
         );
         assert_eq!(
@@ -475,7 +499,7 @@ groups:
             vec![crate::health::PhaseKind::Failed]
         );
         assert_eq!(
-            p1_resolved.policies.telemetry.channel_metrics,
+            p1_resolved.policies.telemetry.runtime_metrics,
             crate::policy::MetricLevel::None
         );
 
@@ -486,6 +510,10 @@ groups:
             .expect("g1/p2 should be resolved");
         assert_eq!(p2_resolved.policies.channel_capacity.control.node, 150);
         assert_eq!(p2_resolved.policies.channel_capacity.control.pipeline, 151);
+        assert_eq!(
+            p2_resolved.policies.channel_capacity.control.completion,
+            153
+        );
         assert_eq!(p2_resolved.policies.channel_capacity.pdata, 152);
         assert_eq!(
             p2_resolved.policies.health.ready_if,
@@ -495,11 +523,11 @@ groups:
             ]
         );
         assert_eq!(
-            p2_resolved.policies.telemetry.channel_metrics,
+            p2_resolved.policies.telemetry.runtime_metrics,
             crate::policy::MetricLevel::Basic
         );
         assert_eq!(
-            p2_resolved.policies.effective_resources().core_allocation,
+            p2_resolved.policies.resources.core_allocation,
             crate::policy::CoreAllocation::CoreCount { count: 5 }
         );
 
@@ -510,19 +538,306 @@ groups:
             .expect("g2/p3 should be resolved");
         assert_eq!(p3_resolved.policies.channel_capacity.control.node, 200);
         assert_eq!(p3_resolved.policies.channel_capacity.control.pipeline, 201);
+        assert_eq!(
+            p3_resolved.policies.channel_capacity.control.completion,
+            203
+        );
         assert_eq!(p3_resolved.policies.channel_capacity.pdata, 202);
         assert_eq!(
             p3_resolved.policies.health.ready_if,
             vec![crate::health::PhaseKind::Running]
         );
         assert_eq!(
-            p3_resolved.policies.telemetry.channel_metrics,
+            p3_resolved.policies.telemetry.runtime_metrics,
             crate::policy::MetricLevel::None
         );
         assert_eq!(
-            p3_resolved.policies.effective_resources().core_allocation,
+            p3_resolved.policies.resources.core_allocation,
             crate::policy::CoreAllocation::CoreCount { count: 9 }
         );
+    }
+
+    #[test]
+    fn resolve_policies_inherit_from_parent_scope() {
+        let yaml = r#"
+version: otel_dataflow/v1
+policies:
+  telemetry:
+    runtime_metrics: detailed
+  channel_capacity:
+      control:
+        node: 500
+        pipeline: 501
+        completion: 503
+      pdata: 502
+  health:
+    ready_if: [Running, Updating]
+engine: {}
+groups:
+  default:
+    pipelines:
+      partial:
+        policies:
+          channel_capacity:
+              control:
+                node: 100
+                pipeline: 100
+                completion: 101
+              pdata: 128
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+      explicit:
+        policies:
+          telemetry:
+            runtime_metrics: none
+          channel_capacity:
+              control:
+                node: 10
+                pipeline: 11
+                completion: 13
+              pdata: 12
+          health:
+            ready_if: [Failed]
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+      no_policies:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+        let resolved = config.resolve();
+
+        let find = |name: &str| {
+            resolved
+                .pipelines
+                .iter()
+                .find(|p| p.pipeline_id.as_ref() == name)
+                .unwrap_or_else(|| panic!("{name} pipeline should be resolved"))
+        };
+
+        // Pipeline with only channel_capacity inherits telemetry and health.
+        let partial = find("partial");
+        assert_eq!(partial.policies.channel_capacity.control.node, 100);
+        assert_eq!(
+            partial.policies.telemetry.runtime_metrics,
+            crate::policy::MetricLevel::Detailed,
+            "should inherit telemetry from top level"
+        );
+        assert_eq!(
+            partial.policies.health.ready_if,
+            vec![
+                crate::health::PhaseKind::Running,
+                crate::health::PhaseKind::Updating,
+            ],
+            "should inherit health from top level"
+        );
+
+        // Pipeline with explicit overrides.
+        let explicit = find("explicit");
+        assert_eq!(
+            explicit.policies.telemetry.runtime_metrics,
+            crate::policy::MetricLevel::None
+        );
+        assert_eq!(explicit.policies.channel_capacity.control.node, 10);
+        assert_eq!(
+            explicit.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Failed]
+        );
+
+        // Pipeline with no policies inherits everything.
+        let no_policies = find("no_policies");
+        assert_eq!(
+            no_policies.policies.telemetry.runtime_metrics,
+            crate::policy::MetricLevel::Detailed
+        );
+        assert_eq!(no_policies.policies.channel_capacity.control.node, 500);
+        assert_eq!(
+            no_policies.policies.channel_capacity.control.completion,
+            503
+        );
+        assert_eq!(no_policies.policies.channel_capacity.pdata, 502);
+        assert_eq!(
+            no_policies.policies.health.ready_if,
+            vec![
+                crate::health::PhaseKind::Running,
+                crate::health::PhaseKind::Updating,
+            ],
+        );
+    }
+
+    #[test]
+    fn resolve_policies_mixed_engine_and_group_inheritance() {
+        // The reviewer asked for a test where some policies come from the
+        // group level and others from the engine (top) level, exercising
+        // the full three-level precedence chain.
+        let yaml = r#"
+version: otel_dataflow/v1
+policies:
+  telemetry:
+    runtime_metrics: detailed
+  channel_capacity:
+      control:
+        node: 500
+        pipeline: 501
+        completion: 503
+      pdata: 502
+  health:
+    ready_if: [Running, Updating]
+engine: {}
+groups:
+  default:
+    policies:
+      # Group sets telemetry and health but NOT channel_capacity.
+      telemetry:
+        runtime_metrics: normal
+        pipeline_metrics: false
+      health:
+        ready_if: [Failed]
+    pipelines:
+      # Pipeline sets only channel_capacity → gets telemetry from group,
+      # health from group, channel_capacity from itself.
+      pipeline_with_capacity:
+        policies:
+          channel_capacity:
+              control:
+                node: 10
+                pipeline: 11
+                completion: 13
+              pdata: 12
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+      # Pipeline sets only health → gets channel_capacity from group
+      # (absent) → falls through to engine; telemetry from group.
+      pipeline_with_health:
+        policies:
+          health:
+            ready_if: [Starting]
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+      # No pipeline-level policies → inherits everything from group,
+      # with channel_capacity falling through to engine level.
+      pipeline_no_policies:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+        let resolved = config.resolve();
+
+        let find = |name: &str| {
+            resolved
+                .pipelines
+                .iter()
+                .find(|p| p.pipeline_id.as_ref() == name)
+                .unwrap_or_else(|| panic!("{name} pipeline should be resolved"))
+        };
+
+        // pipeline_with_capacity: channel_capacity from pipeline, rest from group.
+        let p = find("pipeline_with_capacity");
+        assert_eq!(p.policies.channel_capacity.control.node, 10);
+        assert_eq!(p.policies.channel_capacity.control.pipeline, 11);
+        assert_eq!(p.policies.channel_capacity.pdata, 12);
+        assert_eq!(
+            p.policies.telemetry.runtime_metrics,
+            crate::policy::MetricLevel::Normal,
+            "telemetry should come from group"
+        );
+        assert!(
+            !p.policies.telemetry.pipeline_metrics,
+            "pipeline_metrics should come from group"
+        );
+        assert_eq!(
+            p.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Failed],
+            "health should come from group"
+        );
+
+        // pipeline_with_health: health from pipeline, telemetry from group,
+        // channel_capacity absent at both pipeline and group → falls through to engine.
+        let p = find("pipeline_with_health");
+        assert_eq!(
+            p.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Starting],
+            "health should come from pipeline"
+        );
+        assert_eq!(
+            p.policies.telemetry.runtime_metrics,
+            crate::policy::MetricLevel::Normal,
+            "telemetry should come from group"
+        );
+        assert_eq!(
+            p.policies.channel_capacity.control.node, 500,
+            "channel_capacity should fall through group (absent) to engine"
+        );
+        assert_eq!(p.policies.channel_capacity.control.pipeline, 501);
+        assert_eq!(p.policies.channel_capacity.pdata, 502);
+
+        // pipeline_no_policies: telemetry and health from group, channel_capacity from engine.
+        let p = find("pipeline_no_policies");
+        assert_eq!(
+            p.policies.telemetry.runtime_metrics,
+            crate::policy::MetricLevel::Normal,
+            "telemetry should come from group"
+        );
+        assert_eq!(
+            p.policies.health.ready_if,
+            vec![crate::health::PhaseKind::Failed],
+            "health should come from group"
+        );
+        assert_eq!(
+            p.policies.channel_capacity.control.node, 500,
+            "channel_capacity should come from engine"
+        );
+        assert_eq!(p.policies.channel_capacity.pdata, 502);
     }
 
     #[test]
@@ -533,16 +848,26 @@ topics:
   global_default:
     description: "global topic"
   global_queue:
+    backend: quiver
     policies:
-      queue_capacity: 42
-      queue_on_full: drop_newest
+      balanced:
+        queue_capacity: 42
+        on_full: drop_newest
+      broadcast:
+        queue_capacity: 43
+        on_lag: disconnect
 groups:
   g1:
     topics:
       local_queue:
+        backend: quiver
         policies:
-          queue_capacity: 7
-          queue_on_full: drop_newest
+          balanced:
+            queue_capacity: 7
+            on_full: drop_newest
+          broadcast:
+            queue_capacity: 8
+            on_lag: disconnect
     pipelines:
       main:
         nodes:
@@ -563,20 +888,35 @@ groups:
             .topics
             .get("global_default")
             .expect("global_default topic should exist");
-        assert_eq!(global_default.policies.queue_capacity, 128);
         assert_eq!(
-            global_default.policies.queue_on_full,
+            global_default.backend,
+            crate::topic::TopicBackendKind::InMemory
+        );
+        assert_eq!(global_default.policies.balanced.queue_capacity, 128);
+        assert_eq!(global_default.policies.broadcast.queue_capacity, 128);
+        assert_eq!(
+            global_default.policies.balanced.on_full,
             crate::topic::TopicQueueOnFullPolicy::Block
+        );
+        assert_eq!(
+            global_default.policies.broadcast.on_lag,
+            crate::topic::TopicBroadcastOnLagPolicy::DropOldest
         );
 
         let global_queue = config
             .topics
             .get("global_queue")
             .expect("global_queue topic should exist");
-        assert_eq!(global_queue.policies.queue_capacity, 42);
+        assert_eq!(global_queue.backend, crate::topic::TopicBackendKind::Quiver);
+        assert_eq!(global_queue.policies.balanced.queue_capacity, 42);
+        assert_eq!(global_queue.policies.broadcast.queue_capacity, 43);
         assert_eq!(
-            global_queue.policies.queue_on_full,
+            global_queue.policies.balanced.on_full,
             crate::topic::TopicQueueOnFullPolicy::DropNewest
+        );
+        assert_eq!(
+            global_queue.policies.broadcast.on_lag,
+            crate::topic::TopicBroadcastOnLagPolicy::Disconnect
         );
 
         let group = config.groups.get("g1").expect("group g1 should exist");
@@ -584,10 +924,98 @@ groups:
             .topics
             .get("local_queue")
             .expect("local_queue topic should exist");
-        assert_eq!(local_queue.policies.queue_capacity, 7);
+        assert_eq!(local_queue.backend, crate::topic::TopicBackendKind::Quiver);
+        assert_eq!(local_queue.policies.balanced.queue_capacity, 7);
+        assert_eq!(local_queue.policies.broadcast.queue_capacity, 8);
         assert_eq!(
-            local_queue.policies.queue_on_full,
+            local_queue.policies.balanced.on_full,
             crate::topic::TopicQueueOnFullPolicy::DropNewest
+        );
+        assert_eq!(
+            local_queue.policies.broadcast.on_lag,
+            crate::topic::TopicBroadcastOnLagPolicy::Disconnect
+        );
+    }
+
+    #[test]
+    fn from_yaml_defaults_engine_topic_impl_selection_to_auto() {
+        let yaml = r#"
+version: otel_dataflow/v1
+groups:
+  g1:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+        assert_eq!(
+            config.engine.topics.impl_selection,
+            TopicImplSelectionPolicy::Auto
+        );
+    }
+
+    #[test]
+    fn from_yaml_parses_engine_and_topic_impl_selection_policy() {
+        let yaml = r#"
+version: otel_dataflow/v1
+engine:
+  topics:
+    impl_selection: force_mixed
+topics:
+  global_topic:
+    impl_selection: auto
+groups:
+  g1:
+    topics:
+      local_topic:
+        impl_selection: force_mixed
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: "urn:test:receiver:example"
+            config: null
+          exporter:
+            type: "urn:test:exporter:example"
+            config: null
+        connections:
+          - from: receiver
+            to: exporter
+"#;
+
+        let config = OtelDataflowSpec::from_yaml(yaml).expect("should parse");
+        assert_eq!(
+            config.engine.topics.impl_selection,
+            TopicImplSelectionPolicy::ForceMixed
+        );
+        assert_eq!(
+            config
+                .topics
+                .get("global_topic")
+                .expect("global topic should exist")
+                .impl_selection,
+            Some(TopicImplSelectionPolicy::Auto)
+        );
+        assert_eq!(
+            config
+                .groups
+                .get("g1")
+                .expect("group should exist")
+                .topics
+                .get("local_topic")
+                .expect("local topic should exist")
+                .impl_selection,
+            Some(TopicImplSelectionPolicy::ForceMixed)
         );
     }
 
@@ -598,23 +1026,38 @@ version: otel_dataflow/v1
 topics:
   shared:
     policies:
-      queue_capacity: 100
-      queue_on_full: block
+      balanced:
+        queue_capacity: 100
+        on_full: block
+      broadcast:
+        queue_capacity: 101
+        on_lag: disconnect
   global_only:
     policies:
-      queue_capacity: 101
-      queue_on_full: drop_newest
+      balanced:
+        queue_capacity: 102
+        on_full: drop_newest
+      broadcast:
+        queue_capacity: 103
 groups:
   g1:
     topics:
       shared:
         policies:
-          queue_capacity: 10
-          queue_on_full: drop_newest
+          balanced:
+            queue_capacity: 10
+            on_full: drop_newest
+          broadcast:
+            queue_capacity: 11
+            on_lag: drop_oldest
       group_only:
         policies:
-          queue_capacity: 11
-          queue_on_full: drop_newest
+          balanced:
+            queue_capacity: 12
+            on_full: drop_newest
+          broadcast:
+            queue_capacity: 13
+            on_lag: disconnect
     pipelines:
       p1:
         nodes:
@@ -647,25 +1090,40 @@ groups:
         let g1_shared = config
             .resolve_topic_spec(&"g1".into(), &"shared".into())
             .expect("g1 shared topic should resolve");
-        assert_eq!(g1_shared.policies.queue_capacity, 10);
+        assert_eq!(g1_shared.policies.balanced.queue_capacity, 10);
+        assert_eq!(g1_shared.policies.broadcast.queue_capacity, 11);
         assert_eq!(
-            g1_shared.policies.queue_on_full,
+            g1_shared.policies.balanced.on_full,
             crate::topic::TopicQueueOnFullPolicy::DropNewest
+        );
+        assert_eq!(
+            g1_shared.policies.broadcast.on_lag,
+            crate::topic::TopicBroadcastOnLagPolicy::DropOldest
         );
 
         let g2_shared = config
             .resolve_topic_spec(&"g2".into(), &"shared".into())
             .expect("g2 shared topic should resolve from global");
-        assert_eq!(g2_shared.policies.queue_capacity, 100);
+        assert_eq!(g2_shared.policies.balanced.queue_capacity, 100);
+        assert_eq!(g2_shared.policies.broadcast.queue_capacity, 101);
         assert_eq!(
-            g2_shared.policies.queue_on_full,
+            g2_shared.policies.balanced.on_full,
             crate::topic::TopicQueueOnFullPolicy::Block
+        );
+        assert_eq!(
+            g2_shared.policies.broadcast.on_lag,
+            crate::topic::TopicBroadcastOnLagPolicy::Disconnect
         );
 
         let g1_group_only = config
             .resolve_topic_spec(&"g1".into(), &"group_only".into())
             .expect("g1 group_only topic should resolve");
-        assert_eq!(g1_group_only.policies.queue_capacity, 11);
+        assert_eq!(g1_group_only.policies.balanced.queue_capacity, 12);
+        assert_eq!(g1_group_only.policies.broadcast.queue_capacity, 13);
+        assert_eq!(
+            g1_group_only.policies.broadcast.on_lag,
+            crate::topic::TopicBroadcastOnLagPolicy::Disconnect
+        );
 
         let g2_group_only = config.resolve_topic_spec(&"g2".into(), &"group_only".into());
         assert!(g2_group_only.is_none(), "g2 should not see g1-local topics");
@@ -680,11 +1138,12 @@ policies:
       control:
         node: 200
         pipeline: 201
+        completion: 203
       pdata: 202
   health:
     ready_if: [Running]
   telemetry:
-    channel_metrics: none
+    runtime_metrics: none
 engine:
   observability:
     pipeline:
@@ -693,11 +1152,12 @@ engine:
             control:
               node: 10
               pipeline: 11
+              completion: 13
             pdata: 12
         health:
           ready_if: [Failed]
         telemetry:
-          channel_metrics: normal
+          runtime_metrics: normal
       nodes:
         itr:
           type: "urn:otel:receiver:internal_telemetry"
@@ -735,17 +1195,18 @@ groups:
         assert_eq!(obs.pipeline_id.as_ref(), "observability");
         assert_eq!(obs.policies.channel_capacity.control.node, 10);
         assert_eq!(obs.policies.channel_capacity.control.pipeline, 11);
+        assert_eq!(obs.policies.channel_capacity.control.completion, 13);
         assert_eq!(obs.policies.channel_capacity.pdata, 12);
         assert_eq!(
             obs.policies.health.ready_if,
             vec![crate::health::PhaseKind::Failed]
         );
         assert_eq!(
-            obs.policies.telemetry.channel_metrics,
+            obs.policies.telemetry.runtime_metrics,
             crate::policy::MetricLevel::Normal
         );
         assert_eq!(
-            obs.policies.effective_resources().core_allocation,
+            obs.policies.resources.core_allocation,
             crate::policy::CoreAllocation::AllCores
         );
         assert_eq!(
@@ -821,6 +1282,7 @@ policies:
       control:
         node: 0
         pipeline: 0
+        completion: 0
       pdata: 0
 engine: {}
 groups:
@@ -843,23 +1305,30 @@ groups:
         let rendered = err.to_string();
         assert!(rendered.contains("channel_capacity.control.node"));
         assert!(rendered.contains("channel_capacity.control.pipeline"));
+        assert!(rendered.contains("channel_capacity.control.completion"));
         assert!(rendered.contains("channel_capacity.pdata"));
     }
 
     #[test]
-    fn from_yaml_rejects_zero_topic_queue_capacity() {
+    fn from_yaml_rejects_zero_topic_queue_capacities() {
         let yaml = r#"
 version: otel_dataflow/v1
 topics:
   global_topic:
     policies:
-      queue_capacity: 0
+      balanced:
+        queue_capacity: 0
+      broadcast:
+        queue_capacity: 0
 groups:
   g1:
     topics:
       group_topic:
         policies:
-          queue_capacity: 0
+          balanced:
+            queue_capacity: 0
+          broadcast:
+            queue_capacity: 0
     pipelines:
       main:
         nodes:
@@ -875,10 +1344,14 @@ groups:
 "#;
 
         let err =
-            OtelDataflowSpec::from_yaml(yaml).expect_err("zero topic queue capacity should fail");
+            OtelDataflowSpec::from_yaml(yaml).expect_err("zero topic queue capacities should fail");
         let rendered = err.to_string();
-        assert!(rendered.contains("topics.global_topic.policies.queue_capacity"));
-        assert!(rendered.contains("groups.g1.topics.group_topic.policies.queue_capacity"));
+        assert!(rendered.contains("topics.global_topic.policies.balanced.queue_capacity"));
+        assert!(rendered.contains("topics.global_topic.policies.broadcast.queue_capacity"));
+        assert!(rendered.contains("groups.g1.topics.group_topic.policies.balanced.queue_capacity"));
+        assert!(
+            rendered.contains("groups.g1.topics.group_topic.policies.broadcast.queue_capacity")
+        );
     }
 
     #[test]

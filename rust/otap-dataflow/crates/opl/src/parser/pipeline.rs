@@ -1,8 +1,12 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use data_engine_expressions::DataExpression;
-use data_engine_parser_abstractions::{ParserError, ParserState, to_query_location};
+use std::collections::HashMap;
+
+use data_engine_expressions::{DataExpression, PipelineFunction};
+use data_engine_parser_abstractions::{
+    ParserError, ParserFunction, ParserScope, ParserState, to_query_location,
+};
 use pest::iterators::Pair;
 
 use crate::parser::operator::parse_operator_call;
@@ -11,21 +15,95 @@ use crate::parser::{Rule, invalid_child_rule_error};
 /// Trait for building pipelines.
 ///
 /// This abstracts away the details of how expressions are added to a pipeline, so the same parser
-/// utility functions can be used targetting different pipeline builder. In pratice, this is useful
+/// utility functions can be used targeting different pipeline builder. In practice, this is useful
 /// when building nested pipelines for some expressions which nest pipeline stages, such as if/else
 pub(crate) trait PipelineBuilder {
     fn push_data_expression(&mut self, data_expression: DataExpression);
+
+    /// push a function definition, returns the function ID
+    fn push_function_definition(&mut self, name: &str, definition: PipelineFunction) -> usize;
+
+    /// get the definition of a function by name. Returns `None` if no function with the passed
+    /// name exists
+    fn get_function(&self, name: &str) -> Option<&ParserFunction>;
 }
 
-impl PipelineBuilder for Vec<DataExpression> {
-    fn push_data_expression(&mut self, data_expression: DataExpression) {
-        self.push(data_expression);
+pub struct RootPipelineBuilder<'a> {
+    parser_state: &'a mut ParserState,
+    max_func_id: Option<usize>,
+}
+
+impl<'a> RootPipelineBuilder<'a> {
+    pub fn new(parser_state: &'a mut ParserState) -> Self {
+        Self {
+            parser_state,
+            max_func_id: None,
+        }
     }
 }
 
-impl PipelineBuilder for ParserState {
+impl PipelineBuilder for RootPipelineBuilder<'_> {
     fn push_data_expression(&mut self, data_expression: DataExpression) {
-        self.push_expression(data_expression);
+        self.parser_state.push_expression(data_expression);
+    }
+
+    fn push_function_definition(&mut self, name: &str, definition: PipelineFunction) -> usize {
+        self.parser_state
+            .push_function(name, definition, Vec::new(), HashMap::new());
+        let func_id = self
+            .parser_state
+            .get_function_id(name)
+            .expect("should have function with name")
+            .get_id();
+        self.max_func_id = Some(self.max_func_id.unwrap_or(0).max(func_id));
+
+        func_id
+    }
+
+    fn get_function(&self, name: &str) -> Option<&ParserFunction> {
+        self.parser_state.get_function_id(name)
+    }
+}
+
+/// simple [`PipelineBuilder`] implementation for collecting nested data expressions and
+/// function definitions
+pub(crate) struct InnerPipelineBuilder<'a> {
+    data_exprs: Vec<DataExpression>,
+
+    pub parent: &'a mut dyn PipelineBuilder,
+}
+
+impl<'a> InnerPipelineBuilder<'a> {
+    pub fn new(parent: &'a mut dyn PipelineBuilder) -> Self {
+        Self::new_with_capacity(None, parent)
+    }
+
+    pub fn new_with_capacity(
+        data_expr_capacity: Option<usize>,
+        parent: &'a mut dyn PipelineBuilder,
+    ) -> Self {
+        Self {
+            data_exprs: Vec::with_capacity(data_expr_capacity.unwrap_or_default()),
+            parent,
+        }
+    }
+
+    pub fn into_parts(self) -> (Vec<DataExpression>, &'a mut dyn PipelineBuilder) {
+        (self.data_exprs, self.parent)
+    }
+}
+
+impl<'a> PipelineBuilder for InnerPipelineBuilder<'a> {
+    fn push_data_expression(&mut self, data_expression: DataExpression) {
+        self.data_exprs.push(data_expression)
+    }
+
+    fn push_function_definition(&mut self, name: &str, definition: PipelineFunction) -> usize {
+        self.parent.push_function_definition(name, definition)
+    }
+
+    fn get_function(&self, name: &str) -> Option<&ParserFunction> {
+        self.parent.get_function(name)
     }
 }
 
@@ -38,7 +116,9 @@ pub(crate) fn parse_pipeline(
             Rule::source => {
                 // ignore for now
             }
-            Rule::pipeline_stage => parse_pipeline_stage(rule, state)?,
+            Rule::pipeline_stage => {
+                parse_pipeline_stage(rule, &mut RootPipelineBuilder::new(state))?
+            }
             invalid_rule => {
                 let query_location = to_query_location(&rule);
                 return Err(invalid_child_rule_error(

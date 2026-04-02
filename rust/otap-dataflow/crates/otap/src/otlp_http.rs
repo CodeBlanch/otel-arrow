@@ -42,7 +42,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -55,7 +55,7 @@ use otap_df_config::tls::TlsServerConfig;
 pub mod client_settings;
 
 /// OTLP protobuf content type
-pub(crate) const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
+pub const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 /// Settings for the OTLP/HTTP server.
 #[derive(Debug, Deserialize, Clone)]
@@ -260,11 +260,13 @@ fn ok_response(signal: SignalType) -> Response<Full<Bytes>> {
 /// in protobuf format for consistency with gRPC error handling.
 /// See: https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub(crate) struct RpcStatus {
+pub struct RpcStatus {
+    /// gRPC-compatible numeric status code.
     #[prost(int32, tag = "1")]
-    pub(crate) code: i32,
+    pub code: i32,
+    /// Human-readable status message.
     #[prost(string, tag = "2")]
-    pub(crate) message: String,
+    pub message: String,
     #[prost(message, repeated, tag = "3")]
     details: Vec<Any>,
 }
@@ -499,7 +501,7 @@ fn read_to_end_limited<R: std::io::Read>(
 struct HttpHandler {
     effect_handler: EffectHandler<OtapPdata>,
     ack_registry: AckRegistry,
-    metrics: Arc<Mutex<MetricSet<crate::otlp_receiver::OtlpReceiverMetrics>>>,
+    metrics: Arc<Mutex<MetricSet<crate::otlp_metrics::OtlpReceiverMetrics>>>,
     settings: HttpServerSettings,
     /// Optional global semaphore shared across protocols (e.g., gRPC + HTTP) to enforce
     /// receiver-wide backpressure tied to downstream capacity.
@@ -673,15 +675,12 @@ impl HttpHandler {
                     return Err(internal_error());
                 };
 
-                let (key, rx) = {
-                    let mut guard = state.0.lock();
-                    match guard.allocate(|| oneshot::channel()) {
-                        None => {
-                            self.metrics.lock().rejected_requests.inc();
-                            return Err(service_unavailable());
-                        }
-                        Some(pair) => pair,
+                let (key, rx) = match state.allocate_slot() {
+                    None => {
+                        self.metrics.lock().rejected_requests.inc();
+                        return Err(service_unavailable());
                     }
+                    Some(pair) => pair,
                 };
 
                 // Register calldata in the context.
@@ -764,7 +763,7 @@ struct SlotGuard {
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        self.state.0.lock().cancel(self.key);
+        self.state.cancel_slot(self.key);
     }
 }
 
@@ -781,7 +780,7 @@ pub async fn serve(
     effect_handler: EffectHandler<OtapPdata>,
     settings: HttpServerSettings,
     ack_registry: AckRegistry,
-    metrics: Arc<Mutex<MetricSet<crate::otlp_receiver::OtlpReceiverMetrics>>>,
+    metrics: Arc<Mutex<MetricSet<crate::otlp_metrics::OtlpReceiverMetrics>>>,
     global_semaphore: Option<Arc<Semaphore>>,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
@@ -941,7 +940,7 @@ mod tests {
         use hyper::client::conn::http1;
         use hyper::header::{CONTENT_TYPE, HOST};
         use hyper_util::rt::TokioIo;
-        use otap_df_engine::control::pipeline_ctrl_msg_channel;
+        use otap_df_engine::control::runtime_ctrl_msg_channel;
         use otap_df_engine::shared::message::SharedSender;
         use otap_df_engine::testing::test_node;
         use otap_df_pdata::proto::opentelemetry::collector::logs::v1::ExportLogsServiceRequest;
@@ -958,7 +957,7 @@ mod tests {
         let (msg_tx, mut msg_rx) = tokio_mpsc::channel(4);
         let mut senders = HashMap::new();
         let _ = senders.insert("default".into(), SharedSender::mpsc(msg_tx));
-        let (ctrl_tx, _ctrl_rx) = pipeline_ctrl_msg_channel(4);
+        let (ctrl_tx, _ctrl_rx) = runtime_ctrl_msg_channel(4);
         let (_metrics_rx, metrics_reporter) = MetricsReporter::create_new_and_receiver(1);
         let effect_handler =
             EffectHandler::new(test_node("http"), senders, None, ctrl_tx, metrics_reporter);
@@ -977,7 +976,7 @@ mod tests {
         let pipeline_ctx =
             controller_ctx.pipeline_context_with("grp".into(), "pipeline".into(), 0, 1, 0);
         let metrics = Arc::new(Mutex::new(
-            pipeline_ctx.register_metrics::<crate::otlp_receiver::OtlpReceiverMetrics>(),
+            pipeline_ctx.register_metrics::<crate::otlp_metrics::OtlpReceiverMetrics>(),
         ));
 
         let ack_registry = AckRegistry::new(Some(AckSlot::new(4)), None, None);

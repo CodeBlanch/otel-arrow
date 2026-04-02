@@ -35,7 +35,7 @@
 //! layer should call `flush_progress()` periodically (e.g., every 25ms) to
 //! write dirty subscribers to disk.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,8 +52,8 @@ use super::progress::{
     delete_progress_file, progress_file_path, read_progress_file, scan_progress_files,
     write_progress_file,
 };
-use super::state::SubscriberState;
-use super::types::{AckOutcome, BundleRef, SubscriberId};
+use super::state::{SegmentProgress, SubscriberState};
+use super::types::{AckOutcome, BundleIndex, BundleRef, SubscriberId};
 
 use crate::record_bundle::SlotId;
 
@@ -189,10 +189,8 @@ impl<P: SegmentProvider> SubscriberRegistry<P> {
                             // Mark acked bundles
                             for bundle_idx in 0..entry.bundle_count {
                                 if entry.is_acked(bundle_idx) {
-                                    let bundle_ref = BundleRef::new(
-                                        entry.seg_seq,
-                                        super::types::BundleIndex::new(bundle_idx),
-                                    );
+                                    let bundle_ref =
+                                        BundleRef::new(entry.seg_seq, BundleIndex::new(bundle_idx));
                                     let _ = state.record_outcome(bundle_ref, AckOutcome::Acked);
                                 }
                             }
@@ -766,6 +764,34 @@ impl<P: SegmentProvider> SubscriberRegistry<P> {
         };
 
         state_lock.is_some_and(|lock| lock.read().is_active())
+    }
+
+    /// Returns a snapshot of the subscriber's per-segment progress.
+    ///
+    /// The returned map is a clone taken under a brief read lock; the caller
+    /// can iterate it without holding any registry locks.  This is intended
+    /// for higher layers (e.g., the durable buffer) that maintain their own
+    /// per-segment caches and only need the progress bitmap to compute
+    /// pending-item counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubscriberError::NotFound`] if the subscriber is not
+    /// registered.
+    pub fn pending_segment_progress(
+        &self,
+        id: &SubscriberId,
+    ) -> Result<BTreeMap<SegmentSeq, SegmentProgress>> {
+        let state_lock = {
+            let subscribers = self.subscribers.read();
+            subscribers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SubscriberError::not_found(id.as_str()))?
+        };
+
+        let state = state_lock.read();
+        Ok(state.segments().clone())
     }
 
     /// Flushes all dirty subscribers to their progress files.
@@ -1529,7 +1555,6 @@ mod tests {
     #[tokio::test]
     async fn next_bundle_waits_for_segment_notification() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use tokio::time::Duration as TokioDuration;
 
         let (registry, _dir) = setup_registry();
         let provider = registry.segment_provider.clone();
@@ -1555,14 +1580,15 @@ mod tests {
         });
 
         // Give consumer task time to start waiting
-        tokio::time::sleep(TokioDuration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
 
         // Now add a segment and notify
         provider.add_segment(1, 1);
         registry_for_notify.on_segment_finalized(SegmentSeq::new(1), 1);
 
         // Consumer should complete within reasonable time
-        let result = tokio::time::timeout(TokioDuration::from_secs(10), consumer).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), consumer).await;
         assert!(result.is_ok(), "consumer should complete");
         assert!(
             got_bundle.load(Ordering::Relaxed),
@@ -1581,7 +1607,7 @@ mod tests {
 
         // next_bundle with short timeout should return None
         let result = registry
-            .next_bundle(&id, Some(Duration::from_millis(100)), None)
+            .next_bundle(&id, Some(Duration::from_millis(1)), None)
             .await
             .unwrap();
         assert!(
@@ -1665,8 +1691,6 @@ mod tests {
 
     #[tokio::test]
     async fn next_bundle_cancellation_wakes_waiting_task() {
-        use tokio::time::Duration as TokioDuration;
-
         let (registry, _dir) = setup_registry();
 
         let id = SubscriberId::new("cancel-wake-test").unwrap();
@@ -1687,13 +1711,14 @@ mod tests {
         });
 
         // Give the waiter time to start waiting
-        tokio::time::sleep(TokioDuration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
 
         // Cancel the token
         cancel.cancel();
 
         // The waiter should wake up and return Cancelled
-        let result = tokio::time::timeout(TokioDuration::from_secs(5), waiter)
+        let result = tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
             .expect("waiter should complete")
             .expect("task should not panic");

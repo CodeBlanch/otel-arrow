@@ -153,7 +153,7 @@ pub fn from_storage_type(
 ) -> Result<Arc<dyn ObjectStore>, object_store::Error> {
     match storage {
         StorageType::File { base_uri } => {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             {
                 if base_uri.starts_with("testdelayed://") {
                     return test::delayed_test_object_store(base_uri);
@@ -224,13 +224,14 @@ pub fn from_storage_type(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(dead_code, unused_imports)]
 mod test {
     use futures::stream::BoxStream;
     use object_store::path::Path;
     use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
-        PutOptions, PutPayload, PutResult, Result,
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult, Result,
     };
     use serde_json::json;
     use std::fmt::Display;
@@ -325,20 +326,19 @@ mod test {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn delete(&self, location: &Path) -> Result<()> {
-            self.inner.delete(location).await
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, Result<Path>>,
+        ) -> BoxStream<'static, Result<Path>> {
+            self.inner.delete_stream(locations)
         }
 
         fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
             self.inner.list(prefix)
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-            self.inner.copy_if_not_exists(from, to).await
+        async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
@@ -365,6 +365,7 @@ mod test {
     #[test]
     #[cfg(feature = "azure")]
     fn test_get_azure_storage() {
+        crate::crypto::ensure_crypto_provider();
         let storage = StorageType::Azure {
             base_uri: "https://mystorageaccount.blob.core.windows.net/container".to_string(),
             storage_scope: None,
@@ -379,6 +380,7 @@ mod test {
     #[test]
     #[cfg(feature = "aws")]
     fn test_get_s3_storage() {
+        crate::crypto::ensure_crypto_provider();
         let storage = StorageType::S3 {
             base_uri: "s3://my-bucket/test".to_string(),
             region: Some("us-east-1".to_string()),
@@ -687,6 +689,7 @@ mod test {
         assert_eq!(prefix, None);
     }
 
+    #[cfg(test)]
     fn test_deserialize(json: &str, expected: StorageType) {
         let deserialized: StorageType =
             serde_json::from_str(json).expect("Failed to deserialize Config");

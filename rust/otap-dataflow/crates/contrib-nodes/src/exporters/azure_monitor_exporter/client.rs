@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 
-use otap_df_telemetry::otel_warn;
+use otap_df_telemetry::otel_debug;
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use reqwest::{
     Client,
@@ -20,6 +20,14 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 2;
 
+/// HTTP header name for Azure Monitor source resource ID tracking.
+pub(super) const AZURE_MONITOR_SOURCE_RESOURCEID_HEADER: &str = "azure-monitor-source-resourceid";
+
+/// URL-encode a value for use in an HTTP header (RFC 3986 percent-encoding).
+pub(super) fn url_encode_header_value(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
 /// HTTP client for Azure Log Analytics Data Collection Rule (DCR) endpoint.
 ///
 /// Handles authentication, compression, and HTTP communication with the
@@ -31,6 +39,9 @@ pub struct LogsIngestionClient {
 
     // Pre-formatted authorization header provider
     auth_header: HeaderValue,
+
+    /// Optional ARM resource ID header for Azure Monitor source tracking.
+    resource_id_header: Option<HeaderValue>,
 
     /// Shared metrics tracker for recording HTTP status codes and latency.
     metrics: AzureMonitorExporterMetricsRc,
@@ -118,6 +129,7 @@ impl LogsIngestionClient {
             http_client,
             endpoint,
             auth_header: HeaderValue::from_static("Bearer "), // placeholder, will be updated on first use
+            resource_id_header: None,
             metrics,
         }
     }
@@ -144,10 +156,19 @@ impl LogsIngestionClient {
             config.dcr_endpoint, config.dcr, config.stream_name
         );
 
+        let resource_id_header = config
+            .azure_monitor_source_resourceid
+            .as_deref()
+            .and_then(|v| {
+                let encoded = url_encode_header_value(v);
+                HeaderValue::from_str(&encoded).ok()
+            });
+
         Ok(Self {
             http_client,
             endpoint,
             auth_header: HeaderValue::from_static("Bearer "), // placeholder, will be updated on first use
+            resource_id_header,
             metrics,
         })
     }
@@ -191,13 +212,18 @@ impl LogsIngestionClient {
                     });
                 }
                 Err(e) => {
+                    attempt += 1;
+
+                    // ToDo: Add an upper bound for server-driven retries (429/5xx with
+                    // Retry-After). Currently only the non-server-driven path enforces
+                    // MAX_RETRIES; a server that perpetually returns 429 with Retry-After
+                    // will cause this loop to retry indefinitely.
                     let delay = if let Some(server_delay) = e.retry_after() {
                         let base_delay = server_delay.max(Duration::from_secs(5));
                         let jitter = Duration::from_secs(3)
                             + Duration::from_secs_f64(rng.random::<f64>() * 7.0);
                         base_delay + jitter
                     } else {
-                        attempt += 1;
                         if attempt >= MAX_RETRIES {
                             return Err(Error::ExportFailed {
                                 attempts: attempt,
@@ -210,7 +236,8 @@ impl LogsIngestionClient {
                         base_delay.mul_f64(jitter_factor)
                     };
 
-                    otel_warn!("azure_monitor_exporter.export.retry_delay", delay_ms = delay.as_millis() as u64, error = ?e);
+                    // TODO: Revisit whether DEBUG or INFO is the right level for retry attempts.
+                    otel_debug!("azure_monitor_exporter.export.retrying", attempt = attempt, delay_ms = delay.as_millis() as u64, error = ?e);
 
                     tokio::time::sleep(delay).await;
                 }
@@ -223,16 +250,24 @@ impl LogsIngestionClient {
         let body_len = body.len();
         let start = Instant::now();
 
-        let response = self
+        let mut request = self
             .http_client
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(CONTENT_ENCODING, "gzip")
-            .header(AUTHORIZATION, &self.auth_header)
-            .body(body)
-            .send()
-            .await
-            .map_err(Error::network)?;
+            .header(AUTHORIZATION, &self.auth_header);
+
+        if let Some(ref resource_id) = self.resource_id_header {
+            request = request.header(AZURE_MONITOR_SOURCE_RESOURCEID_HEADER, resource_id);
+        }
+
+        let response = match request.body(body).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.metrics.borrow_mut().add_network_error();
+                return Err(Error::network(e));
+            }
+        };
 
         let status_code = response.status().as_u16();
         let elapsed = start.elapsed();
@@ -262,7 +297,7 @@ impl LogsIngestionClient {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
-        otel_warn!(
+        otel_debug!(
             "azure_monitor_exporter.client.error",
             status = status.as_u16(),
             message = %body
@@ -311,10 +346,13 @@ mod tests {
             dcr: "test-dcr".to_string(),
             stream_name: "test-stream".to_string(),
             schema: Default::default(),
+            azure_monitor_source_resourceid: None,
+            gzip_compression_level: 6,
         }
     }
 
     fn create_test_http_client() -> Client {
+        otap_df_otap::crypto::ensure_crypto_provider();
         Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -330,6 +368,8 @@ mod tests {
             dcr: "test-dcr-id".to_string(),
             stream_name: "test-stream".to_string(),
             schema: Default::default(),
+            azure_monitor_source_resourceid: None,
+            gzip_compression_level: 6,
         };
 
         let http_client = create_test_http_client();
@@ -350,6 +390,8 @@ mod tests {
             dcr: "dcr-abc-123-def".to_string(),
             stream_name: "Custom-Stream_Name".to_string(),
             schema: Default::default(),
+            azure_monitor_source_resourceid: None,
+            gzip_compression_level: 6,
         };
 
         let http_client = create_test_http_client();
@@ -592,6 +634,7 @@ mod tests {
 
     #[test]
     fn test_pool_create_http_clients() {
+        otap_df_otap::crypto::ensure_crypto_provider();
         let pool = LogsIngestionClientPool::new(4, create_test_metrics());
 
         let result = pool.create_http_clients(4);
@@ -603,6 +646,7 @@ mod tests {
 
     #[test]
     fn test_pool_create_http_clients_zero() {
+        otap_df_otap::crypto::ensure_crypto_provider();
         let pool = LogsIngestionClientPool::new(4, create_test_metrics());
 
         let result = pool.create_http_clients(0);
@@ -610,5 +654,23 @@ mod tests {
         assert!(result.is_ok());
         let clients = result.unwrap();
         assert_eq!(clients.len(), 0);
+    }
+
+    // ==================== Resource ID Header Tests ====================
+
+    #[test]
+    fn test_resource_id_header_set_when_configured() {
+        let input = "/subscriptions/215b5735-fa8b-4dd4-86dc-997320c68c2d/resourceGroups/rg-test/providers/Microsoft.Kubernetes/connectedClusters/test-cluster/providers/microsoft.kubernetesconfiguration/extensions/pipe";
+        let encoded = url_encode_header_value(input);
+        let header = HeaderValue::from_str(&encoded).expect("valid header value");
+
+        let expected = "%2Fsubscriptions%2F215b5735-fa8b-4dd4-86dc-997320c68c2d%2FresourceGroups%2Frg-test%2Fproviders%2FMicrosoft.Kubernetes%2FconnectedClusters%2Ftest-cluster%2Fproviders%2Fmicrosoft.kubernetesconfiguration%2Fextensions%2Fpipe";
+        assert_eq!(header.to_str().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_resource_id_header_none_when_not_configured() {
+        let api_config = create_test_api_config();
+        assert!(api_config.azure_monitor_source_resourceid.is_none());
     }
 }

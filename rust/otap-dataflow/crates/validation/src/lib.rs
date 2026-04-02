@@ -3,11 +3,13 @@
 
 //! Validation test module to validate the encoding/decoding process for otlp messages
 
+/// Docker container configuration for validation scenarios
+pub mod container;
 /// validate the encode_decoding of otlp messages
 pub mod encode_decode;
 /// error definitions for the validation test
 pub mod error;
-/// temp fanout processor to use use for validation test
+/// temp fanout processor to use for validation test
 pub mod fanout_processor;
 /// metric definition to serialize json result from metric admin endpoint
 pub mod metrics_types;
@@ -17,6 +19,8 @@ pub mod pipeline;
 pub mod scenario;
 /// internal pipeline simulation utilities
 mod simulate;
+/// shared Jinja2 template rendering helper
+mod template;
 /// define structs to describe the traffic being created and captured for validation
 pub mod traffic;
 /// validation exporter to receive messages and assert their equivalence
@@ -24,6 +28,8 @@ pub mod validation_exporter;
 /// invariants/checks helpers (attribute diff, filtering detection, etc.)
 pub mod validation_types;
 
+pub use container::ContainerConfig;
+pub use error::ValidationError;
 pub use validation_types::ValidationInstructions;
 
 #[cfg(test)]
@@ -33,7 +39,6 @@ mod tests {
     use crate::scenario::Scenario;
     use crate::traffic::{Capture, Generator};
     use crate::validation_types::attributes::{AnyValue, AttributeDomain, KeyValue};
-    use std::time::Duration;
 
     #[test]
     fn no_processor() {
@@ -58,7 +63,6 @@ mod tests {
                     .control_streams(["traffic_gen"])
                     .core_range(2, 2),
             )
-            .expect_within(Duration::from_secs(140))
             .run()
             .expect("validation scenario failed");
     }
@@ -86,7 +90,6 @@ mod tests {
                     .control_streams(["traffic_gen"])
                     .core_range(2, 2),
             )
-            .expect_within(Duration::from_secs(140))
             .run()
             .expect("validation scenario failed");
     }
@@ -121,7 +124,6 @@ mod tests {
                     .validate(vec![deny, require])
                     .core_range(2, 2),
             )
-            .expect_within(Duration::from_secs(500))
             .run()
             .expect("attribute processor validation failed");
     }
@@ -163,13 +165,12 @@ mod tests {
                     .control_streams(["traffic_gen"])
                     .core_range(2, 2),
             )
-            .expect_within(Duration::from_secs(140))
             .run()
             .expect("filter processor validation failed");
     }
 
     #[test]
-    #[ignore = "flaky test, see https://github.com/open-telemetry/otel-arrow/issues/2227"]
+    #[ignore = "https://github.com/open-telemetry/otel-arrow/issues/2498"]
     fn multiple_input_output() {
         Scenario::new()
             .pipeline(
@@ -197,7 +198,6 @@ mod tests {
                     .validate(vec![ValidationInstructions::Equivalence])
                     .control_streams(["traffic_gen1", "traffic_gen2"]),
             )
-            .expect_within(Duration::from_secs(140))
             .run()
             .expect("validation scenario failed");
     }
@@ -210,13 +210,12 @@ mod tls_tests {
     use crate::scenario::Scenario;
     use crate::traffic::{Capture, Generator, TlsConfig};
     use otap_test_tls_certs::{ExtendedKeyUsage, write_ca_and_leaf_to_dir};
-    use std::time::Duration;
 
     /// End-to-end validation: traffic flows through a TLS-enabled OTLP gRPC
     /// receiver in the SUV pipeline.
     #[test]
     fn tls_no_processor() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = otap_df_otap::crypto::install_crypto_provider();
 
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let dir = temp_dir.path();
@@ -259,7 +258,6 @@ mod tls_tests {
                     .otlp_grpc("exporter")
                     .control_streams(["traffic_gen"]),
             )
-            .expect_within(Duration::from_secs(140))
             .run()
             .expect("TLS validation scenario failed");
     }
@@ -268,7 +266,7 @@ mod tls_tests {
     /// receiver in the SUV pipeline, requiring client certificate authentication.
     #[test]
     fn mtls_no_processor() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = otap_df_otap::crypto::install_crypto_provider();
 
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let dir = temp_dir.path();
@@ -323,7 +321,6 @@ mod tls_tests {
                     .otlp_grpc("exporter")
                     .control_streams(["traffic_gen"]),
             )
-            .expect_within(Duration::from_secs(140))
             .run()
             .expect("mTLS validation scenario failed");
     }

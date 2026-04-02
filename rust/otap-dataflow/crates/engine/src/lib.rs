@@ -47,6 +47,8 @@ use std::{
     sync::OnceLock,
 };
 
+#[doc(hidden)]
+pub mod clock;
 pub mod error;
 pub mod exporter;
 pub mod message;
@@ -56,9 +58,11 @@ pub mod receiver;
 mod attributes;
 mod channel_metrics;
 mod channel_mode;
+mod completion_emission_metrics;
 pub mod config;
 pub mod context;
 pub mod control;
+mod control_plane_metrics;
 pub mod effect_handler;
 pub mod engine_metrics;
 pub mod entity_context;
@@ -67,10 +71,12 @@ pub mod node;
 pub mod output_router;
 pub mod pipeline_ctrl;
 mod pipeline_metrics;
+pub mod process_duration;
 pub mod runtime_pipeline;
 pub mod shared;
 pub mod terminal_state;
 pub mod testing;
+pub mod topic;
 pub mod wiring_contract;
 
 /// Trait for factory types that expose a name.
@@ -247,6 +253,11 @@ pub struct Interests: u8 {
     /// Source-tagging requested. A frame with no other interests may be inserted.
     const SOURCE_TAGGING = 1 << 6;
 
+    /// Process-duration timing requested for processors.
+    // NOTE: this is the last available bit in u8. Adding another flag
+    // requires widening the repr to u16.
+    const PROCESS_DURATION = 1 << 7;
+
     /// Pipeline-metrics is either CONSUMER_METRICS or PRODUCER_METRICS.
     const PIPELINE_METRICS = Self::CONSUMER_METRICS.bits() | Self::PRODUCER_METRICS.bits();
 }
@@ -257,14 +268,16 @@ impl Interests {
     ///
     /// None:     empty()
     /// Basic:    empty() with only channel metrics, no use of Context
-    /// Normal:   CONSUMER_METRICS | PRODUCER_METRICS
-    /// Detailed: CONSUMER_METRICS | PRODUCER_METRICS | ENTRY_TIMESTAMP
+    /// Normal:   CONSUMER_METRICS | PRODUCER_METRICS | PROCESS_DURATION
+    /// Detailed: CONSUMER_METRICS | PRODUCER_METRICS | PROCESS_DURATION | ENTRY_TIMESTAMP
     #[must_use]
     pub fn from_metric_level(level: MetricLevel) -> Self {
         match level {
             MetricLevel::None | MetricLevel::Basic => Self::empty(),
-            MetricLevel::Normal => Self::PIPELINE_METRICS,
-            MetricLevel::Detailed => Self::PIPELINE_METRICS | Self::ENTRY_TIMESTAMP,
+            MetricLevel::Normal => Self::PIPELINE_METRICS | Self::PROCESS_DURATION,
+            MetricLevel::Detailed => {
+                Self::PIPELINE_METRICS | Self::PROCESS_DURATION | Self::ENTRY_TIMESTAMP
+            }
         }
     }
 }
@@ -347,6 +360,33 @@ pub trait ConsumerEffectHandlerExtension<PData> {
 
     /// Triggers the next step of work (if any) in Nack processing.
     async fn notify_nack(&self, nack: NackMsg<PData>) -> Result<(), Error>;
+}
+
+/// Implementation-detail module re-exporting the internal
+/// [`AckNackRouting`] trait.
+///
+/// **Do not use directly.** Prefer
+/// [`ConsumerEffectHandlerExtension::notify_ack`] /
+/// [`ConsumerEffectHandlerExtension::notify_nack`] which stamp timing
+/// information required for correct duration metrics.
+#[doc(hidden)]
+pub mod _private {
+    use super::*;
+
+    /// Internal routing trait for ack/nack messages.
+    ///
+    /// Callers should use [`ConsumerEffectHandlerExtension::notify_ack`] and
+    /// [`ConsumerEffectHandlerExtension::notify_nack`] instead of calling these
+    /// methods directly. Those wrappers stamp timing information required for
+    /// correct duration metrics before forwarding to `route_ack`/`route_nack`.
+    #[async_trait(?Send)]
+    pub trait AckNackRouting<PData> {
+        /// Routes an ack message to the runtime control manager.
+        async fn route_ack(&self, ack: AckMsg<PData>) -> Result<(), Error>;
+
+        /// Routes a nack message to the runtime control manager.
+        async fn route_nack(&self, nack: NackMsg<PData>) -> Result<(), Error>;
+    }
 }
 
 /// Effect handler extension for adding message source
@@ -553,7 +593,7 @@ impl<PData: 'static + Clone + Debug> PipelineFactory<PData> {
 
         self.validate_connection_wiring_contracts(&config)?;
 
-        let channel_metrics_enabled = telemetry_policy.channel_metrics >= MetricLevel::Basic;
+        let channel_metrics_enabled = telemetry_policy.runtime_metrics >= MetricLevel::Basic;
 
         // First pass: allocate all node IDs from the build_state.
         let mut receiver_count = 0usize;

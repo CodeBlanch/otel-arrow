@@ -5,7 +5,8 @@
 
 use crate::attributes::{
     ChannelAttributeSet, CustomAttributeSet, EngineAttributeSet, NodeAttributeSet,
-    NodeWithCustomAttributeSet, PipelineAttributeSet, config_map_to_telemetry,
+    NodeWithCustomAttributeSet, NodeWithCustomTopicAttributeSet, NodeWithTopicAttributeSet,
+    PipelineAttributeSet, config_map_to_telemetry,
 };
 use crate::entity_context::{current_node_telemetry_handle, node_entity_key};
 use crate::node::NodeId as EngineNodeId;
@@ -15,6 +16,7 @@ use otap_df_config::{NodeId as ConfigNodeId, NodeUrn, PipelineGroupId, PipelineI
 use otap_df_telemetry::InternalTelemetrySettings;
 use otap_df_telemetry::metrics::{MetricSet, MetricSetHandler};
 use otap_df_telemetry::registry::{EntityKey, TelemetryRegistryHandle};
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -101,17 +103,27 @@ pub struct ControllerContext {
     numa_node_id: usize,
 }
 
+/// Parameters required to create a pipeline context.
+#[derive(Clone, Debug)]
+pub struct PipelineContextParams {
+    /// Pipeline group ID for the current pipeline execution context.
+    pub pipeline_group_id: PipelineGroupId,
+    /// Pipeline ID for the current pipeline execution context.
+    pub pipeline_id: PipelineId,
+    /// Core ID for the current pipeline execution context.
+    pub core_id: usize,
+    /// Total number of cores allocated to this pipeline.
+    /// Used by nodes that need to share resources across cores (e.g., disk budgets).
+    pub num_cores: usize,
+    /// Thread ID for the current pipeline execution context.
+    pub thread_id: usize,
+}
+
 /// A lightweight/cloneable pipeline context.
 #[derive(Clone, Debug)]
 pub struct PipelineContext {
     controller_context: ControllerContext,
-    core_id: usize,
-    /// Total number of cores allocated to this pipeline.
-    /// Used by nodes that need to share resources across cores (e.g., disk budgets).
-    num_cores: usize,
-    thread_id: usize,
-    pipeline_group_id: PipelineGroupId,
-    pipeline_id: PipelineId,
+    pipeline_context_params: PipelineContextParams,
     pipeline_telemetry_attrs: HashMap<String, TelemetryAttribute>,
     node_id: ConfigNodeId,
     node_urn: NodeUrn,
@@ -126,6 +138,9 @@ pub struct PipelineContext {
     /// for example to map source-node name to index for inferring
     /// routes at runtime (e.g., how crates/validation works).
     node_names: NodeNameIndex,
+    /// Optional pipeline-scoped topic set injected by the controller.
+    /// ToDo: Make PipelineContext generic over a TopicSet type to avoid dynamic typing here.
+    topic_set: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl ControllerContext {
@@ -153,11 +168,13 @@ impl ControllerContext {
     ) -> PipelineContext {
         PipelineContext::new(
             self.clone(),
-            pipeline_group_id,
-            pipeline_id,
-            core_id,
-            num_cores,
-            thread_id,
+            PipelineContextParams {
+                pipeline_group_id,
+                pipeline_id,
+                core_id,
+                num_cores,
+                thread_id,
+            },
         )
     }
 
@@ -188,19 +205,11 @@ impl PipelineContext {
     /// Creates a new `PipelineContext`.
     pub(crate) fn new(
         parent_ctx: ControllerContext,
-        pipeline_group_id: PipelineGroupId,
-        pipeline_id: PipelineId,
-        core_id: usize,
-        num_cores: usize,
-        thread_id: usize,
+        pipeline_context_params: PipelineContextParams,
     ) -> Self {
         Self {
             controller_context: parent_ctx,
-            pipeline_id,
-            pipeline_group_id,
-            core_id,
-            num_cores,
-            thread_id,
+            pipeline_context_params,
             node_id: Default::default(),
             node_urn: Default::default(),
             node_kind: Default::default(),
@@ -208,25 +217,26 @@ impl PipelineContext {
             pipeline_telemetry_attrs: HashMap::new(),
             internal_telemetry: None,
             node_names: Arc::new(HashMap::new()),
+            topic_set: None,
         }
     }
 
     /// Returns the pipeline group ID associated with this pipeline context.
     #[must_use]
     pub fn pipeline_group_id(&self) -> PipelineGroupId {
-        self.pipeline_group_id.clone()
+        self.pipeline_context_params.pipeline_group_id.clone()
     }
 
     /// Returns the pipeline ID associated with this pipeline context.
     #[must_use]
     pub fn pipeline_id(&self) -> PipelineId {
-        self.pipeline_id.clone()
+        self.pipeline_context_params.pipeline_id.clone()
     }
 
     /// Returns the core ID associated with this pipeline context.
     #[must_use]
     pub const fn core_id(&self) -> usize {
-        self.core_id
+        self.pipeline_context_params.core_id
     }
 
     /// Returns the total number of cores allocated to this pipeline.
@@ -235,7 +245,7 @@ impl PipelineContext {
     /// across all cores running the same pipeline.
     #[must_use]
     pub const fn num_cores(&self) -> usize {
-        self.num_cores
+        self.pipeline_context_params.num_cores
     }
 
     /// Sets the internal telemetry settings for the Internal Telemetry Receiver.
@@ -258,6 +268,23 @@ impl PipelineContext {
     /// Sets the shared node-name-to-index mapping for this pipeline context.
     pub fn set_node_names(&mut self, node_names: NodeNameIndex) {
         self.node_names = node_names;
+    }
+
+    /// Sets the pipeline-scoped topic set resource.
+    pub fn set_topic_set<T: Send + Sync + 'static>(
+        &mut self,
+        topic_set: crate::topic::TopicSet<T>,
+    ) {
+        self.topic_set = Some(Arc::new(topic_set));
+    }
+
+    /// Returns the pipeline-scoped topic set, if one was injected.
+    #[must_use]
+    pub fn topic_set<T: Send + Sync + 'static>(&self) -> Option<crate::topic::TopicSet<T>> {
+        self.topic_set
+            .as_ref()
+            .and_then(|resource| resource.downcast_ref::<crate::topic::TopicSet<T>>())
+            .cloned()
     }
 
     /// Returns the pipeline index for the given node name, if it exists.
@@ -325,6 +352,43 @@ impl PipelineContext {
         }
     }
 
+    /// Registers a metric set for the current node entity extended with a topic attribute.
+    ///
+    /// This is used by topic-aware nodes so their metric series can be filtered by `topic`.
+    #[must_use]
+    pub fn register_metrics_with_topic<T: MetricSetHandler + Default + Debug + Send + Sync>(
+        &self,
+        topic: Cow<'static, str>,
+    ) -> MetricSet<T> {
+        let entity_key = if self.node_telemetry_attrs.is_empty() {
+            self.controller_context
+                .telemetry_registry_handle
+                .register_entity(NodeWithTopicAttributeSet {
+                    node_attrs: self.node_attribute_set(),
+                    topic,
+                })
+        } else {
+            self.controller_context
+                .telemetry_registry_handle
+                .register_entity(NodeWithCustomTopicAttributeSet {
+                    node_custom_attrs: self.node_with_custom_attribute_set(),
+                    topic,
+                })
+        };
+
+        let metrics = self
+            .controller_context
+            .telemetry_registry_handle
+            .register_metric_set_for_entity::<T>(entity_key);
+
+        if let Some(telemetry) = current_node_telemetry_handle() {
+            telemetry.track_metric_set(metrics.metric_set_key());
+            telemetry.track_entity(entity_key);
+        }
+
+        metrics
+    }
+
     /// Registers the pipeline entity for this context.
     #[must_use]
     pub fn register_pipeline_entity(&self) -> EntityKey {
@@ -360,7 +424,7 @@ impl PipelineContext {
                 host_id: self.controller_context.host_id.clone(),
                 container_id: self.controller_context.container_id.clone(),
             },
-            core_id: self.core_id,
+            core_id: self.pipeline_context_params.core_id,
             numa_node_id: self.controller_context.numa_node_id,
         }
     }
@@ -370,8 +434,8 @@ impl PipelineContext {
     pub fn pipeline_attribute_set(&self) -> PipelineAttributeSet {
         PipelineAttributeSet {
             engine_attrs: self.engine_attribute_set(),
-            pipeline_id: self.pipeline_id.clone(),
-            pipeline_group_id: self.pipeline_group_id.clone(),
+            pipeline_id: self.pipeline_context_params.pipeline_id.clone(),
+            pipeline_group_id: self.pipeline_context_params.pipeline_group_id.clone(),
         }
     }
 
@@ -462,11 +526,7 @@ impl PipelineContext {
     ) -> Self {
         Self {
             controller_context: self.controller_context.clone(),
-            core_id: self.core_id,
-            num_cores: self.num_cores,
-            thread_id: self.thread_id,
-            pipeline_group_id: self.pipeline_group_id.clone(),
-            pipeline_id: self.pipeline_id.clone(),
+            pipeline_context_params: self.pipeline_context_params.clone(),
             pipeline_telemetry_attrs: self.pipeline_telemetry_attrs.clone(),
             node_id,
             node_urn,
@@ -474,6 +534,7 @@ impl PipelineContext {
             node_telemetry_attrs,
             internal_telemetry: None,
             node_names: self.node_names.clone(),
+            topic_set: self.topic_set.clone(),
         }
     }
 }

@@ -9,7 +9,7 @@
 use crate::node::{NodeId, NodeName};
 use otap_df_channel::error::SendError;
 use otap_df_config::node::NodeKind;
-use otap_df_config::{NodeUrn, PortName};
+use otap_df_config::{NodeUrn, PortName, TopicName};
 use otap_df_telemetry::event::ErrorSummary;
 use std::borrow::Cow;
 use std::fmt;
@@ -127,9 +127,9 @@ pub enum TypedError<T> {
     #[error("A channel error occurred: {0}")]
     ChannelSendError(SendError<T>),
 
-    /// A wrapper for the pipeline control message send errors.
-    #[error("A pipeline control channel error occurred: {0}")]
-    PipelineControlMsgError(SendError<T>),
+    /// A wrapper for send errors on the runtime channels.
+    #[error("A runtime channel error occurred: {0}")]
+    RuntimeMsgError(SendError<T>),
 
     /// A wrapper for the node control message send errors.
     #[error("A node control message send error occurred in node {node_id}: {error}")]
@@ -153,7 +153,7 @@ impl<T: Sized> From<TypedError<T>> for Error {
             TypedError::ChannelSendError(e) => Error::ChannelSendError {
                 error: e.to_string(),
             },
-            TypedError::PipelineControlMsgError(e) => Error::PipelineControlMsgError {
+            TypedError::RuntimeMsgError(e) => Error::RuntimeMsgError {
                 error: e.to_string(),
             },
             TypedError::NodeControlMsgSendError { node_id, error } => {
@@ -185,9 +185,9 @@ pub enum Error {
         error: String,
     },
 
-    /// A wrapper for the pipeline control message send errors.
-    #[error("A control channel error occurred: {error}")]
-    PipelineControlMsgError {
+    /// A wrapper for send errors on the runtime channels.
+    #[error("A runtime channel error occurred: {error}")]
+    RuntimeMsgError {
         /// The reason (e.g., channel closed)
         error: String,
     },
@@ -433,6 +433,44 @@ pub enum Error {
         /// The name of the unknown port.
         port: PortName,
     },
+    /// A topic with the same name already exists in the broker.
+    #[error("topic `{topic}` already exists")]
+    TopicAlreadyExists {
+        /// The name of the topic that already exists.
+        topic: TopicName,
+    },
+
+    /// A topic reference could not be resolved in the current scope.
+    #[error("unknown topic `{topic}`")]
+    UnknownTopic {
+        /// The unresolved topic name or local alias.
+        topic: String,
+    },
+
+    /// The referenced message was not published through the tracked outcome path.
+    #[error("message is not tracked for publish outcomes")]
+    MessageNotTracked,
+
+    /// An operation could not be completed because the topic is closed.
+    #[error("topic closed")]
+    TopicClosed,
+
+    /// Balanced (consumer-group) subscriptions are not supported on this topic.
+    #[error("balanced subscriptions are not supported on this topic")]
+    SubscribeBalancedNotSupported,
+
+    /// Broadcast subscriptions are not supported on this topic.
+    #[error("broadcast subscriptions are not supported on this topic")]
+    SubscribeBroadcastNotSupported,
+
+    /// This topic only supports a single consumer group, but a subscription request would violate that constraint.
+    #[error("this topic only supports a single consumer group")]
+    SubscribeSingleGroupViolation,
+
+    /// A subscription operation failed because the subscription was closed or
+    /// disconnected by topic policy.
+    #[error("subscription closed")]
+    SubscriptionClosed,
 }
 
 impl Error {
@@ -456,7 +494,7 @@ impl Error {
             Error::PdataConversionError { .. } => "PdataConversionError",
             Error::PdataReceiverNotSupported => "PdataReceiverNotSupported",
             Error::PdataSenderNotSupported => "PdataSenderNotSupported",
-            Error::PipelineControlMsgError { .. } => "PipelineControlMsgError",
+            Error::RuntimeMsgError { .. } => "RuntimeMsgError",
             Error::ProcessorAlreadyExists { .. } => "ProcessorAlreadyExists",
             Error::ProcessorError { .. } => "ProcessorError",
             Error::ProtoEncodeError { .. } => "ProtoEncodeError",
@@ -471,6 +509,14 @@ impl Error {
             Error::UnknownReceiver { .. } => "UnknownReceiver",
             Error::UnsupportedNodeKind { .. } => "UnsupportedNodeKind",
             Error::InvalidNodeWiring { .. } => "InvalidNodeWiring",
+            Error::TopicAlreadyExists { .. } => "TopicAlreadyExists",
+            Error::UnknownTopic { .. } => "UnknownTopic",
+            Error::MessageNotTracked => "MessageNotTracked",
+            Error::TopicClosed => "TopicClosed",
+            Error::SubscribeBalancedNotSupported => "SubscribeBalancedNotSupported",
+            Error::SubscribeBroadcastNotSupported => "SubscribeBroadcastNotSupported",
+            Error::SubscribeSingleGroupViolation => "SubscribeSingleGroupViolation",
+            Error::SubscriptionClosed => "SubscriptionClosed",
         }
         .to_owned()
     }
@@ -534,6 +580,14 @@ impl From<prost::EncodeError> for Error {
 
 impl From<otap_df_pdata::error::Error> for Error {
     fn from(e: otap_df_pdata::error::Error) -> Self {
+        Self::PDataError {
+            reason: e.to_string(),
+        }
+    }
+}
+
+impl From<otap_df_pdata::encode::Error> for Error {
+    fn from(e: otap_df_pdata::encode::Error) -> Self {
         Self::PDataError {
             reason: e.to_string(),
         }
