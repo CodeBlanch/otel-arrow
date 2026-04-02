@@ -329,9 +329,7 @@ impl DictionaryKeyArray<'_> {
         match self {
             DictionaryKeyArray::ArrayRef(a) => get_key_array_value_index_for_key_index(*a, index),
             DictionaryKeyArray::ArrayOwned(a) => get_key_array_value_index_for_key_index(a, index),
-            DictionaryKeyArray::BooleanRef(a) => {
-                get_bool_array_value_index_for_key_index(a, index)
-            }
+            DictionaryKeyArray::BooleanRef(a) => get_bool_array_value_index_for_key_index(a, index),
             DictionaryKeyArray::BooleanOwned(a) => {
                 get_bool_array_value_index_for_key_index(a, index)
             }
@@ -878,9 +876,7 @@ where
     let mut null_index = None;
 
     for (key_index, value_index) in keys.into_iter().enumerate() {
-        if let Some(value_index) =
-            value_index.map(<K as ArrowPrimitiveType>::Native::as_usize)
-        {
+        if let Some(value_index) = value_index.map(<K as ArrowPrimitiveType>::Native::as_usize) {
             match value_index_lookup.entry(value_index) {
                 Entry::Occupied(o) => {
                     if let Some(value_index) = o.get() {

@@ -142,7 +142,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
         Ok(())
     }
 
-    pub fn push_records<'c, TRecordFactory: ColumnarRecordsFactory<BATCH_SIZE>>(
+    pub fn push_records<TRecordFactory: ColumnarRecordsFactory<BATCH_SIZE>>(
         &mut self,
         factory: &TRecordFactory,
         mut batches: [Option<RecordBatch>; BATCH_SIZE],
