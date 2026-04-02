@@ -52,7 +52,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 None
             };
 
-            OtapLogRecordBatch::new(self.diagnostic_level.clone(), logs, logs_schema, attributes)
+            OtapLogRecordBatch::new(self.diagnostic_level, logs, logs_schema, attributes)
         } else {
             OtapLogRecordBatch::new_empty()
         }
@@ -172,7 +172,7 @@ impl<'record> OtapLogRecordBatch<'record> {
 
 impl ColumnarRecords for OtapLogRecordBatch<'_> {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
-        self.diagnostic_level.clone()
+        self.diagnostic_level
     }
 
     fn len(&self) -> usize {

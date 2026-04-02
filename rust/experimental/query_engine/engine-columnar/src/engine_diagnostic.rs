@@ -73,7 +73,7 @@ impl<'a> ColumnarEngineDiagnostic<'a> {
     }
 
     pub fn get_diagnostic_level(&self) -> ColumnarEngineDiagnosticLevel {
-        self.diagnostic_level.clone()
+        self.diagnostic_level
     }
 
     pub fn get_expression(&self) -> &dyn Expression {

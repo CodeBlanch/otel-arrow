@@ -151,14 +151,14 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 
         let diagnostic_level = records
             .get_diagnostic_level()
-            .unwrap_or(self.engine.diagnostic_level.clone());
+            .unwrap_or(self.engine.diagnostic_level);
 
         let mut current_batch_record_count = records.len();
 
         let pipeline = &self.engine.pipeline;
 
         let mut execution_context = ExecutionContext::new(
-            diagnostic_level.clone(),
+            diagnostic_level,
             //&self.engine.external_function_implementations,
             &self.diagnostics,
             pipeline,
@@ -198,7 +198,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                         current_batch_record_count - new_records.len();
 
                                     execution_context = ExecutionContext::new(
-                                        diagnostic_level.clone(),
+                                        diagnostic_level,
                                         //&self.engine.external_function_implementations,
                                         &self.diagnostics,
                                         pipeline,
