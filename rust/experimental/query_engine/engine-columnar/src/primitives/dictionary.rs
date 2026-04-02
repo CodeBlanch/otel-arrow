@@ -330,7 +330,7 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayRef(a) => get_key_array_value_index_for_key_index(*a, index),
             DictionaryKeyArray::ArrayOwned(a) => get_key_array_value_index_for_key_index(a, index),
             DictionaryKeyArray::BooleanRef(a) => {
-                get_bool_array_value_index_for_key_index(*a, index)
+                get_bool_array_value_index_for_key_index(a, index)
             }
             DictionaryKeyArray::BooleanOwned(a) => {
                 get_bool_array_value_index_for_key_index(a, index)
@@ -511,11 +511,7 @@ impl<'a> DictionaryValueArray<'a> {
             DictionaryValueArray::ArrayRef(a) => get_value_from_array(*a, index),
             DictionaryValueArray::VecAnyOwned(a) => Some((&a[index]).into()),
             DictionaryValueArray::IndexAnyOwned(a) => a.get_index(index).map(|v| v.into()),
-            DictionaryValueArray::Boolean => Some(ValueOrRef::BooleanOwned(if index == 0 {
-                false
-            } else {
-                true
-            })),
+            DictionaryValueArray::Boolean => Some(ValueOrRef::BooleanOwned(index != 0)),
         }
     }
 
@@ -597,7 +593,7 @@ where
         DataType::Int64 => value
             .as_primitive::<Int64Type>()
             .into_iter()
-            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v))))
+            .map(|v| transform(diagnostic_receiver, v.map(ValueOrRef::IntegerOwned)))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         DataType::UInt8 => value
@@ -664,18 +660,18 @@ where
         DataType::Float64 => value
             .as_primitive::<Float64Type>()
             .into_iter()
-            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(v))))
+            .map(|v| transform(diagnostic_receiver, v.map(ValueOrRef::DoubleOwned)))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         DataType::Utf8 => value
             .as_string::<i32>()
             .into_iter()
-            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
+            .map(|v| transform(diagnostic_receiver, v.map(ValueOrRef::StringRef)))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::LargeUtf8 => value
             .as_string::<i64>()
             .into_iter()
-            .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
+            .map(|v| transform(diagnostic_receiver, v.map(ValueOrRef::StringRef)))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         _ => todo!(),
@@ -883,7 +879,7 @@ where
 
     for (key_index, value_index) in keys.into_iter().enumerate() {
         if let Some(value_index) =
-            value_index.map(|v| <K as ArrowPrimitiveType>::Native::as_usize(v))
+            value_index.map(<K as ArrowPrimitiveType>::Native::as_usize)
         {
             match value_index_lookup.entry(value_index) {
                 Entry::Occupied(o) => {
