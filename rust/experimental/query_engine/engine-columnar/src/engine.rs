@@ -1,11 +1,11 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(unused)]
-#![warn(unused_imports)]
-
 use std::{
-    cell::RefCell, collections::HashSet, fmt::{Debug, Display, Write}, hash::{Hash, Hasher}
+    cell::RefCell,
+    collections::HashSet,
+    fmt::{Debug, Display, Write},
+    hash::{Hash, Hasher},
 };
 
 use arrow::array::*;
@@ -35,7 +35,7 @@ impl ColumnarEngineOptions {
     pub fn new() -> ColumnarEngineOptions {
         Self {
             diagnostic_level: ColumnarEngineDiagnosticLevel::Warn,
-            summary_cardinality_limit: 8192
+            summary_cardinality_limit: 8192,
         }
     }
 
@@ -56,10 +56,11 @@ impl ColumnarEngineOptions {
     }
 }
 
+#[derive(Debug)]
 pub struct ColumnarEngine {
     diagnostic_level: ColumnarEngineDiagnosticLevel,
     summary_cardinality_limit: usize,
-    pipeline: PipelineExpression
+    pipeline: PipelineExpression,
 }
 
 impl ColumnarEngine {
@@ -67,29 +68,36 @@ impl ColumnarEngine {
         Self::new_with_options(pipeline, ColumnarEngineOptions::new())
     }
 
-    pub fn new_with_options(mut pipeline: PipelineExpression, options: ColumnarEngineOptions) -> ColumnarEngine {
+    pub fn new_with_options(
+        mut pipeline: PipelineExpression,
+        options: ColumnarEngineOptions,
+    ) -> ColumnarEngine {
         for expression in pipeline.get_expressions_mut() {
             if let DataExpression::Discard(d) = expression
-                && let Some(predicate) = d.get_predicate_mut() {
-                    if let LogicalExpression::Not(n) = predicate {
-                        // Note: If the predicate is a Not() we remove that and
-                        // just call the inner expression. The reason for this
-                        // is arrow filter operation works inversely to what the
-                        // expression tree is set up to express.
-                        *predicate = n.get_inner_expression().clone();
-                    } else {
-                        // Note: If the predicate is something other than Not()
-                        // we introduce one to invert the expression logic to
-                        // match arrow filter behavior.
-                        *predicate = LogicalExpression::Not(NotLogicalExpression::new(predicate.get_query_location().clone(), predicate.clone()));
-                    }
+                && let Some(predicate) = d.get_predicate_mut()
+            {
+                if let LogicalExpression::Not(n) = predicate {
+                    // Note: If the predicate is a Not() we remove that and
+                    // just call the inner expression. The reason for this
+                    // is arrow filter operation works inversely to what the
+                    // expression tree is set up to express.
+                    *predicate = n.get_inner_expression().clone();
+                } else {
+                    // Note: If the predicate is something other than Not()
+                    // we introduce one to invert the expression logic to
+                    // match arrow filter behavior.
+                    *predicate = LogicalExpression::Not(NotLogicalExpression::new(
+                        predicate.get_query_location().clone(),
+                        predicate.clone(),
+                    ));
+                }
             }
         }
 
         Self {
             diagnostic_level: options.diagnostic_level,
             summary_cardinality_limit: options.summary_cardinality_limit,
-            pipeline
+            pipeline,
         }
     }
 
@@ -111,20 +119,20 @@ pub struct ColumnarEngineBatch<'a, const BATCH_SIZE: usize> {
     diagnostics: RefCell<Vec<ColumnarEngineDiagnostic<'a>>>,
     //global_variables: RefCell<MapValueStorage<OwnedValue>>,
     //summaries: Summaries<'a>,
-    included_records: Vec<[Option<RecordBatch>; BATCH_SIZE]>,
+    included_batches: Vec<[Option<RecordBatch>; BATCH_SIZE]>,
+    included_record_count: usize,
     dropped_record_count: usize,
 }
 
 impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
-    pub(crate) fn new(
-        engine: &'a ColumnarEngine,
-    ) -> ColumnarEngineBatch<'a, BATCH_SIZE> {
+    pub(crate) fn new(engine: &'a ColumnarEngine) -> ColumnarEngineBatch<'a, BATCH_SIZE> {
         Self {
             engine,
             diagnostics: RefCell::new(Vec::new()),
             //global_variables: RefCell::new(MapValueStorage::new(HashMap::new())),
             //summaries: Summaries::new(engine.summary_cardinality_limit),
-            included_records: Vec::new(),
+            included_batches: Vec::new(),
+            included_record_count: 0,
             dropped_record_count: 0,
         }
     }
@@ -136,15 +144,16 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 
     pub fn push_records<'c, TRecordFactory: ColumnarRecordsFactory<BATCH_SIZE>>(
         &mut self,
+        factory: &TRecordFactory,
         mut batches: [Option<RecordBatch>; BATCH_SIZE],
     ) {
-        let records = TRecordFactory::create(&batches);
+        let records = factory.create(&batches);
 
         let diagnostic_level = records
             .get_diagnostic_level()
             .unwrap_or(self.engine.diagnostic_level.clone());
 
-        let mut included_record_count = records.len();
+        let mut current_batch_record_count = records.len();
 
         let pipeline = &self.engine.pipeline;
 
@@ -167,7 +176,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                         match execute_logical_expression(&execution_context, predicate) {
                             Ok(logical_result) => {
                                 if let Some(s) = logical_result.as_single() {
-                                    if !s {
+                                    if s {
                                         execution_context.add_diagnostic_if_enabled(
                                             ColumnarEngineDiagnosticLevel::Verbose,
                                             d,
@@ -177,16 +186,16 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                     }
                                 } else if let Some(a) = logical_result.as_array() {
                                     let new_batches =
-                                        TRecordFactory::filter(execution_context.get_records().unwrap(), a);
+                                        factory.filter(execution_context.get_records().unwrap(), a);
 
                                     std::mem::drop(execution_context);
 
                                     batches = new_batches;
 
-                                    let new_records = TRecordFactory::create(&batches);
+                                    let new_records = factory.create(&batches);
 
                                     let dropped_count =
-                                        included_record_count - new_records.len();
+                                        current_batch_record_count - new_records.len();
 
                                     execution_context = ExecutionContext::new(
                                         diagnostic_level.clone(),
@@ -200,7 +209,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                         //None,
                                     );
 
-                                    included_record_count -= dropped_count;
+                                    current_batch_record_count -= dropped_count;
                                     self.dropped_record_count += dropped_count;
 
                                     execution_context.add_diagnostic_if_enabled(
@@ -231,26 +240,30 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                         || "All records dropped".into(),
                     );
 
-                    self.dropped_record_count += included_record_count;
+                    self.dropped_record_count += current_batch_record_count;
 
                     return;
                 }
                 DataExpression::Summary(s) => todo!(),
                 DataExpression::Transform(t) => todo!(),
                 DataExpression::Conditional(c) => todo!(),
+                DataExpression::Output(o) => todo!(),
             }
         }
 
         std::mem::drop(execution_context);
 
-        self.included_records.push(batches);
+        self.included_record_count += current_batch_record_count;
+
+        self.included_batches.push(batches);
     }
 
     pub fn flush(self) -> ColumnarEngineResults<'a, BATCH_SIZE> {
         ColumnarEngineResults {
             pipeline: &self.engine.pipeline,
+            included_batches: self.included_batches,
+            included_record_count: self.included_record_count,
             dropped_record_count: self.dropped_record_count,
-            included_batches: self.included_records,
             diagnostics: self.diagnostics.take(),
         }
     }
@@ -259,8 +272,9 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 #[derive(Debug)]
 pub struct ColumnarEngineResults<'a, const BATCH_SIZE: usize> {
     pub pipeline: &'a PipelineExpression,
-    pub dropped_record_count: usize,
     pub included_batches: Vec<[Option<RecordBatch>; BATCH_SIZE]>,
+    pub included_record_count: usize,
+    pub dropped_record_count: usize,
     pub diagnostics: Vec<ColumnarEngineDiagnostic<'a>>,
 }
 
@@ -271,11 +285,14 @@ impl<const BATCH_SIZE: usize> Display for ColumnarEngineResults<'_, BATCH_SIZE> 
 }
 
 pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
-    type Records<'a>: ColumnarRecords where Self: 'a;
+    type Records<'a>: ColumnarRecords
+    where
+        Self: 'a;
 
-    fn create<'a>(batches: &'a [Option<RecordBatch>]) -> Self::Records<'a>;//impl ColumnarRecords;
+    fn create<'a>(&self, batches: &'a [Option<RecordBatch>]) -> Self::Records<'a>;
 
     fn filter(
+        &self,
         batch: &Self::Records<'_>,
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; BATCH_SIZE];
@@ -380,32 +397,87 @@ impl<'a, 'b> From<&'b ValueOrRef<'a>> for ValueOrRef<'b> {
 
 impl Hash for ValueOrRef<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        core::mem::discriminant(self).hash(state);
+        //core::mem::discriminant(self).hash(state);
         match self {
-            ValueOrRef::StringRef(s) => s.hash(state),
-            ValueOrRef::StringOwned(s) => s.hash(state),
-            ValueOrRef::IntegerRef(i) => i.get_value().hash(state),
-            ValueOrRef::IntegerOwned(i) => i.hash(state),
-            ValueOrRef::DoubleRef(d) => state.write_u64(d.get_value().to_bits()),
-            ValueOrRef::DoubleOwned(d) => state.write_u64(d.to_bits()),
-            ValueOrRef::BooleanOwned(b) => b.hash(state),
-            ValueOrRef::DateTimeOwned(d) => d.hash(state),
-            ValueOrRef::TimeSpanOwned(t) => t.hash(state),
-            ValueOrRef::RegexRef(r) => r.as_str().hash(state),
-            ValueOrRef::RegexOwned(r) => r.as_str().hash(state),
+            ValueOrRef::StringRef(s) => {
+                [0].hash(state);
+                s.hash(state);
+            }
+            ValueOrRef::StringOwned(s) => {
+                [0].hash(state);
+                s.hash(state);
+            }
+            ValueOrRef::IntegerRef(i) => {
+                [1].hash(state);
+                i.get_value().hash(state);
+            }
+            ValueOrRef::IntegerOwned(i) =>{
+                [1].hash(state);
+                i.get_value().hash(state);
+            }
+            ValueOrRef::DoubleRef(d) => {
+                [2].hash(state);
+                state.write_u64(d.get_value().to_bits());
+            }
+            ValueOrRef::DoubleOwned(d) => {
+                [2].hash(state);
+                state.write_u64(d.get_value().to_bits());
+            }
+            ValueOrRef::BooleanOwned(b) => {
+                [3].hash(state);
+                b.hash(state);
+            }
+            ValueOrRef::DateTimeOwned(d) => {
+                [4].hash(state);
+                d.hash(state);
+            }
+            ValueOrRef::TimeSpanOwned(t) => {
+                [5].hash(state);
+                t.hash(state);
+            }
+            ValueOrRef::RegexRef(r) => {
+                [6].hash(state);
+                r.as_str().hash(state);
+            }
+            ValueOrRef::RegexOwned(r) => {
+                [6].hash(state);
+                r.as_str().hash(state);
+            }
         }
     }
 }
 
 impl PartialEq for ValueOrRef<'_> {
     fn eq(&self, other: &Self) -> bool {
-        Value::are_values_equal(
-            &QueryLocation::new_fake(),
-            &self.to_value(),
-            &other.to_value(),
-            false,
-        )
-        .unwrap_or(false)
+        match self {
+            ValueOrRef::StringRef(s) => eq_str(s, other),
+            ValueOrRef::StringOwned(s) => eq_str(s, other),
+            ValueOrRef::IntegerRef(i) => eq_int(i.get_value(), other),
+            ValueOrRef::IntegerOwned(i) => eq_int(*i, other),
+            ValueOrRef::DoubleRef(d) => todo!(),
+            ValueOrRef::DoubleOwned(d) => todo!(),
+            ValueOrRef::BooleanOwned(b) => todo!(),
+            ValueOrRef::DateTimeOwned(d) => todo!(),
+            ValueOrRef::TimeSpanOwned(t) => todo!(),
+            ValueOrRef::RegexRef(r) => todo!(),
+            ValueOrRef::RegexOwned(r) => todo!(),
+        }
+    }
+}
+
+fn eq_str(left: &str, right: &ValueOrRef) -> bool {
+    match right {
+        ValueOrRef::StringRef(s) => left == *s,
+        ValueOrRef::StringOwned(s) => left == s,
+        _ => false
+    }
+}
+
+fn eq_int(left: i64, right: &ValueOrRef) -> bool {
+    match right {
+        ValueOrRef::IntegerRef(i) => left == i.get_value(),
+        ValueOrRef::IntegerOwned(i) => left == *i,
+        _ => false
     }
 }
 
@@ -445,7 +517,7 @@ impl AsValue for ValueOrRef<'_> {
     }
 }
 
-fn format_diagnostics(
+pub fn format_diagnostics(
     query: &str,
     diagnostics: &[ColumnarEngineDiagnostic<'_>],
     f: &mut std::fmt::Formatter<'_>,

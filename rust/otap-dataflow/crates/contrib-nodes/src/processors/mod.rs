@@ -1,6 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+/// Columnar KQL OTAP Query Engine processor
+#[cfg(feature = "columnar-kql-processor")]
+pub mod columnar_kql_processor;
+
 /// Condense Attributes processor
 #[cfg(feature = "condense-attributes-processor")]
 pub mod condense_attributes_processor;

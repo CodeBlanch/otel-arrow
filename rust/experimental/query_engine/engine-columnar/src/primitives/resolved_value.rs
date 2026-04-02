@@ -16,31 +16,20 @@ pub(crate) enum ResolvedValue<'a> {
 }
 
 impl<'a> ResolvedValue<'a> {
-    pub fn as_single(&self) -> Option<&ResolvedSingleValue<'a>> {
+    pub fn map_into<FSingle, FDictionary, FTable, FRet>(
+        self,
+        mut when_single: FSingle,
+        mut when_dictionary: FDictionary,
+        mut when_table: FTable,
+    ) -> Result<FRet, ExpressionError>
+    where
+        FSingle: FnMut(ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
+        FDictionary: FnMut(Dictionary<'a>) -> Result<FRet, ExpressionError>,
+        FTable: FnMut(&'a dyn RecordTable) -> Result<FRet, ExpressionError> {
         match self {
-            ResolvedValue::Single(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn into_single(self) -> Result<ResolvedSingleValue<'a>, ResolvedValue<'a>> {
-        match self {
-            ResolvedValue::Single(s) => Ok(s),
-            _ => Err(self),
-        }
-    }
-
-    pub fn as_dictionary(&self) -> Option<&Dictionary<'a>> {
-        match self {
-            ResolvedValue::Dictionary(t) => Some(t),
-            _ => None,
-        }
-    }
-
-    pub fn into_dictionary(self) -> Result<Dictionary<'a>, ResolvedValue<'a>> {
-        match self {
-            ResolvedValue::Dictionary(t) => Ok(t),
-            _ => Err(self),
+            ResolvedValue::Single(single) => when_single(single),
+            ResolvedValue::Dictionary(dictionary) => when_dictionary(dictionary),
+            ResolvedValue::Table(table) => when_table(table)
         }
     }
 }
@@ -155,13 +144,12 @@ impl Display for ResolvedBooleanValue<'_> {
                 if a.is_null(key) {
                     write!(f, "{key}:Null")?;
                 } else {
-                    let value = unsafe{ a.value_unchecked(key) };
+                    let value = unsafe { a.value_unchecked(key) };
                     write!(f, "{key}:Boolean({value})")?;
                 }
             }
             f.write_char('}')
-        }
-        else {
+        } else {
             unreachable!()
         }
     }

@@ -19,63 +19,94 @@ where
 {
     let value = match logical_expression {
         LogicalExpression::Scalar(s) => {
-            let value = execute_scalar_expression(execution_context, s)?;
+            let inner_value = execute_scalar_expression(execution_context, s)?;
 
-            if let Some(single) = value.as_single() {
-                if let Some(b) = single.to_value().convert_to_bool() {
-                    ResolvedBooleanValue::Single(b)
-                } else {
-                    return Err(ExpressionError::TypeMismatch(
+            inner_value.map_into(
+                |single| {
+                    if let Some(b) = single.to_value().convert_to_bool() {
+                        Ok(ResolvedBooleanValue::Single(b))
+                    } else {
+                        Err(ExpressionError::TypeMismatch(
+                            s.get_query_location().clone(),
+                            format!(
+                                "Value of '{:?}' type returned by scalar expression could not be converted to bool",
+                                single.get_value_type()
+                            ),
+                        ))
+                    }
+                },
+                |dictionary| {
+                    let (keys, values) = dictionary.into_parts();
+                    Ok(if let DictionaryKeyArray::BooleanRef(a) = keys {
+                        ResolvedBooleanValue::ArrayRef(a)
+                    } else if let DictionaryKeyArray::BooleanOwned(a) = keys {
+                        ResolvedBooleanValue::ArrayOwned(a)
+                    } else {
+                        ResolvedBooleanValue::ArrayOwned(
+                            Dictionary::new(keys, values).transform_into_boolean(
+                                &execution_context.create_diagnostic_receiver_for_expression(s),
+                                |_, v| {
+                                    let value = v.as_ref().map(|v| v.to_value()).unwrap_or_else(|| Value::Null);
+
+                                    if let Some(b) = value.convert_to_bool() {
+                                        Ok(Some(b))
+                                    } else {
+                                        Err(ExpressionError::TypeMismatch(
+                                            s.get_query_location().clone(),
+                                            format!(
+                                                "Value of '{:?}' type returned by scalar expression could not be converted to bool",
+                                                value.get_value_type()
+                                            ),
+                                        ))
+                                    }
+                                },
+                            )?,
+                        )
+                    })
+                },
+                |_| {
+                    Err(ExpressionError::TypeMismatch(
                         s.get_query_location().clone(),
-                        format!(
-                            "Value of '{:?}' type returned by scalar expression could not be converted to bool",
-                            single.get_value_type()
-                        ),
-                    ));
+                        "Table type returned by scalar expression could not be converted to bool".into(),
+                    ))
                 }
-            } else if let Ok(t) = value.into_dictionary() {
-                let (keys, values) = t.into_parts();
-                if let DictionaryKeyArray::BooleanRef(a) = keys {
-                    ResolvedBooleanValue::ArrayRef(a)
-                } else if let DictionaryKeyArray::BooleanOwned(a) = keys {
-                    ResolvedBooleanValue::ArrayOwned(a)
-                } else {
-                    ResolvedBooleanValue::ArrayOwned(
-                        Dictionary::new(keys, values).transform_into_boolean(
-                            &execution_context.create_diagnostic_receiver_for_expression(s),
-                            |_, v| {
-                                if let Some(v) = v.as_ref().map(|v| v.to_value()) {
-                                    v.convert_to_bool()
-                                } else {
-                                    None
-                                }
-                            },
-                        )?,
-                    )
-                }
-            } else {
-                todo!()
-            }
+            )?
         }
         LogicalExpression::EqualTo(e) => compare(
             e.get_query_location(),
-            &execute_scalar_expression(execution_context, e.get_left())?,
-            &execute_scalar_expression(execution_context, e.get_right())?,
+            &execution_context.create_diagnostic_receiver_for_expression(e),
+            execute_scalar_expression(execution_context, e.get_left())?,
+            execute_scalar_expression(execution_context, e.get_right())?,
             |l, r| {
-                Value::are_values_equal(e.get_query_location(), &l, &r, e.get_case_insensitive())
+                Value::are_values_equal(e.get_query_location(), l, r, e.get_case_insensitive())
             },
         )?,
         LogicalExpression::GreaterThan(g) => compare(
             g.get_query_location(),
-            &execute_scalar_expression(execution_context, g.get_left())?,
-            &execute_scalar_expression(execution_context, g.get_right())?,
-            |l, r| Ok(Value::compare_values(g.get_query_location(), &l, &r)? > 0),
+            &execution_context.create_diagnostic_receiver_for_expression(g),
+            execute_scalar_expression(execution_context, g.get_left())?,
+            execute_scalar_expression(execution_context, g.get_right())?,
+            |l, r| {
+                Ok(match (l, r) {
+                    (Value::Null, _) => false,
+                    (_, Value::Null) => false,
+                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? > 0
+                })
+            }
         )?,
         LogicalExpression::GreaterThanOrEqualTo(g) => compare(
             g.get_query_location(),
-            &execute_scalar_expression(execution_context, g.get_left())?,
-            &execute_scalar_expression(execution_context, g.get_right())?,
-            |l, r| Ok(Value::compare_values(g.get_query_location(), &l, &r)? >= 0),
+            &execution_context.create_diagnostic_receiver_for_expression(g),
+            execute_scalar_expression(execution_context, g.get_left())?,
+            execute_scalar_expression(execution_context, g.get_right())?,
+            |l, r| {
+                Ok(match (l, r) {
+                    (Value::Null, Value::Null) => true,
+                    (Value::Null, _) => false,
+                    (_, Value::Null) => false,
+                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? >= 0
+                })
+            }
         )?,
         LogicalExpression::Not(n) => {
             match execute_logical_expression(execution_context, n.get_inner_expression())? {
@@ -89,129 +120,85 @@ where
             }
         }
         LogicalExpression::And(a) => {
-            match execute_logical_expression(execution_context, a.get_left())? {
-                ResolvedBooleanValue::Single(l) => {
-                    if !l {
-                        // todo: Log
-                        ResolvedBooleanValue::Single(false)
-                    } else {
-                        match execute_logical_expression(execution_context, a.get_right())? {
-                            ResolvedBooleanValue::Single(r) => ResolvedBooleanValue::Single(r),
-                            ResolvedBooleanValue::ArrayRef(a) => ResolvedBooleanValue::ArrayRef(a),
-                            ResolvedBooleanValue::ArrayOwned(a) => {
-                                ResolvedBooleanValue::ArrayOwned(a)
-                            }
+            let left = execute_logical_expression(execution_context, a.get_left())?;
+
+            if let Some(left) = left.as_single() {
+                if !left {
+                    ResolvedBooleanValue::Single(false)
+                } else {
+                    execute_logical_expression(execution_context, a.get_right())?
+                }
+            } else if let Some(left_array) = left.as_array() {
+                if left_array.false_count() == left_array.len() {
+                    ResolvedBooleanValue::Single(false)
+                } else {
+                    let right = execute_logical_expression(execution_context, a.get_right())?;
+
+                    if let Some(right) = right.as_single() {
+                        if !right {
+                            ResolvedBooleanValue::Single(false)
+                        } else {
+                            left
                         }
+                    } else if let Some(right) = right.as_array() {
+                        ResolvedBooleanValue::ArrayOwned(
+                            arrow::compute::and(
+                                left_array,
+                                right).expect("and operation failed"))
+                    } else {
+                        unreachable!("right wasn't a single or an array")
                     }
                 }
-                ResolvedBooleanValue::ArrayRef(l) => {
-                    let right = execute_logical_expression(execution_context, a.get_right())?;
-
-                    compare(
-                        a.get_query_location(),
-                        &ResolvedValue::Dictionary(l.into()),
-                        &right.into(),
-                        |l, r| {
-                            Ok(match (l, r) {
-                                (Value::Null, _) => false,
-                                (_, Value::Null) => false,
-                                (Value::Boolean(l), Value::Boolean(r)) => {
-                                    l.get_value() && r.get_value()
-                                }
-                                _ => unreachable!(),
-                            })
-                        },
-                    )?
-                }
-                ResolvedBooleanValue::ArrayOwned(l) => {
-                    let right = execute_logical_expression(execution_context, a.get_right())?;
-
-                    compare(
-                        a.get_query_location(),
-                        &ResolvedValue::Dictionary(l.into()),
-                        &right.into(),
-                        |l, r| {
-                            Ok(match (l, r) {
-                                (Value::Null, _) => false,
-                                (_, Value::Null) => false,
-                                (Value::Boolean(l), Value::Boolean(r)) => {
-                                    l.get_value() && r.get_value()
-                                }
-                                _ => unreachable!(),
-                            })
-                        },
-                    )?
-                }
+            } else {
+                unreachable!("left wasn't a single or an array")
             }
         }
         LogicalExpression::Or(o) => {
-            match execute_logical_expression(execution_context, o.get_left())? {
-                ResolvedBooleanValue::Single(l) => {
-                    if l {
-                        // todo: Log
-                        ResolvedBooleanValue::Single(true)
-                    } else {
-                        match execute_logical_expression(execution_context, o.get_right())? {
-                            ResolvedBooleanValue::Single(r) => ResolvedBooleanValue::Single(r),
-                            ResolvedBooleanValue::ArrayRef(a) => ResolvedBooleanValue::ArrayRef(a),
-                            ResolvedBooleanValue::ArrayOwned(a) => {
-                                ResolvedBooleanValue::ArrayOwned(a)
-                            }
+            let left = execute_logical_expression(execution_context, o.get_left())?;
+
+            if let Some(left) = left.as_single() {
+                if left {
+                    ResolvedBooleanValue::Single(true)
+                } else {
+                    execute_logical_expression(execution_context, o.get_right())?
+                }
+            } else if let Some(left_array) = left.as_array() {
+                if left_array.true_count() == left_array.len() {
+                    ResolvedBooleanValue::Single(true)
+                } else {
+                    let right = execute_logical_expression(execution_context, o.get_right())?;
+
+                    if let Some(right) = right.as_single() {
+                        if right {
+                            ResolvedBooleanValue::Single(true)
+                        } else {
+                            left
                         }
+                    } else if let Some(right) = right.as_array() {
+                        ResolvedBooleanValue::ArrayOwned(
+                            arrow::compute::or(
+                                left_array,
+                                right).expect("or operation failed"))
+                    } else {
+                        unreachable!("right wasn't a single or an array")
                     }
                 }
-                ResolvedBooleanValue::ArrayRef(l) => {
-                    let right = execute_logical_expression(execution_context, o.get_right())?;
-
-                    compare(
-                        o.get_query_location(),
-                        &ResolvedValue::Dictionary(l.into()),
-                        &right.into(),
-                        |l, r| {
-                            Ok(match (l, r) {
-                                (Value::Null, Value::Null) => false,
-                                (Value::Boolean(l), Value::Null) => l.get_value(),
-                                (Value::Null, Value::Boolean(r)) => r.get_value(),
-                                (Value::Boolean(l), Value::Boolean(r)) => {
-                                    l.get_value() || r.get_value()
-                                }
-                                _ => unreachable!(),
-                            })
-                        },
-                    )?
-                }
-                ResolvedBooleanValue::ArrayOwned(l) => {
-                    let right = execute_logical_expression(execution_context, o.get_right())?;
-
-                    compare(
-                        o.get_query_location(),
-                        &ResolvedValue::Dictionary(l.into()),
-                        &right.into(),
-                        |l, r| {
-                            Ok(match (l, r) {
-                                (Value::Null, Value::Null) => false,
-                                (Value::Boolean(l), Value::Null) => l.get_value(),
-                                (Value::Null, Value::Boolean(r)) => r.get_value(),
-                                (Value::Boolean(l), Value::Boolean(r)) => {
-                                    l.get_value() || r.get_value()
-                                }
-                                _ => unreachable!(),
-                            })
-                        },
-                    )?
-                }
+            } else {
+                unreachable!("left wasn't a single or an array")
             }
         }
         LogicalExpression::Contains(c) => compare(
             c.get_query_location(),
-            &execute_scalar_expression(execution_context, c.get_haystack())?,
-            &execute_scalar_expression(execution_context, c.get_needle())?,
+            &execution_context.create_diagnostic_receiver_for_expression(c),
+            execute_scalar_expression(execution_context, c.get_haystack())?,
+            execute_scalar_expression(execution_context, c.get_needle())?,
             |l, r| Value::contains(c.get_query_location(), &l, &r, c.get_case_insensitive()),
         )?,
         LogicalExpression::Matches(m) => compare(
             m.get_query_location(),
-            &execute_scalar_expression(execution_context, m.get_haystack())?,
-            &execute_scalar_expression(execution_context, m.get_pattern())?,
+            &execution_context.create_diagnostic_receiver_for_expression(m),
+            execute_scalar_expression(execution_context, m.get_haystack())?,
+            execute_scalar_expression(execution_context, m.get_pattern())?,
             |l, r| Value::matches(m.get_query_location(), &l, &r),
         )?,
     };
@@ -225,160 +212,112 @@ where
     Ok(value)
 }
 
-fn compare<'record, F>(
+fn compare<'record, D: DiagnosticReceiver, F>(
     query_location: &QueryLocation,
-    left: &ResolvedValue<'_>,
-    right: &ResolvedValue<'_>,
+    diagnostic_receiver: &D,
+    left: ResolvedValue<'_>,
+    right: ResolvedValue<'_>,
     compare: F,
 ) -> Result<ResolvedBooleanValue<'record>, ExpressionError>
 where
-    F: Fn(Value, Value) -> Result<bool, ExpressionError>,
+    F: Fn(&Value, &Value) -> Result<bool, ExpressionError>,
 {
-    let single_left = left.as_single();
-    let single_right = right.as_single();
+    let (left_single, left_dictionary) = match left {
+        ResolvedValue::Single(s) => (Some(s), None),
+        ResolvedValue::Dictionary(d) => (None, Some(d)),
+        _ => unreachable!()
+    };
 
-    let value = if let Some(left) = single_left
-        && let Some(right) = single_right
-    {
-        ResolvedBooleanValue::Single(compare(left.to_value(), right.to_value())?)
-    } else if let Some(left) = left.as_dictionary()
-        && let Some(right) = single_right
-    {
-        ResolvedBooleanValue::ArrayOwned(compare_table_to_single(left, right, compare)?)
-    } else if let Some(left) = single_left
-        && let Some(right) = right.as_dictionary()
-    {
-        ResolvedBooleanValue::ArrayOwned(compare_single_to_table(left, right, compare)?)
-    } else if let Some(left) = left.as_dictionary()
-        && let Some(right) = right.as_dictionary()
-    {
-        ResolvedBooleanValue::ArrayOwned(compare_table_to_table(
+    let (right_single, right_dictionary) = match right {
+        ResolvedValue::Single(s) => (Some(s), None),
+        ResolvedValue::Dictionary(d) => (None, Some(d)),
+        _ => unreachable!()
+    };
+
+    let value = if let Some(left) = left_single {
+        if let Some(right) = right_single {
+            ResolvedBooleanValue::Single(compare(&left.to_value(), &right.to_value())?)
+        }
+        else {
+            ResolvedBooleanValue::ArrayOwned(compare_single_to_dictionary(
+                diagnostic_receiver,
+                &left,
+                right_dictionary.expect("right is dictionary"),
+                compare)?)
+        }
+    } else if let Some(right) = right_single {
+        ResolvedBooleanValue::ArrayOwned(
+            compare_dictionary_to_single(
+                diagnostic_receiver,
+                left_dictionary.expect("left is dictionary"),
+                &right,
+                compare)?)
+    } else {
+        ResolvedBooleanValue::ArrayOwned(compare_dictionary_to_dictionary(
             query_location,
-            left,
-            right,
+            left_dictionary.expect("left is dictionary"),
+            right_dictionary.expect("right is dictionary"),
             compare,
         )?)
-    } else {
-        todo!()
     };
 
     Ok(value)
 }
 
-fn compare_table_to_single<F>(
-    dictionary: &Dictionary,
+fn compare_dictionary_to_single<D: DiagnosticReceiver, F>(
+    diagnostic_receiver: &D,
+    dictionary: Dictionary,
     value: &ResolvedSingleValue,
     compare: F,
 ) -> Result<BooleanArray, ExpressionError>
 where
-    F: Fn(Value, Value) -> Result<bool, ExpressionError>,
+    F: Fn(&Value, &Value) -> Result<bool, ExpressionError>,
 {
-    let source_keys = dictionary.keys();
-    let source_key_len = source_keys.len();
-    let source_values = dictionary.values();
+    let right = value.to_value();
 
-    let mut value_lookup = HashMap::with_capacity(source_values.len());
-    let mut null_value = None;
-
-    let mut builder = BooleanBuilder::with_capacity(source_key_len);
-
-    for source_key_index in 0..source_key_len {
-        match source_keys.get_value_index_for_key_index(source_key_index) {
-            Some(value_index) => {
-                let value = match value_lookup.entry(value_index) {
-                    Entry::Occupied(occupied) => *occupied.get(),
-                    Entry::Vacant(vacant) => {
-                        let source_value = source_values.get_value_at(*vacant.key());
-                        let value = compare(
-                            source_value.as_ref().map_or(Value::Null, |v| v.to_value()),
-                            value.to_value(),
-                        )?;
-
-                        vacant.insert(value);
-                        value
-                    }
-                };
-
-                builder.append_value(value);
-            }
+    dictionary.transform_into_boolean(diagnostic_receiver, |_, v| {
+        Ok(Some(match v {
             None => {
-                let v = match null_value {
-                    Some(v) => v,
-                    None => {
-                        let v = compare(Value::Null, value.to_value())?;
-                        null_value = Some(v);
-                        v
-                    }
-                };
-                builder.append_value(v);
+                compare(&Value::Null, &right)?
             }
-        }
-    }
-
-    Ok(builder.finish())
+            Some(v) => {
+                compare(&v.to_value(), &right)?
+            }
+        }))
+    })
 }
 
-fn compare_single_to_table<F>(
+fn compare_single_to_dictionary<D: DiagnosticReceiver, F>(
+    diagnostic_receiver: &D,
     value: &ResolvedSingleValue,
-    dictionary: &Dictionary,
+    dictionary: Dictionary,
     compare: F,
 ) -> Result<BooleanArray, ExpressionError>
 where
-    F: Fn(Value, Value) -> Result<bool, ExpressionError>,
+    F: Fn(&Value, &Value) -> Result<bool, ExpressionError>,
 {
-    let source_keys = dictionary.keys();
-    let source_key_len = source_keys.len();
-    let source_values = dictionary.values();
+    let left = value.to_value();
 
-    let mut value_lookup = HashMap::with_capacity(source_values.len());
-    let mut null_value = None;
-
-    let mut builder = BooleanBuilder::with_capacity(source_key_len);
-
-    for source_key_index in 0..source_key_len {
-        match source_keys.get_value_index_for_key_index(source_key_index) {
-            Some(value_index) => {
-                let value = match value_lookup.entry(value_index) {
-                    Entry::Occupied(occupied) => *occupied.get(),
-                    Entry::Vacant(vacant) => {
-                        let source_value = source_values.get_value_at(*vacant.key());
-                        let value = compare(
-                            value.to_value(),
-                            source_value.as_ref().map_or(Value::Null, |v| v.to_value()),
-                        )?;
-
-                        vacant.insert(value);
-                        value
-                    }
-                };
-
-                builder.append_value(value);
-            }
+    dictionary.transform_into_boolean(diagnostic_receiver, |_, v| {
+        Ok(Some(match v {
             None => {
-                let v = match null_value {
-                    Some(v) => v,
-                    None => {
-                        let v = compare(Value::Null, value.to_value())?;
-                        null_value = Some(v);
-                        v
-                    }
-                };
-                builder.append_value(v);
+                compare(&left, &Value::Null)?
             }
-        }
-    }
-
-    Ok(builder.finish())
+            Some(v) => {
+                compare(&left, &v.to_value())?
+            }
+        }))
+    })
 }
 
-fn compare_table_to_table<F>(
+fn compare_dictionary_to_dictionary<F>(
     query_location: &QueryLocation,
-    left: &Dictionary,
-    right: &Dictionary,
+    left: Dictionary,
+    right: Dictionary,
     compare: F,
 ) -> Result<BooleanArray, ExpressionError>
 where
-    F: Fn(Value, Value) -> Result<bool, ExpressionError>,
+    F: Fn(&Value, &Value) -> Result<bool, ExpressionError>,
 {
     let key_len = left.len();
 
@@ -415,8 +354,8 @@ where
                 let right_value = right_value_index.and_then(|i| right_values.get_value_at(i));
 
                 let value = compare(
-                    left_value.as_ref().map_or(Value::Null, |v| v.to_value()),
-                    right_value.as_ref().map_or(Value::Null, |v| v.to_value()),
+                    left_value.as_ref().map(|v| v.to_value()).as_ref().unwrap_or(&Value::Null),
+                    right_value.as_ref().map(|v| v.to_value()).as_ref().unwrap_or(&Value::Null),
                 )?;
 
                 vacant.insert(value);

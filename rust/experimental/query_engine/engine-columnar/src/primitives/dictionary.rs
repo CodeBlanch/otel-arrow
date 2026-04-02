@@ -2,15 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
-    fmt::{Display, Write},
-    hash::Hash,
-    sync::Arc,
+    cell::OnceCell, collections::hash_map::Entry, fmt::{Display, Write}, sync::Arc
 };
 
-use arrow::{array::*, datatypes::*};
+use ahash::{AHashMap, RandomState};
+use arrow::{array::*, buffer::{MutableBuffer}, datatypes::*};
 use data_engine_expressions::*;
-use indexmap::IndexSet;
+use indexmap::{IndexSet};
 
 use crate::*;
 
@@ -57,14 +55,14 @@ impl<'a> Dictionary<'a> {
         None
     }
 
-    pub(crate) fn get_len_dictionary<D: DiagnosticReceiver>(
-        &self,
+    pub(crate) fn into_len_dictionary<D: DiagnosticReceiver>(
+        self,
         diagnostic_receiver: &D,
     ) -> Result<Dictionary<'a>, ExpressionError> {
-        self.transform_into_primitive::<Int64Type, _, _>(diagnostic_receiver, |d, v| {
+        self.transform_into_any(diagnostic_receiver, |d, v| {
             match v {
-                Some(ValueOrRef::StringOwned(s)) => Some(s.chars().count() as i64),
-                Some(ValueOrRef::StringRef(s)) => Some(s.chars().count() as i64),
+                Some(ValueOrRef::StringOwned(s)) => Some(ValueOrRef::IntegerOwned(s.chars().count() as i64)),
+                Some(ValueOrRef::StringRef(s)) => Some(ValueOrRef::IntegerOwned(s.chars().count() as i64)),
                 // todo: Map
                 // todo: Array
                 Some(v) => {
@@ -82,12 +80,12 @@ impl<'a> Dictionary<'a> {
     }
 
     pub(crate) fn transform_into_boolean<D: DiagnosticReceiver, FTransform>(
-        &self,
+        self,
         diagnostic_receiver: &D,
         transform: FTransform,
     ) -> Result<BooleanArray, ExpressionError>
     where
-        FTransform: Fn(&D, Option<ValueOrRef<'_>>) -> Option<bool>,
+        FTransform: FnMut(&D, Option<ValueOrRef<'_>>) -> Result<Option<bool>, ExpressionError>,
     {
         let array = self.keys.as_array();
 
@@ -95,50 +93,50 @@ impl<'a> Dictionary<'a> {
             DataType::Int8 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int8Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::Int16 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int16Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::Int32 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int32Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::Int64 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int64Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
 
             DataType::UInt8 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt8Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::UInt16 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt16Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::UInt32 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt32Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::UInt64 => transform_boolean_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt64Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
 
@@ -146,86 +144,14 @@ impl<'a> Dictionary<'a> {
         }
     }
 
-    pub(crate) fn transform_into_primitive<
-        V: ArrowPrimitiveType,
-        D: DiagnosticReceiver,
-        FTransform,
-    >(
-        &self,
+    pub(crate) fn transform_into_any<D: DiagnosticReceiver, FTransform>(
+        self,
         diagnostic_receiver: &D,
         transform: FTransform,
     ) -> Result<Dictionary<'a>, ExpressionError>
     where
-        <V as ArrowPrimitiveType>::Native: Hash,
-        <V as ArrowPrimitiveType>::Native: Eq,
-        FTransform: Fn(&D, Option<ValueOrRef<'_>>) -> Option<V::Native>,
-    {
-        let array = self.keys.as_array();
 
-        match array.data_type() {
-            DataType::Int8 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<Int8Type>(),
-                &self.values,
-                transform,
-            ),
-            DataType::Int16 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<Int16Type>(),
-                &self.values,
-                transform,
-            ),
-            DataType::Int32 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<Int32Type>(),
-                &self.values,
-                transform,
-            ),
-            DataType::Int64 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<Int64Type>(),
-                &self.values,
-                transform,
-            ),
-
-            DataType::UInt8 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<UInt8Type>(),
-                &self.values,
-                transform,
-            ),
-            DataType::UInt16 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<UInt16Type>(),
-                &self.values,
-                transform,
-            ),
-            DataType::UInt32 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<UInt32Type>(),
-                &self.values,
-                transform,
-            ),
-            DataType::UInt64 => transform_primitive_typed::<_, V, _, _>(
-                diagnostic_receiver,
-                array.as_primitive::<UInt64Type>(),
-                &self.values,
-                transform,
-            ),
-
-            _ => panic!("Unexpected dictionary key type"),
-        }
-    }
-
-    pub(crate) fn transform_into_any<'b, V: ArrowPrimitiveType, D: DiagnosticReceiver, FTransform>(
-        &'b self,
-        diagnostic_receiver: &D,
-        transform: FTransform,
-    ) -> Result<Dictionary<'b>, ExpressionError>
-    where
-        <V as ArrowPrimitiveType>::Native: Hash,
-        <V as ArrowPrimitiveType>::Native: Eq,
-        FTransform: Fn(&D, Option<ValueOrRef<'_>>) -> Option<ValueOrRef<'b>>,
+        FTransform: FnMut(&D, Option<ValueOrRef<'_>>) -> Option<ValueOrRef<'a>>,
     {
         let array = self.keys.as_array();
 
@@ -233,50 +159,50 @@ impl<'a> Dictionary<'a> {
             DataType::Int8 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int8Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::Int16 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int16Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::Int32 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int32Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::Int64 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<Int64Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
 
             DataType::UInt8 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt8Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::UInt16 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt16Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::UInt32 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt32Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
             DataType::UInt64 => transform_any_typed(
                 diagnostic_receiver,
                 array.as_primitive::<UInt64Type>(),
-                &self.values,
+                self.values,
                 transform,
             ),
 
@@ -293,11 +219,13 @@ impl Display for Dictionary<'_> {
                 f.write_char(',')?;
             }
             match self.get_value(key) {
-                None => {write!(f, "{key}:Null")?;}
+                None => {
+                    write!(f, "{key}:Null")?;
+                }
                 Some(v) => {
                     write!(f, "{key}:")?;
                     fmt_value(v.to_value(), f)?;
-                },
+                }
             }
         }
         f.write_char('}')
@@ -322,12 +250,23 @@ impl<'a> From<&'a BooleanArray> for Dictionary<'a> {
     }
 }
 
+/*
 impl<T: ArrowDictionaryKeyType> From<DictionaryArray<T>> for Dictionary<'_> {
     fn from(value: DictionaryArray<T>) -> Self {
         let (keys, values) = value.into_parts();
         Dictionary {
             keys: keys.into(),
             values: values.into(),
+        }
+    }
+}
+*/
+
+impl<'a, T: ArrowDictionaryKeyType> From<&'a DictionaryArray<T>> for Dictionary<'a> {
+    fn from(value: &'a DictionaryArray<T>) -> Self {
+        Dictionary {
+            keys: value.keys().into(),
+            values: value.values().into(),
         }
     }
 }
@@ -537,8 +476,8 @@ fn get_bool_array_value_index_for_key_index(
 #[derive(Debug, Clone)]
 pub enum DictionaryValueArray<'a> {
     ArrayRef(&'a dyn Array),
-    ArrayOwned(Arc<dyn Array>),
-    AnyOwned(Vec<ValueOrRef<'a>>),
+    VecAnyOwned(Vec<ValueOrRef<'a>>),
+    IndexAnyOwned(IndexSet<ValueOrRef<'a>, RandomState>),
     Boolean,
 }
 
@@ -546,26 +485,26 @@ impl<'a> DictionaryValueArray<'a> {
     pub fn len(&self) -> usize {
         match self {
             DictionaryValueArray::ArrayRef(a) => a.len(),
-            DictionaryValueArray::ArrayOwned(a) => a.len(),
             DictionaryValueArray::Boolean => 2,
-            DictionaryValueArray::AnyOwned(a) => a.len(),
+            DictionaryValueArray::VecAnyOwned(a) => a.len(),
+            DictionaryValueArray::IndexAnyOwned(a) => a.len(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
             DictionaryValueArray::ArrayRef(a) => a.is_empty(),
-            DictionaryValueArray::ArrayOwned(a) => a.is_empty(),
             DictionaryValueArray::Boolean => false,
-            DictionaryValueArray::AnyOwned(a) => a.is_empty(),
+            DictionaryValueArray::VecAnyOwned(a) => a.is_empty(),
+            DictionaryValueArray::IndexAnyOwned(a) => a.is_empty(),
         }
     }
 
     pub fn get_value_at(&self, index: usize) -> Option<ValueOrRef<'_>> {
         match self {
             DictionaryValueArray::ArrayRef(a) => get_value_from_array(*a, index),
-            DictionaryValueArray::ArrayOwned(a) => get_value_from_array(a, index),
-            DictionaryValueArray::AnyOwned(a) => Some((&a[index]).into()),
+            DictionaryValueArray::VecAnyOwned(a) => Some((&a[index]).into()),
+            DictionaryValueArray::IndexAnyOwned(a) => a.get_index(index).map(|v| v.into()),
             DictionaryValueArray::Boolean => Some(ValueOrRef::BooleanOwned(if index == 0 {
                 false
             } else {
@@ -573,17 +512,34 @@ impl<'a> DictionaryValueArray<'a> {
             })),
         }
     }
-}
 
-impl<T: ArrowPrimitiveType> From<PrimitiveArray<T>> for DictionaryValueArray<'_> {
-    fn from(value: PrimitiveArray<T>) -> DictionaryValueArray<'static> {
-        DictionaryValueArray::ArrayOwned(Arc::new(value))
-    }
-}
-
-impl From<Arc<dyn Array>> for DictionaryValueArray<'_> {
-    fn from(value: Arc<dyn Array>) -> DictionaryValueArray<'static> {
-        DictionaryValueArray::ArrayOwned(value)
+    pub(crate) fn transform_into_vec<T, D: DiagnosticReceiver, FTransform>(
+        self,
+        diagnostic_receiver: &D,
+        transform: &mut FTransform) -> Result<Vec<Option<T>>, ExpressionError>
+        where FTransform: FnMut(&D, Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>
+    {
+        Ok(match self {
+            DictionaryValueArray::ArrayRef(a) => transform_array_into(diagnostic_receiver, transform, a)?,
+            DictionaryValueArray::VecAnyOwned(a) => {
+                a
+                    .into_iter()
+                    .map(|v| transform(diagnostic_receiver, Some(v)))
+                    .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+            }
+            DictionaryValueArray::IndexAnyOwned(a) => {
+                a
+                    .into_iter()
+                    .map(|v| transform(diagnostic_receiver, Some(v)))
+                    .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+            }
+            DictionaryValueArray::Boolean => {
+                vec![
+                    transform(diagnostic_receiver, Some(ValueOrRef::BooleanOwned(false)))?,
+                    transform(diagnostic_receiver, Some(ValueOrRef::BooleanOwned(true)))?,
+                ]
+            },
+        })
     }
 }
 
@@ -591,6 +547,112 @@ impl<'a, T: Array + 'a> From<&'a T> for DictionaryValueArray<'a> {
     fn from(value: &'a T) -> DictionaryValueArray<'a> {
         DictionaryValueArray::ArrayRef(value)
     }
+}
+
+pub(crate) fn transform_array_into<'a, T, D: DiagnosticReceiver, FTransform>(
+    diagnostic_receiver: &D,
+    mut transform: FTransform,
+    value: &'a dyn Array) -> Result<Vec<Option<T>>, ExpressionError>
+    where FTransform: FnMut(&D, Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>
+{
+    Ok(match value.data_type() {
+        DataType::Int8 => {
+            value
+                .as_primitive::<Int8Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::Int16 => {
+            value
+                .as_primitive::<Int16Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::Int32 => {
+            value
+                .as_primitive::<Int32Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::Int64 => {
+            value
+                .as_primitive::<Int64Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+
+        DataType::UInt8 => {
+            value
+                .as_primitive::<UInt8Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::UInt16 => {
+            value
+                .as_primitive::<UInt16Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::UInt32 => {
+            value
+                .as_primitive::<UInt32Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::UInt64 => {
+            value
+                .as_primitive::<UInt64Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::IntegerOwned(v as i64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+
+        DataType::Float16 => {
+            value
+                .as_primitive::<Float16Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(f64::from(v)))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::Float32 => {
+            value
+                .as_primitive::<Float32Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(v as f64))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::Float64 => {
+            value
+                .as_primitive::<Float64Type>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::DoubleOwned(v))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+
+        DataType::Utf8 => {
+            value
+                .as_string::<i32>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+        DataType::LargeUtf8 => {
+            value
+                .as_string::<i64>()
+                .into_iter()
+                .map(|v| transform(diagnostic_receiver, v.map(|v| ValueOrRef::StringRef(v))))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
+        },
+
+        _ => todo!()
+    })
 }
 
 pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> Option<ValueOrRef<'_>> {
@@ -684,156 +746,114 @@ pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> Option<Va
 fn transform_boolean_typed<K: ArrowDictionaryKeyType, D: DiagnosticReceiver, FTransform>(
     diagnostic_receiver: &D,
     keys: &PrimitiveArray<K>,
-    values: &DictionaryValueArray<'_>,
-    transform: FTransform,
+    values: DictionaryValueArray<'_>,
+    mut transform: FTransform,
 ) -> Result<BooleanArray, ExpressionError>
 where
-    FTransform: Fn(&D, Option<ValueOrRef<'_>>) -> Option<bool>,
+    FTransform: FnMut(&D, Option<ValueOrRef<'_>>) -> Result<Option<bool>, ExpressionError>,
 {
     let key_length = keys.len();
 
-    let mut builder = BooleanBuilder::with_capacity(key_length);
-    let mut value_index_lookup = HashMap::new();
+    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
 
-    for index in 0..key_length {
-        if keys.is_valid(index) {
-            let value_index =
-                <K as ArrowPrimitiveType>::Native::as_usize(unsafe { keys.value_unchecked(index) });
-            match value_index_lookup.entry(value_index) {
-                Entry::Occupied(o) => {
-                    if let Some(transformed_value) = o.get() {
-                        builder.append_value(*transformed_value);
-                        continue;
-                    }
+    let mut key_buffer = MutableBuffer::from_len_zeroed(key_bit_length);
+    let key_builder = key_buffer.typed_data_mut::<u8>().as_mut_ptr();
+
+    let mut null_buffer = None;
+
+    let transformered_values = values.transform_into_vec(diagnostic_receiver, &mut transform)?;
+
+    if keys.is_nullable() {
+        let mut null_value = OnceCell::new();
+        for (index, value_index) in keys.iter().enumerate() {
+            let v = if let Some(value_index) = value_index {
+                unsafe { transformered_values.get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index)) }
+            } else {
+                match null_value.get_or_init(|| {
+                    transform(diagnostic_receiver, None)
+                }) {
+                    Err(_) => return Err(null_value.take().unwrap().unwrap_err()),
+                    Ok(v) => v
                 }
-                Entry::Vacant(v) => {
-                    if let Some(transformed_value) =
-                        transform(diagnostic_receiver, values.get_value_at(value_index))
-                    {
-                        builder.append_value(transformed_value);
-                        v.insert(Some(transformed_value));
-                        continue;
-                    } else {
-                        v.insert(None);
-                    }
+            };
+
+            if let Some(v) = v {
+                if *v {
+                    unsafe { arrow::util::bit_util::set_bit_raw(key_builder, index) };
                 }
+            } else {
+                push_null(&mut null_buffer, index, key_bit_length);
             }
         }
+    } else {
+        let values = keys.values().as_ptr();
 
-        builder.append_null();
+        for index in 0..key_length {
+            let value_index = unsafe { *values.add(index) };
+            if let Some(v) = unsafe { transformered_values.get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index)) } {
+                if *v {
+                    unsafe { arrow::util::bit_util::set_bit_raw(key_builder, index) };
+                }
+            } else {
+                push_null(&mut null_buffer, index, key_bit_length);
+            }
+        }
     }
 
-    Ok(builder.finish())
+    Ok(BooleanArray::new(
+        BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
+        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish())))
 }
 
-fn transform_primitive_typed<
-    'a,
-    K: ArrowDictionaryKeyType,
-    V: ArrowPrimitiveType,
-    D: DiagnosticReceiver,
-    FTransform,
->(
-    diagnostic_receiver: &D,
-    keys: &PrimitiveArray<K>,
-    values: &DictionaryValueArray<'a>,
-    transform: FTransform,
-) -> Result<Dictionary<'a>, ExpressionError>
-where
-    <V as ArrowPrimitiveType>::Native: Hash,
-    <V as ArrowPrimitiveType>::Native: Eq,
-    FTransform: Fn(&D, Option<ValueOrRef<'_>>) -> Option<V::Native>,
-{
-    let key_length = keys.len();
+fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_length: usize) {
+    if let Some(buffer) = null_buffer {
+        let ptr = buffer.typed_data_mut::<u8>().as_mut_ptr();
 
-    let mut builder = PrimitiveBuilder::<K>::with_capacity(key_length);
-    let mut value_index_lookup = HashMap::new();
-    let mut transformed_values: IndexSet<<V as ArrowPrimitiveType>::Native> = IndexSet::new();
-    let mut null_index = None;
+        let i = index / 8;
+        let b = 1 << (index % 8);
 
-    for index in 0..key_length {
-        if keys.is_valid(index) {
-            let value_index =
-                <K as ArrowPrimitiveType>::Native::as_usize(unsafe { keys.value_unchecked(index) });
-            match value_index_lookup.entry(value_index) {
-                Entry::Occupied(o) => {
-                    if let Some(index) = o.get() {
-                        builder.append_value(*index);
-                        continue;
-                    }
-                }
-                Entry::Vacant(v) => {
-                    if let Some(transformed_value) =
-                        transform(diagnostic_receiver, values.get_value_at(value_index))
-                    {
-                        let (index, _) = transformed_values.insert_full(transformed_value);
-                        let value_index =
-                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap();
-                        builder.append_value(value_index);
-                        v.insert(Some(value_index));
-                        continue;
-                    } else {
-                        v.insert(None);
-                    }
-                }
-            }
-        } else {
-            let (has_value_index, value_index) = null_index.get_or_insert_with(|| {
-                if let Some(null_value) = transform(diagnostic_receiver, None) {
-                    let (index, _) = transformed_values.insert_full(null_value);
-                    (
-                        true,
-                        <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap(),
-                    )
-                } else {
-                    (
-                        false,
-                        <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),
-                    )
-                }
-            });
+        unsafe { *ptr.add(i) &= !b };
+    } else {
+        let mut buffer = MutableBuffer::new(key_bit_length).with_bitset(key_bit_length, true);
 
-            if *has_value_index {
-                builder.append_value(*value_index);
-                continue;
-            }
-        }
+        let ptr = buffer.typed_data_mut::<u8>().as_mut_ptr();
 
-        builder.append_null();
+        let i = index / 8;
+        let b = 1 << (index % 8);
+
+        unsafe { *ptr.add(i) &= !b };
+
+        *null_buffer = Some(buffer);
     }
-
-    let values: Vec<<V as ArrowPrimitiveType>::Native> = transformed_values.drain(..).collect();
-
-    Ok(Dictionary {
-        keys: builder.finish().into(),
-        values: PrimitiveArray::<V>::new(values.into(), None).into(),
-    })
 }
 
 fn transform_any_typed<'a, K: ArrowDictionaryKeyType, D: DiagnosticReceiver, FTransform>(
     diagnostic_receiver: &D,
     keys: &PrimitiveArray<K>,
-    values: &'a DictionaryValueArray<'_>,
-    transform: FTransform,
+    values: DictionaryValueArray<'a>,
+    mut transform: FTransform,
 ) -> Result<Dictionary<'a>, ExpressionError>
 where
-    FTransform: Fn(&D, Option<ValueOrRef<'_>>) -> Option<ValueOrRef<'a>>,
+    FTransform: FnMut(&D, Option<ValueOrRef<'_>>) -> Option<ValueOrRef<'a>>,
 {
-    let key_count = keys.len();
+    let key_length = keys.len();
+    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
+    let value_length = values.len() + 1;
 
-    let mut key_builder = PrimitiveBuilder::<K>::with_capacity(key_count);
-    let mut value_index_lookup = HashMap::new();
-    let mut transformed_values = IndexSet::new();
+    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length);
+    let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
+    let mut null_buffer = None;
+
+    let mut value_index_lookup = AHashMap::with_capacity(value_length);
+    let mut transformed_values = IndexSet::with_capacity_and_hasher(value_length, RandomState::new());
     let mut null_index = None;
 
-    for index in 0..key_count {
-        if keys.is_valid(index) {
-            let value_index =
-                <K as ArrowPrimitiveType>::Native::as_usize(unsafe { keys.value_unchecked(index) });
-
+    for (key_index, value_index) in keys.into_iter().enumerate() {
+        if let Some(value_index) = value_index.map(|v| <K as ArrowPrimitiveType>::Native::as_usize(v)) {
             match value_index_lookup.entry(value_index) {
                 Entry::Occupied(o) => {
                     if let Some(value_index) = o.get() {
-                        key_builder.append_value(*value_index);
+                        unsafe { *key_builder.add(key_index) = *value_index };
                         continue;
                     }
                 }
@@ -844,7 +864,7 @@ where
                         let (index, _) = transformed_values.insert_full(transformed_value);
                         let value_index =
                             <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap();
-                        key_builder.append_value(value_index);
+                        unsafe { *key_builder.add(key_index) = value_index };
                         v.insert(Some(value_index));
                         continue;
                     } else {
@@ -869,17 +889,19 @@ where
             });
 
             if *has_value_index {
-                key_builder.append_value(*value_index);
+                unsafe { *key_builder.add(key_index) = *value_index };
                 continue;
             }
         }
 
-        key_builder.append_null();
+        push_null(&mut null_buffer, key_index, key_bit_length);
     }
 
     Ok(Dictionary {
-        keys: key_builder.finish().into(),
-        values: DictionaryValueArray::AnyOwned(transformed_values.drain(..).collect()),
+        keys: PrimitiveArray::<K>::new(
+            key_buffer.into(),
+            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish())).into(),
+        values: DictionaryValueArray::IndexAnyOwned(transformed_values),
     })
 }
 
@@ -900,10 +922,12 @@ mod tests {
         strings_builder.append_option(Some("other_value"));
         strings_builder.append_option(None::<&str>);
 
-        let strings: Dictionary = strings_builder.finish().into();
+        let strings = strings_builder.finish();
+
+        let strings: Dictionary = (&strings).into();
 
         let len_view = strings
-            .get_len_dictionary(&NoopDiagnosticReceiver {})
+            .into_len_dictionary(&NoopDiagnosticReceiver {})
             .unwrap();
 
         assert_eq!(5, len_view.keys().len());
@@ -928,10 +952,12 @@ mod tests {
         values.append_value("other_value");
         values.append_null();
 
-        let strings: Dictionary = DictionaryArray::new(keys, Arc::new(values.finish())).into();
+        let strings = DictionaryArray::new(keys, Arc::new(values.finish()));
+
+        let strings: Dictionary = (&strings).into();
 
         let len_view = strings
-            .get_len_dictionary(&NoopDiagnosticReceiver {})
+            .into_len_dictionary(&NoopDiagnosticReceiver {})
             .unwrap();
 
         assert_eq!(3, len_view.keys().len());

@@ -38,6 +38,8 @@ linkme.workspace = true
 chrono = { workspace = true, optional = true }
 geneva-uploader = { version = "0.4.0", optional = true }
 opentelemetry-proto = { workspace = true, optional = true }
+data_engine_columnar = { path = "../../../experimental/query_engine/engine-columnar", optional = true }
+data_engine_columnar_otap_bridge = { path = "../../../experimental/query_engine/engine-columnar-otap-bridge", optional = true }
 data_engine_recordset = { path = "../../../experimental/query_engine/engine-recordset", optional = true }
 data_engine_recordset_otlp_bridge = { path = "../../../experimental/query_engine/engine-recordset-otlp-bridge", optional = true }
 ahash = { workspace = true, optional = true }
@@ -70,11 +72,15 @@ azure-monitor-exporter = [
     "dep:http",
     "dep:rand",
 ]
-
 contrib-processors = [
+    "columnar-kql-processor",
     "condense-attributes-processor",
     "recordset-kql-processor",
     "resource-validator-processor",
+]
+columnar-kql-processor = [
+    "dep:data_engine_columnar_otap_bridge",
+    "dep:data_engine_columnar",
 ]
 condense-attributes-processor = []
 recordset-kql-processor = [

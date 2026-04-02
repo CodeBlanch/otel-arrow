@@ -9,9 +9,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ahash = { workspace = true }
 arrow = { workspace = true }
 indexmap = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 data_engine_expressions = { path = "../expressions" }
 data_engine_kql_parser = { path = "../kql-parser" }
@@ -21,3 +23,8 @@ otap-df-pdata = { path = "../../../otap-dataflow/crates/pdata" }
 
 [dev-dependencies]
 bytes = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "filter"
+harness = false

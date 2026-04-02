@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use ahash::RandomState;
 use data_engine_expressions::*;
 use indexmap::IndexSet;
 
@@ -30,64 +31,82 @@ where
             let inner_value =
                 execute_scalar_expression(execution_context, l.get_inner_expression())?;
 
-            if let Some(value) = inner_value.as_single() {
-                match value.to_value() {
-                    Value::String(s) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                        OwnedValue::Integer(s.get_value().chars().count() as i64),
-                    )),
-                    Value::Array(a) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                        OwnedValue::Integer(a.len() as i64),
-                    )),
-                    Value::Map(m) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                        OwnedValue::Integer(m.len() as i64),
-                    )),
-                    v => {
-                        execution_context.add_diagnostic_if_enabled(
-                            ColumnarEngineDiagnosticLevel::Warn,
-                            l,
-                            || {
-                                format!(
-                                    "Cannot calculate the length of '{}' input",
-                                    v.get_value_type()
-                                )
-                            },
-                        );
-                        return Ok(ResolvedValue::Single(ResolvedSingleValue::Owned(
-                            OwnedValue::Null,
-                        )));
-                    }
+            inner_value.map_into(
+                |single| {
+                    Ok(match single.to_value() {
+                        Value::String(s) => ResolvedValue::Single(ResolvedSingleValue::Owned(
+                            OwnedValue::Integer(s.get_value().chars().count() as i64),
+                        )),
+                        Value::Array(a) => ResolvedValue::Single(ResolvedSingleValue::Owned(
+                            OwnedValue::Integer(a.len() as i64),
+                        )),
+                        Value::Map(m) => ResolvedValue::Single(ResolvedSingleValue::Owned(
+                            OwnedValue::Integer(m.len() as i64),
+                        )),
+                        v => {
+                            execution_context.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                l,
+                                || {
+                                    format!(
+                                        "Cannot calculate the length of '{}' input",
+                                        v.get_value_type()
+                                    )
+                                },
+                            );
+                            ResolvedValue::Single(ResolvedSingleValue::Owned(
+                                OwnedValue::Null,
+                            ))
+                        }
+                    })
+                },
+                |dictionary| {
+                    Ok(ResolvedValue::Dictionary(dictionary.into_len_dictionary(
+                        &execution_context.create_diagnostic_receiver_for_expression(l),
+                    )?))
+                },
+                |_| {
+                    todo!()
                 }
-            } else if let Some(table) = inner_value.as_dictionary() {
-                ResolvedValue::Dictionary(table.get_len_dictionary(
-                    &execution_context.create_diagnostic_receiver_for_expression(l),
-                )?)
-            } else {
-                // todo: Log
-                todo!()
-            }
+            )?
         }
         ScalarExpression::Logical(_) => todo!(),
         ScalarExpression::Math(_) => todo!(),
         ScalarExpression::Parse(_) => todo!(),
         ScalarExpression::Select(_) => todo!(),
-        ScalarExpression::Slice(_) => todo!(),
+        ScalarExpression::Slice(s) => {
+            let inner_value = execute_scalar_expression(execution_context, s.get_source())?;
+
+            let range_start_inclusive = match s.get_range_start_inclusive() {
+                Some(start) => execute_scalar_expression(execution_context, start)?,
+                None => ResolvedValue::Single(ResolvedSingleValue::Owned(OwnedValue::Integer(0))),
+            };
+
+            let range_end_exclusive = match s.get_range_end_exclusive() {
+                Some(end) => Some(execute_scalar_expression(execution_context, end)?),
+                None => None,
+            };
+
+            todo!()
+        }
         ScalarExpression::Source(s) => {
             let mut root = ResolvedValue::Table(execution_context.get_records().unwrap());
 
             for selector in s.get_value_accessor().get_selectors() {
-                let next = match execute_scalar_expression(execution_context, selector)? {
-                    ResolvedValue::Single(s) => match s.to_value() {
+                let next = execute_scalar_expression(execution_context, selector)?.map_into(
+                    |s| match s.to_value() {
                         Value::String(s) => match root {
-                            ResolvedValue::Table(t) => t.get_values(s.get_value()),
+                            ResolvedValue::Table(t) => Ok(t.get_values(s.get_value())),
                             _ => todo!(),
                         },
                         _ => todo!(),
                     },
-                    ResolvedValue::Dictionary(d) => {
+                    |d| {
+                        // todo: Improve the perf of this
                         let key_count = d.len();
 
                         let mut key_builder = d.keys().create_builder();
-                        let mut values = IndexSet::new();
+                        let mut values = IndexSet::with_hasher(RandomState::new());
 
                         for key in 0..key_count {
                             if let Some(v) = d.get_value(key) {
@@ -123,13 +142,13 @@ where
                             }
                         }
 
-                        Some(RecordTableValue::Dictionary(Dictionary::new(
+                        Ok(Some(RecordTableValue::Dictionary(Dictionary::new(
                             key_builder.finish(),
-                            DictionaryValueArray::AnyOwned(values.drain(..).collect()),
-                        )))
-                    }
-                    _ => todo!(),
-                };
+                            DictionaryValueArray::IndexAnyOwned(values),
+                        ))))
+                    },
+                    |_| todo!()
+                )?;
 
                 match next {
                     None => {

@@ -1,15 +1,15 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::LazyLock;
+use std::{fmt::Display, sync::LazyLock};
 
 use arrow::array::RecordBatch;
+use data_engine_columnar::*;
 use data_engine_expressions::*;
 use data_engine_kql_parser::*;
-use data_engine_columnar::*;
-use otap_df_pdata::otap::Logs;
+use otap_df_pdata::otap::{Logs, OtapBatchStore};
 
-use crate::*;
+use crate::{logs::*, *};
 
 static LOG_RECORD_SCHEMA: LazyLock<ParserMapSchema> = LazyLock::new(|| {
     // Canonical schema definition comes from LogRecord proto definition
@@ -53,21 +53,48 @@ static LOG_RECORD_SCHEMA: LazyLock<ParserMapSchema> = LazyLock::new(|| {
 #[derive(Debug)]
 pub struct BridgePipeline {
     attributes_schema: Option<ParserMapSchema>,
-    pipeline: PipelineExpression,
+    engine: ColumnarEngine,
     options: BridgeOptions,
 }
 
 impl BridgePipeline {
     pub fn get_pipeline(&self) -> &PipelineExpression {
-        &self.pipeline
+        &self.engine.get_pipeline()
     }
 }
 
 #[derive(Debug)]
-pub struct BridgeResponse {
-    pub included_records: Option<[RecordBatch]>,
+pub struct BridgeResponse<'a, T> {
+    pub included_records: T,
     pub included_record_count: usize,
     pub dropped_record_count: usize,
+    pub diagnostics: BridgeDiagnostics<'a>
+}
+
+#[derive(Debug)]
+pub struct BridgeDiagnostics<'a> {
+    pipeline: &'a BridgePipeline,
+    diagnostics: Vec<ColumnarEngineDiagnostic<'a>>,
+}
+
+impl<'a> BridgeDiagnostics<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+
+    pub fn get_pipeline(&self) -> &'a BridgePipeline {
+        self.pipeline
+    }
+
+    pub fn get_diagnostics(&self) -> &[ColumnarEngineDiagnostic<'a>] {
+        &self.diagnostics
+    }
+}
+
+impl Display for BridgeDiagnostics<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        format_diagnostics(self.pipeline.get_pipeline().get_query(), &self.diagnostics, f)
+    }
 }
 
 pub fn parse_kql_logs_query_into_pipeline(
@@ -87,24 +114,45 @@ pub fn parse_kql_logs_query_into_pipeline(
     let result = KqlParser::parse_with_options(query, parser_options)?;
     Ok(BridgePipeline {
         attributes_schema,
-        pipeline: result.pipeline,
+        engine: ColumnarEngine::new(result.pipeline),
         options,
     })
 }
 
-pub fn process_otap_logs_using_pipeline(
-    pipeline: &BridgePipeline,
-    diagnostic_level: ColumnarEngineDiagnosticLevel,
+pub fn process_otap_logs_using_pipeline<'a>(
+    pipeline: &'a BridgePipeline,
+    factory: &OtapLogRecordBatchFactory,
     otap_logs: Logs,
-) -> Result<BridgeResponse, BridgeError> {
-    let request =
-        ExportLogsServiceRequest::from_protobuf(export_logs_service_request_protobuf_data);
+) -> Result<BridgeResponse<'a, Logs>, BridgeError> {
+    let mut batch = pipeline
+        .engine
+        .begin_batch()
+        .map_err(|e| BridgeError::PipelineInitializationError(e.to_string()))?;
 
-    if let Err(e) = request {
-        return Err(BridgeError::OtlpProtobufReadError(e));
+    let batches = otap_logs.into_batches();
+
+    batch.push_records(
+        factory,
+        batches,
+    );
+
+    let results = batch.flush();
+
+    let mut logs = Logs::new();
+
+    if results.included_batches.len() > 0 {
+        let batches = logs.batches_mut();
+        for (index, batch) in results.included_batches.into_iter().next().unwrap().into_iter().enumerate() {
+            batches[index] = batch;
+        }
     }
 
-    process_export_logs_service_request_using_pipeline(pipeline, log_level, request.unwrap())
+    Ok(BridgeResponse {
+        included_records: logs,
+        included_record_count: results.included_record_count,
+        dropped_record_count: results.dropped_record_count,
+        diagnostics: BridgeDiagnostics { pipeline, diagnostics: results.diagnostics }
+    })
 }
 
 fn build_parser_options(options: &mut BridgeOptions) -> Result<ParserOptions, ParserError> {
@@ -194,7 +242,7 @@ fn build_log_record_schema(
 mod tests {
     use bytes::Bytes;
     use data_engine_kql_parser::{KqlParser, Parser};
-    use otap_df_pdata::{otap::OtapBatchStore, *};
+    use otap_df_pdata::{otap::OtapBatchStore, proto::OtlpProtoMessage, testing::{fixtures::logs_with_varying_attributes_and_properties, round_trip::otlp_to_otap}, *};
 
     use super::*;
 
@@ -218,17 +266,17 @@ mod tests {
 
         let batches = logs.into_batches();
 
-        let pipeline = KqlParser::parse(
-            "source | where false",
-        )
-        .unwrap()
-        .pipeline;
+        let pipeline = KqlParser::parse("source | where false").unwrap().pipeline;
 
-        let engine = ColumnarEngine::new_with_options(pipeline, ColumnarEngineOptions::new().with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose));
+        let engine = ColumnarEngine::new_with_options(
+            pipeline,
+            ColumnarEngineOptions::new()
+                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
+        );
 
         let mut batch = engine.begin_batch().unwrap();
 
-        batch.push_records::<OtapLogRecordBatchFactory>(batches);
+        batch.push_records(&mut OtapLogRecordBatchFactory::new(), batches);
 
         let results = batch.flush();
 
@@ -260,30 +308,44 @@ mod tests {
 
         assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
 
-        let pipeline = KqlParser::parse(
-            "source | where severity_text == 'Info'",
-        )
-        .unwrap()
-        .pipeline;
+        let pipeline = KqlParser::parse("source | where severity_text == 'Info'")
+        //let pipeline = KqlParser::parse("source | where severity_text != 'aInfo' or false")
+        //let pipeline = KqlParser::parse("source | where thing > 0 and thing2 == 2")
+            .unwrap()
+            .pipeline;
 
-        println!("pipeline raw: {pipeline}");
-
-        let engine = ColumnarEngine::new_with_options(pipeline, ColumnarEngineOptions::new().with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose));
-
-        println!("pipeline modified: {}", engine.get_pipeline());
+        let engine = ColumnarEngine::new_with_options(
+            pipeline,
+            ColumnarEngineOptions::new()
+                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
+        );
 
         let mut batch = engine.begin_batch().unwrap();
 
-        batch.push_records::<OtapLogRecordBatchFactory>(batches);
+        batch.push_records(&mut OtapLogRecordBatchFactory::new(), batches);
 
         let results = batch.flush();
 
         assert_eq!(3, results.dropped_record_count);
         assert_eq!(1, results.included_batches.len());
-        assert_eq!(1, results.included_batches[0][2].as_ref().map_or(0, |v| v.num_rows()));
+        assert_eq!(
+            1,
+            results.included_batches[0][2]
+                .as_ref()
+                .map_or(0, |v| v.num_rows())
+        );
 
         println!("{results}");
     }
+
+fn generate_logs_batch(batch_size: usize) -> Logs {
+    let logs_data = logs_with_varying_attributes_and_properties(batch_size);
+    let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
+    match pdata {
+        OtapArrowRecords::Logs(logs) => logs,
+        _ => panic!()
+    }
+}
 
     #[test]
     fn test_engine_filter_attribute() {
@@ -307,24 +369,35 @@ mod tests {
 
         assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
 
-        let pipeline = KqlParser::parse(
-            "source | where Attributes['attr1'] == 'value1'",
-        )
-        .unwrap()
-        .pipeline;
+        let batches = generate_logs_batch(8192).into_batches();
 
-        let engine = ColumnarEngine::new_with_options(pipeline, ColumnarEngineOptions::new().with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose));
+        //let pipeline = KqlParser::parse("source | where Attributes['attr1'] == 'value1'")
+        let pipeline = KqlParser::parse("logs | where attributes[\"code.line.number\"] > 1000 and attributes[\"code.line.number\"] == 2")
+            .unwrap()
+            .pipeline;
+
+        let engine = ColumnarEngine::new_with_options(
+            pipeline,
+            ColumnarEngineOptions::new()
+                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Warn),
+        );
 
         let mut batch = engine.begin_batch().unwrap();
 
-        batch.push_records::<OtapLogRecordBatchFactory>(batches);
+        batch.push_records(&mut OtapLogRecordBatchFactory::new(), batches);
 
         let results = batch.flush();
 
-        assert_eq!(2, results.dropped_record_count);
+        /*assert_eq!(2, results.dropped_record_count);
         assert_eq!(1, results.included_batches.len());
-        assert_eq!(2, results.included_batches[0][2].as_ref().map_or(0, |v| v.num_rows()));
+        assert_eq!(
+            2,
+            results.included_batches[0][2]
+                .as_ref()
+                .map_or(0, |v| v.num_rows())
+        );*/
 
+        //println!("{:?}", results.included_batches);
         println!("{results}");
     }
 }

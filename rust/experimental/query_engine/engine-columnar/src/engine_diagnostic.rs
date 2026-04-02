@@ -7,7 +7,7 @@ use data_engine_expressions::*;
 
 use crate::{ColumnarRecords, execution_context::ExecutionContext};
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum ColumnarEngineDiagnosticLevel {
     Verbose = 0,
     Info = 1,
@@ -131,10 +131,8 @@ impl<TRecords: ColumnarRecords> DiagnosticReceiver
     }
 }
 
-#[cfg(test)]
 pub(crate) struct NoopDiagnosticReceiver {}
 
-#[cfg(test)]
 impl DiagnosticReceiver for NoopDiagnosticReceiver {
     fn add_diagnostic_if_enabled<F>(
         &self,
