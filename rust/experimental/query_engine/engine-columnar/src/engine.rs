@@ -244,10 +244,10 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 
                     return;
                 }
-                DataExpression::Summary(s) => todo!(),
-                DataExpression::Transform(t) => todo!(),
-                DataExpression::Conditional(c) => todo!(),
-                DataExpression::Output(o) => todo!(),
+                DataExpression::Summary(_) => todo!(),
+                DataExpression::Transform(_) => todo!(),
+                DataExpression::Conditional(_) => todo!(),
+                DataExpression::Output(_) => todo!(),
             }
         }
 
@@ -305,6 +305,10 @@ where
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel>;
 
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() > 0
+    }
 }
 
 pub trait RecordTable: Display + Debug {
@@ -454,13 +458,22 @@ impl PartialEq for ValueOrRef<'_> {
             ValueOrRef::StringOwned(s) => eq_str(s, other),
             ValueOrRef::IntegerRef(i) => eq_int(i.get_value(), other),
             ValueOrRef::IntegerOwned(i) => eq_int(*i, other),
-            ValueOrRef::DoubleRef(d) => todo!(),
-            ValueOrRef::DoubleOwned(d) => todo!(),
-            ValueOrRef::BooleanOwned(b) => todo!(),
-            ValueOrRef::DateTimeOwned(d) => todo!(),
-            ValueOrRef::TimeSpanOwned(t) => todo!(),
-            ValueOrRef::RegexRef(r) => todo!(),
-            ValueOrRef::RegexOwned(r) => todo!(),
+            ValueOrRef::DoubleRef(d) => eq_double(d.get_value(), other),
+            ValueOrRef::DoubleOwned(d) => eq_double(*d, other),
+            ValueOrRef::BooleanOwned(b) => match other {
+                ValueOrRef::BooleanOwned(r) => *b == *r,
+                _ => false,
+            },
+            ValueOrRef::DateTimeOwned(d) => match other {
+                ValueOrRef::DateTimeOwned(o) => *d == *o,
+                _ => false,
+            },
+            ValueOrRef::TimeSpanOwned(t) => match other {
+                ValueOrRef::TimeSpanOwned(o) => *t == *o,
+                _ => false,
+            },
+            ValueOrRef::RegexRef(r) => eq_regex(r, other),
+            ValueOrRef::RegexOwned(r) => eq_regex(r, other),
         }
     }
 }
@@ -477,6 +490,22 @@ fn eq_int(left: i64, right: &ValueOrRef) -> bool {
     match right {
         ValueOrRef::IntegerRef(i) => left == i.get_value(),
         ValueOrRef::IntegerOwned(i) => left == *i,
+        _ => false,
+    }
+}
+
+fn eq_double(left: f64, right: &ValueOrRef) -> bool {
+    match right {
+        ValueOrRef::DoubleRef(i) => left == i.get_value(),
+        ValueOrRef::DoubleOwned(i) => left == *i,
+        _ => false,
+    }
+}
+
+fn eq_regex(left: &Regex, right: &ValueOrRef) -> bool {
+    match right {
+        ValueOrRef::RegexRef(i) => left.as_str() == i.as_str(),
+        ValueOrRef::RegexOwned(i) => left.as_str() == i.as_str(),
         _ => false,
     }
 }
