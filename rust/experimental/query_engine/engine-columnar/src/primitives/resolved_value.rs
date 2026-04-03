@@ -6,7 +6,7 @@ use std::fmt::{Display, Write};
 use arrow::array::{Array, BooleanArray};
 use data_engine_expressions::*;
 
-use crate::*;
+use crate::{slice::Slice, *};
 
 #[derive(Debug)]
 pub(crate) enum ResolvedValue<'a> {
@@ -49,6 +49,7 @@ impl Display for ResolvedValue<'_> {
 pub(crate) enum ResolvedSingleValue<'a> {
     Ref(Value<'a>),
     Owned(OwnedValue),
+    Slice(Slice<'a>),
 }
 
 impl AsValue for ResolvedSingleValue<'_> {
@@ -56,6 +57,7 @@ impl AsValue for ResolvedSingleValue<'_> {
         match self {
             ResolvedSingleValue::Ref(v) => v.get_value_type(),
             ResolvedSingleValue::Owned(o) => o.get_value_type(),
+            ResolvedSingleValue::Slice(s) => s.get_value_type(),
         }
     }
 
@@ -63,6 +65,20 @@ impl AsValue for ResolvedSingleValue<'_> {
         match self {
             ResolvedSingleValue::Ref(v) => v.clone(),
             ResolvedSingleValue::Owned(o) => o.to_value(),
+            ResolvedSingleValue::Slice(s) => s.to_value(),
+        }
+    }
+}
+
+impl<'a> TryFrom<ResolvedSingleValue<'a>> for StringValueOrRef<'a> {
+    type Error = ResolvedSingleValue<'a>;
+
+    fn try_from(value: ResolvedSingleValue<'a>) -> Result<Self, Self::Error> {
+        match value {
+            ResolvedSingleValue::Ref(Value::String(s)) => Ok(StringValueOrRef::Ref(s)),
+            ResolvedSingleValue::Owned(OwnedValue::String(s)) => Ok(StringValueOrRef::Owned(s)),
+            ResolvedSingleValue::Slice(Slice::String(s)) => Ok(StringValueOrRef::Slice(s.into())),
+            _ => Err(value),
         }
     }
 }
@@ -72,39 +88,6 @@ impl Display for ResolvedSingleValue<'_> {
         f.write_str("[")?;
         fmt_value(self.to_value(), f)?;
         f.write_str("]")
-    }
-}
-
-pub(crate) fn fmt_value(value: Value<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match value {
-        Value::Null => f.write_str("Null"),
-        Value::Array(a) => {
-            write!(f, "Array(Count={})", a.len())
-        }
-        Value::Map(m) => {
-            write!(f, "Map(Count={})", m.len())
-        }
-        Value::String(s) => {
-            f.write_str("String(")?;
-            let v = s.get_value();
-            if v.len() <= 32 {
-                f.write_str(serde_json::to_string(&v).unwrap().as_str())?;
-            } else {
-                write!(
-                    f,
-                    "{}",
-                    serde_json::to_string(&format!("{}...", &v[..32]))
-                        .unwrap()
-                        .as_str()
-                )?;
-            }
-            f.write_str(")")
-        }
-        v => {
-            write!(f, "{}(", v.get_value_type())?;
-            v.fmt(f)?;
-            f.write_str(")")
-        }
     }
 }
 

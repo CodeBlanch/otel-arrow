@@ -5,7 +5,15 @@ use ahash::RandomState;
 use data_engine_expressions::*;
 use indexmap::IndexSet;
 
-use crate::{execution_context::ExecutionContext, *};
+use crate::{
+    execution_context::ExecutionContext,
+    resolved_value::*,
+    scalars::{
+        length_scalar_expression::execute_length_scalar_expression,
+        slice_scalar_expression::execute_slice_scalar_expression,
+    },
+    *,
+};
 
 pub fn execute_scalar_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
@@ -27,64 +35,12 @@ where
         ScalarExpression::Convert(_) => todo!(),
         ScalarExpression::GetType(_) => todo!(),
         ScalarExpression::InvokeFunction(_) => todo!(),
-        ScalarExpression::Length(l) => {
-            let inner_value =
-                execute_scalar_expression(execution_context, l.get_inner_expression())?;
-
-            inner_value.map_into(
-                |single| {
-                    Ok(match single.to_value() {
-                        Value::String(s) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                            OwnedValue::Integer(s.get_value().chars().count() as i64),
-                        )),
-                        Value::Array(a) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                            OwnedValue::Integer(a.len() as i64),
-                        )),
-                        Value::Map(m) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                            OwnedValue::Integer(m.len() as i64),
-                        )),
-                        v => {
-                            execution_context.add_diagnostic_if_enabled(
-                                ColumnarEngineDiagnosticLevel::Warn,
-                                l,
-                                || {
-                                    format!(
-                                        "Cannot calculate the length of '{}' input",
-                                        v.get_value_type()
-                                    )
-                                },
-                            );
-                            ResolvedValue::Single(ResolvedSingleValue::Owned(OwnedValue::Null))
-                        }
-                    })
-                },
-                |dictionary| {
-                    Ok(ResolvedValue::Dictionary(dictionary.into_len_dictionary(
-                        &execution_context.create_diagnostic_receiver_for_expression(l),
-                    )?))
-                },
-                |_| todo!(),
-            )?
-        }
+        ScalarExpression::Length(l) => execute_length_scalar_expression(execution_context, l)?,
         ScalarExpression::Logical(_) => todo!(),
         ScalarExpression::Math(_) => todo!(),
         ScalarExpression::Parse(_) => todo!(),
         ScalarExpression::Select(_) => todo!(),
-        ScalarExpression::Slice(s) => {
-            let inner_value = execute_scalar_expression(execution_context, s.get_source())?;
-
-            let range_start_inclusive = match s.get_range_start_inclusive() {
-                Some(start) => execute_scalar_expression(execution_context, start)?,
-                None => ResolvedValue::Single(ResolvedSingleValue::Owned(OwnedValue::Integer(0))),
-            };
-
-            let range_end_exclusive = match s.get_range_end_exclusive() {
-                Some(end) => Some(execute_scalar_expression(execution_context, end)?),
-                None => None,
-            };
-
-            todo!()
-        }
+        ScalarExpression::Slice(s) => execute_slice_scalar_expression(execution_context, s)?,
         ScalarExpression::Source(s) => {
             let mut root = ResolvedValue::Table(execution_context.get_records().unwrap());
 

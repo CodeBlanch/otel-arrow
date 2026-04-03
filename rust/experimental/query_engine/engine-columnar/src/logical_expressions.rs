@@ -6,7 +6,9 @@ use std::collections::{HashMap, hash_map::Entry};
 use arrow::array::*;
 use data_engine_expressions::*;
 
-use crate::{execution_context::ExecutionContext, scalars::execute_scalar_expression, *};
+use crate::{
+    execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
+};
 
 pub fn execute_logical_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
