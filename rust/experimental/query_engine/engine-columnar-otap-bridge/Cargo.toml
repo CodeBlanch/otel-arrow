@@ -25,6 +25,8 @@ otap-df-pdata = { path = "../../../otap-dataflow/crates/pdata" }
 bytes = { workspace = true }
 criterion = { workspace = true }
 
+otap-df-pdata = { path = "../../../otap-dataflow/crates/pdata", features = ["testing"] }
+
 [[bench]]
 name = "filter"
 harness = false
