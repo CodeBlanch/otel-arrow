@@ -3,12 +3,13 @@
 
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use chrono::{DateTime, FixedOffset, TimeDelta};
 use data_engine_expressions::*;
 use regex::Regex;
 
-use crate::slice::StringSlice;
+use crate::resolved_value::*;
 
 // todo: Make Display impl on Value do this work
 pub(crate) fn fmt_value(value: Value<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,96 +47,145 @@ pub(crate) fn fmt_value(value: Value<'_>, f: &mut std::fmt::Formatter<'_>) -> st
 
 #[derive(Debug, Clone)]
 pub enum ValueOrRef<'a> {
-    StringRef(&'a str),
-    StringOwned(String),
-    IntegerRef(IntegerRef<'a>),
-    IntegerOwned(i64),
-    DoubleRef(DoubleRef<'a>),
-    DoubleOwned(f64),
-    BooleanOwned(bool),
-    DateTimeOwned(DateTime<FixedOffset>),
-    TimeSpanOwned(TimeDelta),
-    RegexRef(&'a Regex),
-    RegexOwned(Regex),
+    String(StringValueOrRef<'a>),
+    Integer(i64),
+    Double(f64),
+    Boolean(bool),
+    DateTime(DateTime<FixedOffset>),
+    TimeSpan(TimeDelta),
+    Regex(RegexValueOrRef<'a>),
 }
 
-#[derive(Debug)]
-pub(crate) enum StringValueOrRef<'a> {
-    Ref(&'a dyn StringValue),
-    Owned(String),
-    Slice(Box<StringSlice<'a>>),
+#[derive(Debug, Clone)]
+pub enum RegexValueOrRef<'a> {
+    Ref(&'a Regex),
+    Owned(Rc<Regex>),
+}
+
+impl RegexValueOrRef<'_> {
+    pub fn new_owned(value: Regex) -> RegexValueOrRef<'static> {
+        RegexValueOrRef::Owned(value.into())
+    }
+}
+
+impl<'a> RegexValueOrRef<'a> {
+    pub fn new_ref(value: &'a Regex) -> RegexValueOrRef<'a> {
+        RegexValueOrRef::Ref(value)
+    }
+}
+
+impl RegexValue for RegexValueOrRef<'_> {
+    fn get_value(&self) -> &Regex {
+        match self {
+            RegexValueOrRef::Ref(r) => r,
+            RegexValueOrRef::Owned(r) => r,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum StringValueOrRef<'a> {
+    Ref(&'a str),
+    Owned(Rc<String>),
+    OwnedSlice {
+        value: Rc<String>,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl StringValueOrRef<'_> {
+    pub fn new_owned(value: String) -> StringValueOrRef<'static> {
+        StringValueOrRef::Owned(value.into())
+    }
+}
+
+impl<'a> StringValueOrRef<'a> {
+    pub fn new_ref(value: &'a str) -> StringValueOrRef<'a> {
+        StringValueOrRef::Ref(value)
+    }
+
+    pub(crate) fn new_slice(
+        inner_value: StringValueOrRef<'a>,
+        range_start_inclusive: usize,
+        range_end_exclusive: usize,
+    ) -> StringValueOrRef<'a> {
+        let value = inner_value.get_value();
+
+        // Note: Slice of a str returns raw utf8 bytes. Chars can take 1 to 4
+        // bytes. In order to correctly slice the str as chars we have to find
+        // the correct byte indices to do the slicing
+        let count = range_end_exclusive - range_start_inclusive;
+        if count == 0 {
+            return StringValueOrRef::Ref("");
+        }
+
+        let mut chars = value.char_indices().skip(range_start_inclusive).take(count);
+
+        if let Some(first) = chars.next() {
+            let mut buf = [0; 4];
+            let (start, end) = if let Some(last) = chars.last() {
+                let encoded = last.1.encode_utf8(&mut buf);
+
+                (first.0, last.0 + encoded.len())
+            } else {
+                let encoded = first.1.encode_utf8(&mut buf);
+
+                (first.0, first.0 + encoded.len())
+            };
+
+            if end - start == value.len() {
+                inner_value
+            } else {
+                match inner_value {
+                    StringValueOrRef::Ref(r) => StringValueOrRef::Ref(&r[start..end]),
+                    StringValueOrRef::Owned(o) => StringValueOrRef::OwnedSlice {
+                        value: o,
+                        start,
+                        end,
+                    },
+                    StringValueOrRef::OwnedSlice {
+                        value,
+                        start: s,
+                        end: _,
+                    } => {
+                        let start = start + s;
+                        let end = end + s;
+
+                        StringValueOrRef::OwnedSlice { value, start, end }
+                    }
+                }
+            }
+        } else {
+            StringValueOrRef::Ref("")
+        }
+    }
 }
 
 impl StringValue for StringValueOrRef<'_> {
     fn get_value(&self) -> &str {
         match self {
-            StringValueOrRef::Ref(r) => r.get_value(),
+            StringValueOrRef::Ref(s) => s,
             StringValueOrRef::Owned(o) => o,
-            StringValueOrRef::Slice(s) => s.get_value(),
+            StringValueOrRef::OwnedSlice { value, start, end } => &value[*start..*end],
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum IntegerRef<'a> {
-    Int8(&'a i8),
-    Int16(&'a i16),
-    Int32(&'a i32),
-    Int64(&'a i64),
+impl<'a> TryFrom<ResolvedSingleValue<'a>> for StringValueOrRef<'a> {
+    type Error = ResolvedSingleValue<'a>;
 
-    UInt8(&'a u8),
-    UInt16(&'a u16),
-    UInt32(&'a u32),
-    UInt64(&'a u64),
-}
-
-impl IntegerValue for IntegerRef<'_> {
-    fn get_value(&self) -> i64 {
-        match self {
-            IntegerRef::Int8(i) => (**i).into(),
-            IntegerRef::Int16(i) => (**i).into(),
-            IntegerRef::Int32(i) => (**i).into(),
-            IntegerRef::Int64(i) => **i,
-            IntegerRef::UInt8(u) => (**u).into(),
-            IntegerRef::UInt16(u) => (**u).into(),
-            IntegerRef::UInt32(u) => (**u).into(),
-            IntegerRef::UInt64(u) => **u as i64,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum DoubleRef<'a> {
-    Float16(&'a half::f16),
-    Float32(&'a f32),
-    Float64(&'a f64),
-}
-
-impl DoubleValue for DoubleRef<'_> {
-    fn get_value(&self) -> f64 {
-        match self {
-            DoubleRef::Float16(f) => (**f).into(),
-            DoubleRef::Float32(f) => (**f).into(),
-            DoubleRef::Float64(f) => **f,
-        }
-    }
-}
-
-impl<'a, 'b> From<&'b ValueOrRef<'a>> for ValueOrRef<'b> {
-    fn from(value: &'b ValueOrRef<'a>) -> Self {
+    fn try_from(value: ResolvedSingleValue<'a>) -> Result<Self, Self::Error> {
         match value {
-            ValueOrRef::StringRef(s) => ValueOrRef::StringRef(s),
-            ValueOrRef::StringOwned(s) => ValueOrRef::StringRef(s.as_ref()),
-            ValueOrRef::IntegerRef(i) => ValueOrRef::IntegerRef(i.clone()),
-            ValueOrRef::IntegerOwned(i) => ValueOrRef::IntegerOwned(*i),
-            ValueOrRef::DoubleRef(i) => ValueOrRef::DoubleRef(i.clone()),
-            ValueOrRef::DoubleOwned(d) => ValueOrRef::DoubleOwned(*d),
-            ValueOrRef::BooleanOwned(b) => ValueOrRef::BooleanOwned(*b),
-            ValueOrRef::DateTimeOwned(d) => ValueOrRef::DateTimeOwned(*d),
-            ValueOrRef::TimeSpanOwned(t) => ValueOrRef::TimeSpanOwned(*t),
-            ValueOrRef::RegexRef(r) => ValueOrRef::RegexRef(r),
-            ValueOrRef::RegexOwned(r) => ValueOrRef::RegexRef(r),
+            ResolvedSingleValue::Value(ValueOrRef::String(s)) => Ok(s),
+            _ => Err(value),
         }
+    }
+}
+
+impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a> {
+    fn from(value: StringValueOrRef<'a>) -> Self {
+        ResolvedScalarValue::Single(ResolvedSingleValue::Value(ValueOrRef::String(value)))
     }
 }
 
@@ -143,49 +193,33 @@ impl Hash for ValueOrRef<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         //core::mem::discriminant(self).hash(state);
         match self {
-            ValueOrRef::StringRef(s) => {
+            ValueOrRef::String(s) => {
                 [0].hash(state);
-                s.hash(state);
+                s.get_value().hash(state);
             }
-            ValueOrRef::StringOwned(s) => {
-                [0].hash(state);
-                s.hash(state);
-            }
-            ValueOrRef::IntegerRef(i) => {
+            ValueOrRef::Integer(i) => {
                 [1].hash(state);
                 i.get_value().hash(state);
             }
-            ValueOrRef::IntegerOwned(i) => {
-                [1].hash(state);
-                i.get_value().hash(state);
-            }
-            ValueOrRef::DoubleRef(d) => {
+            ValueOrRef::Double(d) => {
                 [2].hash(state);
                 state.write_u64(d.get_value().to_bits());
             }
-            ValueOrRef::DoubleOwned(d) => {
-                [2].hash(state);
-                state.write_u64(d.get_value().to_bits());
-            }
-            ValueOrRef::BooleanOwned(b) => {
+            ValueOrRef::Boolean(b) => {
                 [3].hash(state);
                 b.hash(state);
             }
-            ValueOrRef::DateTimeOwned(d) => {
+            ValueOrRef::DateTime(d) => {
                 [4].hash(state);
                 d.hash(state);
             }
-            ValueOrRef::TimeSpanOwned(t) => {
+            ValueOrRef::TimeSpan(t) => {
                 [5].hash(state);
                 t.hash(state);
             }
-            ValueOrRef::RegexRef(r) => {
+            ValueOrRef::Regex(r) => {
                 [6].hash(state);
-                r.as_str().hash(state);
-            }
-            ValueOrRef::RegexOwned(r) => {
-                [6].hash(state);
-                r.as_str().hash(state);
+                r.get_value().as_str().hash(state);
             }
         }
     }
@@ -194,59 +228,41 @@ impl Hash for ValueOrRef<'_> {
 impl PartialEq for ValueOrRef<'_> {
     fn eq(&self, other: &Self) -> bool {
         match self {
-            ValueOrRef::StringRef(s) => eq_str(s, other),
-            ValueOrRef::StringOwned(s) => eq_str(s, other),
-            ValueOrRef::IntegerRef(i) => eq_int(i.get_value(), other),
-            ValueOrRef::IntegerOwned(i) => eq_int(*i, other),
-            ValueOrRef::DoubleRef(d) => eq_double(d.get_value(), other),
-            ValueOrRef::DoubleOwned(d) => eq_double(*d, other),
-            ValueOrRef::BooleanOwned(b) => match other {
-                ValueOrRef::BooleanOwned(r) => *b == *r,
+            ValueOrRef::String(s) => {
+                if let ValueOrRef::String(other) = other {
+                    s.get_value() == other.get_value()
+                } else {
+                    false
+                }
+            }
+            ValueOrRef::Integer(i) => match other {
+                ValueOrRef::Integer(r) => *i == *r,
                 _ => false,
             },
-            ValueOrRef::DateTimeOwned(d) => match other {
-                ValueOrRef::DateTimeOwned(o) => *d == *o,
+            ValueOrRef::Double(d) => match other {
+                ValueOrRef::Double(r) => *d == *r,
                 _ => false,
             },
-            ValueOrRef::TimeSpanOwned(t) => match other {
-                ValueOrRef::TimeSpanOwned(o) => *t == *o,
+            ValueOrRef::Boolean(b) => match other {
+                ValueOrRef::Boolean(r) => *b == *r,
                 _ => false,
             },
-            ValueOrRef::RegexRef(r) => eq_regex(r, other),
-            ValueOrRef::RegexOwned(r) => eq_regex(r, other),
+            ValueOrRef::DateTime(d) => match other {
+                ValueOrRef::DateTime(o) => *d == *o,
+                _ => false,
+            },
+            ValueOrRef::TimeSpan(t) => match other {
+                ValueOrRef::TimeSpan(o) => *t == *o,
+                _ => false,
+            },
+            ValueOrRef::Regex(r) => {
+                if let ValueOrRef::Regex(other) = other {
+                    r.get_value().as_str() == other.get_value().as_str()
+                } else {
+                    false
+                }
+            }
         }
-    }
-}
-
-fn eq_str(left: &str, right: &ValueOrRef) -> bool {
-    match right {
-        ValueOrRef::StringRef(s) => left == *s,
-        ValueOrRef::StringOwned(s) => left == s,
-        _ => false,
-    }
-}
-
-fn eq_int(left: i64, right: &ValueOrRef) -> bool {
-    match right {
-        ValueOrRef::IntegerRef(i) => left == i.get_value(),
-        ValueOrRef::IntegerOwned(i) => left == *i,
-        _ => false,
-    }
-}
-
-fn eq_double(left: f64, right: &ValueOrRef) -> bool {
-    match right {
-        ValueOrRef::DoubleRef(i) => left == i.get_value(),
-        ValueOrRef::DoubleOwned(i) => left == *i,
-        _ => false,
-    }
-}
-
-fn eq_regex(left: &Regex, right: &ValueOrRef) -> bool {
-    match right {
-        ValueOrRef::RegexRef(i) => left.as_str() == i.as_str(),
-        ValueOrRef::RegexOwned(i) => left.as_str() == i.as_str(),
-        _ => false,
     }
 }
 
@@ -255,33 +271,25 @@ impl Eq for ValueOrRef<'_> {}
 impl AsValue for ValueOrRef<'_> {
     fn get_value_type(&self) -> ValueType {
         match self {
-            ValueOrRef::StringRef(_) => ValueType::String,
-            ValueOrRef::StringOwned(_) => ValueType::String,
-            ValueOrRef::IntegerRef(_) => ValueType::Integer,
-            ValueOrRef::IntegerOwned(_) => ValueType::Integer,
-            ValueOrRef::DoubleRef(_) => ValueType::Double,
-            ValueOrRef::DoubleOwned(_) => ValueType::Double,
-            ValueOrRef::BooleanOwned(_) => ValueType::Boolean,
-            ValueOrRef::DateTimeOwned(_) => ValueType::DateTime,
-            ValueOrRef::TimeSpanOwned(_) => ValueType::TimeSpan,
-            ValueOrRef::RegexRef(_) => ValueType::Regex,
-            ValueOrRef::RegexOwned(_) => ValueType::Regex,
+            ValueOrRef::String(_) => ValueType::String,
+            ValueOrRef::Integer(_) => ValueType::Integer,
+            ValueOrRef::Double(_) => ValueType::Double,
+            ValueOrRef::Boolean(_) => ValueType::Boolean,
+            ValueOrRef::DateTime(_) => ValueType::DateTime,
+            ValueOrRef::TimeSpan(_) => ValueType::TimeSpan,
+            ValueOrRef::Regex(_) => ValueType::Regex,
         }
     }
 
     fn to_value(&self) -> Value<'_> {
         match self {
-            ValueOrRef::StringRef(s) => Value::String(s),
-            ValueOrRef::StringOwned(s) => Value::String(s),
-            ValueOrRef::IntegerRef(i) => Value::Integer(i),
-            ValueOrRef::IntegerOwned(i) => Value::Integer(i),
-            ValueOrRef::DoubleRef(d) => Value::Double(d),
-            ValueOrRef::DoubleOwned(d) => Value::Double(d),
-            ValueOrRef::BooleanOwned(b) => Value::Boolean(b),
-            ValueOrRef::DateTimeOwned(d) => Value::DateTime(d),
-            ValueOrRef::TimeSpanOwned(t) => Value::TimeSpan(t),
-            ValueOrRef::RegexRef(r) => Value::Regex(r),
-            ValueOrRef::RegexOwned(r) => Value::Regex(r),
+            ValueOrRef::String(s) => Value::String(s),
+            ValueOrRef::Integer(i) => Value::Integer(i),
+            ValueOrRef::Double(d) => Value::Double(d),
+            ValueOrRef::Boolean(b) => Value::Boolean(b),
+            ValueOrRef::DateTime(d) => Value::DateTime(d),
+            ValueOrRef::TimeSpan(t) => Value::TimeSpan(t),
+            ValueOrRef::Regex(r) => Value::Regex(r),
         }
     }
 }

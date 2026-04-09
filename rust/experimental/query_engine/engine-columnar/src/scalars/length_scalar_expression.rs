@@ -12,7 +12,7 @@ use crate::{
 pub fn execute_length_scalar_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     length_scalar_expression: &'pipeline LengthScalarExpression,
-) -> Result<ResolvedValue<'c>, ExpressionError>
+) -> Result<ResolvedScalarValue<'c>, ExpressionError>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -26,15 +26,11 @@ where
     inner_value.map_into(
         |single| {
             Ok(match single.to_value() {
-                Value::String(s) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                    OwnedValue::Integer(s.get_value().chars().count() as i64),
-                )),
-                Value::Array(a) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                    OwnedValue::Integer(a.len() as i64),
-                )),
-                Value::Map(m) => ResolvedValue::Single(ResolvedSingleValue::Owned(
-                    OwnedValue::Integer(m.len() as i64),
-                )),
+                Value::String(s) => {
+                    ResolvedScalarValue::new_int(s.get_value().chars().count() as i64)
+                }
+                Value::Array(a) => ResolvedScalarValue::new_int(a.len() as i64),
+                Value::Map(m) => ResolvedScalarValue::new_int(m.len() as i64),
                 v => {
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
@@ -46,16 +42,35 @@ where
                             )
                         },
                     );
-                    ResolvedValue::Single(ResolvedSingleValue::Owned(OwnedValue::Null))
+                    ResolvedScalarValue::new_null()
                 }
             })
         },
         |dictionary| {
-            Ok(ResolvedValue::Dictionary(
-                dictionary.into_len_dictionary(
-                    &execution_context
-                        .create_diagnostic_receiver_for_expression(length_scalar_expression),
-                )?,
+            Ok(ResolvedScalarValue::Dictionary(
+                dictionary.transform_into_any(|v| {
+                    Ok(match v {
+                        Some(ValueOrRef::String(s)) => {
+                            Some(ValueOrRef::Integer(s.get_value().chars().count() as i64))
+                        }
+                        // todo: Map
+                        // todo: Array
+                        Some(v) => {
+                            execution_context.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                length_scalar_expression,
+                                || {
+                                    format!(
+                                        "Cannot calculate the length of '{}' input",
+                                        v.to_value().get_value_type()
+                                    )
+                                },
+                            );
+                            None
+                        }
+                        _ => None,
+                    })
+                })?,
             ))
         },
         |_| todo!(),

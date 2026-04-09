@@ -549,22 +549,22 @@ impl<'record> OtapAttributes<'record> {
         }
         */
         match attribute_type {
-            1 => ValueOrRef::StringRef(unsafe {
+            1 => ValueOrRef::String(StringValueOrRef::Ref(unsafe {
                 self.attribute_string_values
                     .value_unchecked(attribute_value_index as usize)
-            }),
-            2 => ValueOrRef::IntegerOwned(unsafe {
+            })),
+            2 => ValueOrRef::Integer(unsafe {
                 self.attribute_int_values
                     .unwrap()
                     .value_unchecked(attribute_value_index as usize)
             }),
-            3 => ValueOrRef::DoubleOwned(unsafe {
+            3 => ValueOrRef::Double(unsafe {
                 self.attribute_doubles
                     .unwrap()
                     .values()
                     .value_unchecked(attribute_value_index as usize)
             }),
-            4 => ValueOrRef::BooleanOwned(unsafe {
+            4 => ValueOrRef::Boolean(unsafe {
                 self.attribute_bools
                     .unwrap()
                     .values()

@@ -17,7 +17,7 @@ use crate::{
 pub fn execute_scalar_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     scalar_expression: &'pipeline ScalarExpression,
-) -> Result<ResolvedValue<'c>, ExpressionError>
+) -> Result<ResolvedScalarValue<'c>, ExpressionError>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -41,9 +41,7 @@ where
         ScalarExpression::Select(_) => todo!(),
         ScalarExpression::Slice(s) => execute_slice_scalar_expression(execution_context, s)?,
         ScalarExpression::Source(s) => execute_source_scalar_expression(execution_context, s)?,
-        ScalarExpression::Static(s) => {
-            ResolvedValue::Single(ResolvedSingleValue::Ref(s.to_value()))
-        }
+        ScalarExpression::Static(s) => ResolvedScalarValue::new_from_value(s.to_value()),
         ScalarExpression::Temporal(_) => todo!(),
         ScalarExpression::Text(_) => todo!(),
         ScalarExpression::Variable(_) => todo!(),

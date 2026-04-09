@@ -5,8 +5,6 @@ use std::str::FromStr;
 
 use data_engine_expressions::*;
 
-use crate::{ColumnarRecords, execution_context::ExecutionContext};
-
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum ColumnarEngineDiagnosticLevel {
     Verbose = 0,
@@ -82,66 +80,5 @@ impl<'a> ColumnarEngineDiagnostic<'a> {
 
     pub fn get_message(&self) -> &str {
         &self.message
-    }
-}
-
-pub(crate) trait DiagnosticReceiver {
-    fn add_diagnostic_if_enabled<F>(
-        &self,
-        diagnostic_level: ColumnarEngineDiagnosticLevel,
-        generate_message: F,
-    ) where
-        F: FnOnce() -> String;
-}
-
-pub(crate) struct ExecutionContextDiagnosticReceiver<'a, 'pipeline, TRecords: ColumnarRecords> {
-    execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
-    expression: &'pipeline dyn Expression,
-}
-
-impl<'a, 'pipeline, TRecords: ColumnarRecords>
-    ExecutionContextDiagnosticReceiver<'a, 'pipeline, TRecords>
-{
-    pub fn new(
-        execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
-        expression: &'pipeline dyn Expression,
-    ) -> ExecutionContextDiagnosticReceiver<'a, 'pipeline, TRecords> {
-        Self {
-            execution_context,
-            expression,
-        }
-    }
-}
-
-impl<TRecords: ColumnarRecords> DiagnosticReceiver
-    for ExecutionContextDiagnosticReceiver<'_, '_, TRecords>
-{
-    fn add_diagnostic_if_enabled<F>(
-        &self,
-        diagnostic_level: ColumnarEngineDiagnosticLevel,
-        generate_message: F,
-    ) where
-        F: FnOnce() -> String,
-    {
-        self.execution_context.add_diagnostic_if_enabled(
-            diagnostic_level,
-            self.expression,
-            generate_message,
-        );
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct NoopDiagnosticReceiver {}
-
-#[cfg(test)]
-impl DiagnosticReceiver for NoopDiagnosticReceiver {
-    fn add_diagnostic_if_enabled<F>(
-        &self,
-        _diagnostic_level: ColumnarEngineDiagnosticLevel,
-        _generate_message: F,
-    ) where
-        F: FnOnce() -> String,
-    {
     }
 }

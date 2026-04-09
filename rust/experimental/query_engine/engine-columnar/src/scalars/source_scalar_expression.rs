@@ -9,16 +9,17 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
+// todo: can we use one of the dictionary helpers to drive this?
 pub fn execute_source_scalar_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     source_scalar_expression: &'pipeline SourceScalarExpression,
-) -> Result<ResolvedValue<'c>, ExpressionError>
+) -> Result<ResolvedScalarValue<'c>, ExpressionError>
 where
     'a: 'c,
     'pipeline: 'c,
     'record: 'c,
 {
-    let mut root = ResolvedValue::Table(execution_context.get_records().unwrap());
+    let mut root = ResolvedScalarValue::Table(execution_context.get_records().unwrap());
 
     for selector in source_scalar_expression
         .get_value_accessor()
@@ -27,7 +28,7 @@ where
         let next = execute_scalar_expression(execution_context, selector)?.map_into(
             |s| match s.to_value() {
                 Value::String(s) => match root {
-                    ResolvedValue::Table(t) => Ok(t.get_values(s.get_value())),
+                    ResolvedScalarValue::Table(t) => Ok(t.get_values(s.get_value())),
                     _ => todo!(),
                 },
                 _ => todo!(),
@@ -44,7 +45,7 @@ where
                         match v.to_value() {
                             Value::String(s) => {
                                 let value = match root {
-                                    ResolvedValue::Table(t) => {
+                                    ResolvedScalarValue::Table(t) => {
                                         if let Some(RecordTableValue::Dictionary(d)) =
                                             t.get_values(s.get_value())
                                             && let Some(value_index) = d.get_value_index(key)
@@ -82,12 +83,12 @@ where
         match next {
             None => {
                 // todo: Log
-                root = ResolvedValue::Single(ResolvedSingleValue::Owned(OwnedValue::Null));
+                root = ResolvedScalarValue::new_null();
                 break;
             }
             Some(v) => match v {
-                RecordTableValue::Table(t) => root = ResolvedValue::Table(t),
-                RecordTableValue::Dictionary(d) => root = ResolvedValue::Dictionary(d),
+                RecordTableValue::Table(t) => root = ResolvedScalarValue::Table(t),
+                RecordTableValue::Dictionary(d) => root = ResolvedScalarValue::Dictionary(d),
             },
         }
     }

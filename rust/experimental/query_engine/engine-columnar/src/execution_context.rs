@@ -82,11 +82,4 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
     /*pub(crate) fn take_diagnostics(self) -> Vec<ColumnarEngineDiagnostic<'pipeline>> {
         self.diagnostics.take()
     }*/
-
-    pub(crate) fn create_diagnostic_receiver_for_expression(
-        &self,
-        expression: &'pipeline dyn Expression,
-    ) -> ExecutionContextDiagnosticReceiver<'_, 'pipeline, TRecords> {
-        ExecutionContextDiagnosticReceiver::new(self, expression)
-    }
 }
