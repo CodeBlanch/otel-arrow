@@ -14,14 +14,13 @@ use crate::{
     *,
 };
 
-pub fn execute_scalar_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
+pub fn execute_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     scalar_expression: &'pipeline ScalarExpression,
 ) -> Result<ResolvedScalarValue<'c>, ExpressionError>
 where
     'a: 'c,
     'pipeline: 'c,
-    'record: 'c,
 {
     let value = match scalar_expression {
         ScalarExpression::Argument(_) => todo!(),

@@ -7,7 +7,7 @@ use std::{
     fmt::{Debug, Display, Write},
 };
 
-use arrow::array::*;
+use arrow::{array::*, datatypes::DataType};
 use data_engine_expressions::*;
 
 use crate::{
@@ -306,6 +306,8 @@ where
     fn is_empty(&self) -> bool {
         self.len() > 0
     }
+
+    fn get_key_data_type(&self) -> DataType;
 }
 
 pub trait RecordTable: Display + Debug {

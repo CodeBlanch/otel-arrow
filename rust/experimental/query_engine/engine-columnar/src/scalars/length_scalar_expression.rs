@@ -9,14 +9,13 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression,
 };
 
-pub fn execute_length_scalar_expression<'a, 'pipeline, 'record, 'c, TRecords: ColumnarRecords>(
+pub fn execute_length_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     length_scalar_expression: &'pipeline LengthScalarExpression,
 ) -> Result<ResolvedScalarValue<'c>, ExpressionError>
 where
     'a: 'c,
     'pipeline: 'c,
-    'record: 'c,
 {
     let inner_value = execute_scalar_expression(
         execution_context,

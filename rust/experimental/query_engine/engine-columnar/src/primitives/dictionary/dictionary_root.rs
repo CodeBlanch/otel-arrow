@@ -72,7 +72,7 @@ impl<'a> Dictionary<'a> {
         self.keys.get_value_index_for_key_index(key_index)
     }
 
-    pub fn get_value(&self, key_index: usize) -> Option<ValueOrRef<'_>> {
+    pub fn get_value(&self, key_index: usize) -> Option<ValueOrRef<'a>> {
         if let Some(value_index) = self.get_value_index(key_index) {
             return self.values.get_value_at(value_index);
         }

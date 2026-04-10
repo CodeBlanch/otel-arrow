@@ -32,14 +32,14 @@ impl<'a> ResolvedScalarValue<'a> {
 
     pub fn map_into<FSingle, FDictionary, FTable, FRet>(
         self,
-        mut when_single: FSingle,
-        mut when_dictionary: FDictionary,
-        mut when_table: FTable,
+        when_single: FSingle,
+        when_dictionary: FDictionary,
+        when_table: FTable,
     ) -> Result<FRet, ExpressionError>
     where
-        FSingle: FnMut(ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
-        FDictionary: FnMut(Dictionary<'a>) -> Result<FRet, ExpressionError>,
-        FTable: FnMut(&'a dyn RecordTable) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
+        FDictionary: FnOnce(Dictionary<'a>) -> Result<FRet, ExpressionError>,
+        FTable: FnOnce(&'a dyn RecordTable) -> Result<FRet, ExpressionError>,
     {
         match self {
             ResolvedScalarValue::Single(single) => when_single(single),

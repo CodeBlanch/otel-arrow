@@ -178,6 +178,10 @@ impl ColumnarRecords for OtapLogRecordBatch<'_> {
     fn len(&self) -> usize {
         self.logs.map_or(0, |v| v.num_rows())
     }
+
+    fn get_key_data_type(&self) -> DataType {
+        DataType::UInt16
+    }
 }
 
 impl<'record> RecordTable for OtapLogRecordBatch<'record> {
