@@ -7,6 +7,8 @@ pub(crate) mod execution_context;
 pub(crate) mod logical_expressions;
 pub(crate) mod primitives;
 pub(crate) mod scalars;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 pub use engine::*;
 pub use engine_diagnostic::*;

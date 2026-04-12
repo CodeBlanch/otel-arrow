@@ -7,7 +7,7 @@ use std::{
     fmt::{Debug, Display, Write},
 };
 
-use arrow::{array::*, datatypes::DataType};
+use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
 
 use crate::{
@@ -301,16 +301,18 @@ where
 {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel>;
 
+    fn get_key_data_type(&self) -> DataType;
+
     fn len(&self) -> usize;
 
     fn is_empty(&self) -> bool {
         self.len() > 0
     }
-
-    fn get_key_data_type(&self) -> DataType;
 }
 
 pub trait RecordTable: Display + Debug {
+    //fn get_keys(&self) -> &[&str];
+
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>>;
 }
 

@@ -175,12 +175,12 @@ impl ColumnarRecords for OtapLogRecordBatch<'_> {
         self.diagnostic_level
     }
 
-    fn len(&self) -> usize {
-        self.logs.map_or(0, |v| v.num_rows())
-    }
-
     fn get_key_data_type(&self) -> DataType {
         DataType::UInt16
+    }
+
+    fn len(&self) -> usize {
+        self.logs.map_or(0, |v| v.num_rows())
     }
 }
 
