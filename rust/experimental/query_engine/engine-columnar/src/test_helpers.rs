@@ -10,28 +10,28 @@ use indexmap::IndexSet;
 
 use crate::{execution_context::*, resolved_value::*, scalars::execute_scalar_expression, *};
 
-pub(crate) fn run_scalar_expression_test<FValidate>(records: TestRecords, expression: ScalarExpression, validate: FValidate)
-where
+pub(crate) fn run_scalar_expression_test<FValidate>(
+    records: TestRecords,
+    expression: ScalarExpression,
+    validate: FValidate,
+) where
     for<'a> FValidate: FnOnce(Result<ResolvedScalarValue<'a>, ExpressionError>),
 {
     let d = RefCell::new(vec![]);
 
     let p = Default::default();
 
-    let ec = ExecutionContext::new(
-        ColumnarEngineDiagnosticLevel::Error,
-        &d,
-        &p,
-        Some(records));
+    let ec = ExecutionContext::new(ColumnarEngineDiagnosticLevel::Error, &d, &p, Some(records));
 
-    let result = execute_scalar_expression(
-        &ec,
-        &expression);
+    let result = execute_scalar_expression(&ec, &expression);
 
     validate(result)
 }
 
-pub(crate) fn build_indexset_dictionary<'a>(keys: Vec<Option<u16>>, values: Vec<ValueOrRef<'a>>) -> Dictionary<'a> {
+pub(crate) fn build_indexset_dictionary<'a>(
+    keys: Vec<Option<u16>>,
+    values: Vec<ValueOrRef<'a>>,
+) -> Dictionary<'a> {
     let mut key_builder = PrimitiveBuilder::<UInt16Type>::new();
 
     for key in keys {
@@ -50,14 +50,12 @@ pub(crate) fn build_indexset_dictionary<'a>(keys: Vec<Option<u16>>, values: Vec<
         assert!(inserted);
     }
 
-    Dictionary::new(
-        keys.into(),
-        set.into())
+    Dictionary::new(keys.into(), set.into())
 }
 
 #[derive(Debug)]
 pub(crate) struct TestRecords<'a> {
-    values: HashMap<Box<str>, Dictionary<'a>>
+    values: HashMap<Box<str>, Dictionary<'a>>,
 }
 
 impl<'a> TestRecords<'a> {
@@ -82,7 +80,9 @@ impl<'a> ColumnarRecords for TestRecords<'a> {
 
 impl<'a> RecordTable for TestRecords<'a> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'a>> {
-        self.values.get(key).map(|v| RecordTableValue::Dictionary(v.clone()))
+        self.values
+            .get(key)
+            .map(|v| RecordTableValue::Dictionary(v.clone()))
     }
 }
 

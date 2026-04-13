@@ -7,7 +7,8 @@ use data_engine_expressions::*;
 use indexmap::IndexSet;
 
 use crate::{
-    dictionary_transform::push_null, execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *
+    dictionary_transform::push_null, execution_context::ExecutionContext, resolved_value::*,
+    scalars::execute_scalar_expression, *,
 };
 
 pub fn execute_source_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
@@ -48,7 +49,10 @@ where
                     }
                     ResolvedScalarValue::Single(s) => {
                         match s.to_value() {
-                            // todo: support map
+                            Value::Map(_) => {
+                                // todo: support map
+                                todo!()
+                            }
                             v => {
                                 execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
@@ -112,7 +116,8 @@ where
 
 fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
     source: &ResolvedScalarValue<'a>,
-    selector: Dictionary<'a>) -> RecordTableValue<'a> {
+    selector: Dictionary<'a>,
+) -> RecordTableValue<'a> {
     let key_count = selector.len();
 
     let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_count);
@@ -124,7 +129,11 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
     let mut values = IndexSet::with_hasher(RandomState::new());
 
     for key_index in 0..key_count {
-        match selector.get_value(key_index).as_ref().map_or(Value::Null,|v| v.to_value()) {
+        match selector
+            .get_value(key_index)
+            .as_ref()
+            .map_or(Value::Null, |v| v.to_value())
+        {
             Value::String(selector_value_string) => {
                 let value = match source {
                     ResolvedScalarValue::Table(t) => {
@@ -142,7 +151,10 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
                 };
                 if let Some(v) = value {
                     let (index, _) = values.insert_full(v);
-                    unsafe { *key_builder.add(key_index) = <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap() };
+                    unsafe {
+                        *key_builder.add(key_index) =
+                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap()
+                    };
                 } else {
                     push_null(&mut null_buffer, key_index, key_bit_length);
                 }

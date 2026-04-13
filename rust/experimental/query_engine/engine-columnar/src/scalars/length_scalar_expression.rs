@@ -76,7 +76,7 @@ where
             // what is length of table? a dictionary where each record points to a count of key\values?
             // that would make it equivalent to len(single_map)
             todo!()
-        }
+        },
     )
 }
 

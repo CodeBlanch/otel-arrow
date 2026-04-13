@@ -298,73 +298,90 @@ mod tests {
                 ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
                 ValueOrRef::String(StringValueOrRef::new_owned("goodbye world".into())),
                 ValueOrRef::String(StringValueOrRef::new_owned("goodbye".into())),
-                ValueOrRef::Integer(0)
-            ]
+                ValueOrRef::Integer(0),
+            ],
         );
 
         let slice_no_ranges = SliceScalarExpression::new(
             QueryLocation::new_fake(),
             ScalarExpression::Source(SourceScalarExpression::new(
                 QueryLocation::new_fake(),
-                ValueAccessor::new_with_selectors(vec![
-                    ScalarExpression::Static(StaticScalarExpression::String(StringScalarExpression::new(
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
                         QueryLocation::new_fake(),
-                        "values")))
-                ]))),
+                        "values",
+                    )),
+                )]),
+            )),
             None,
-            None);
+            None,
+        );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([("values".into(), values_dictionary.clone())])),
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
             ScalarExpression::Slice(slice_no_ranges),
             |r| {
                 valid_full_range_result(r);
-            }
+            },
         );
 
         let slice_full_ranges = SliceScalarExpression::new(
             QueryLocation::new_fake(),
             ScalarExpression::Source(SourceScalarExpression::new(
                 QueryLocation::new_fake(),
-                ValueAccessor::new_with_selectors(vec![
-                    ScalarExpression::Static(StaticScalarExpression::String(StringScalarExpression::new(
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
                         QueryLocation::new_fake(),
-                        "values")))
-                ]))),
-            Some(ScalarExpression::Static(StaticScalarExpression::Integer(IntegerScalarExpression::new(
-                QueryLocation::new_fake(),
-                0)))),
-            None);
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 0),
+            ))),
+            None,
+        );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([("values".into(), values_dictionary.clone())])),
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
             ScalarExpression::Slice(slice_full_ranges),
             |r| {
                 valid_full_range_result(r);
-            }
+            },
         );
 
         let slice_ranges = SliceScalarExpression::new(
             QueryLocation::new_fake(),
             ScalarExpression::Source(SourceScalarExpression::new(
                 QueryLocation::new_fake(),
-                ValueAccessor::new_with_selectors(vec![
-                    ScalarExpression::Static(StaticScalarExpression::String(StringScalarExpression::new(
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
                         QueryLocation::new_fake(),
-                        "values")))
-                ]))),
-            Some(ScalarExpression::Static(StaticScalarExpression::Integer(IntegerScalarExpression::new(
-                QueryLocation::new_fake(),
-                3)))),
-            Some(ScalarExpression::Static(StaticScalarExpression::Integer(IntegerScalarExpression::new(
-                QueryLocation::new_fake(),
-                2)))),);
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 3),
+            ))),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 2),
+            ))),
+        );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([("values".into(), values_dictionary.clone())])),
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
             ScalarExpression::Slice(slice_ranges),
-            |r| {
-            match r.unwrap() {
+            |r| match r.unwrap() {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -377,53 +394,203 @@ mod tests {
                         actual
                     );
                 }
-                _ => assert!(false)
-            }
-        });
+                _ => panic!("test failure"),
+            },
+        );
 
         let slice_ranges_long = SliceScalarExpression::new(
             QueryLocation::new_fake(),
             ScalarExpression::Source(SourceScalarExpression::new(
                 QueryLocation::new_fake(),
-                ValueAccessor::new_with_selectors(vec![
-                    ScalarExpression::Static(StaticScalarExpression::String(StringScalarExpression::new(
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
                         QueryLocation::new_fake(),
-                        "values")))
-                ]))),
-            Some(ScalarExpression::Static(StaticScalarExpression::Integer(IntegerScalarExpression::new(
-                QueryLocation::new_fake(),
-                3)))),
-            Some(ScalarExpression::Static(StaticScalarExpression::Integer(IntegerScalarExpression::new(
-                QueryLocation::new_fake(),
-                10)))),);
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 3),
+            ))),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 10),
+            ))),
+        );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([("values".into(), values_dictionary)])),
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
             ScalarExpression::Slice(slice_ranges_long),
-            |r| {
-            match r.unwrap() {
+            |r| match r.unwrap() {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
                             vec![Some(0), Some(0), None, Some(1), Some(2), None],
                             vec![
                                 ValueOrRef::String(StringValueOrRef::new_owned("lo world".into())),
-                                ValueOrRef::String(StringValueOrRef::new_owned("dbye world".into())),
+                                ValueOrRef::String(StringValueOrRef::new_owned(
+                                    "dbye world".into()
+                                )),
                                 ValueOrRef::String(StringValueOrRef::new_owned("dbye".into())),
                             ]
                         ),
                         actual
                     );
                 }
-                _ => assert!(false)
-            }
-        });
+                _ => panic!("test failure"),
+            },
+        );
 
-        // todo: start failure
+        let slice_null = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            None,
+            None,
+        );
 
-        // todo: length failure
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Slice(slice_null),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Single(ResolvedSingleValue::Null) => {}
+                _ => panic!("test failure"),
+            },
+        );
 
-        // todo: range failure
+        let slice_invalid_start = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Static(StaticScalarExpression::String(
+                StringScalarExpression::new(QueryLocation::new_fake(), "invalid"),
+            ))),
+            None,
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Slice(slice_invalid_start),
+            |r| {
+                matches!(r.unwrap_err(), ExpressionError::TypeMismatch(_, _));
+            },
+        );
+
+        let slice_negative_start = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), -1),
+            ))),
+            None,
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Slice(slice_negative_start),
+            |r| {
+                matches!(r.unwrap_err(), ExpressionError::ValidationFailure(_, _));
+            },
+        );
+
+        let slice_invalid_length = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            None,
+            Some(ScalarExpression::Static(StaticScalarExpression::String(
+                StringScalarExpression::new(QueryLocation::new_fake(), "invalid"),
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Slice(slice_invalid_length),
+            |r| {
+                matches!(r.unwrap_err(), ExpressionError::TypeMismatch(_, _));
+            },
+        );
+
+        let slice_negative_length = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            None,
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), -1),
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Slice(slice_negative_length),
+            |r| {
+                matches!(r.unwrap_err(), ExpressionError::ValidationFailure(_, _));
+            },
+        );
+
+        let slice_invalid_range = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 100),
+            ))),
+            None,
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([("values".into(), values_dictionary)])),
+            ScalarExpression::Slice(slice_invalid_range),
+            |r| {
+                matches!(r.unwrap_err(), ExpressionError::ValidationFailure(_, _));
+            },
+        );
     }
 
     fn valid_full_range_result(result: Result<ResolvedScalarValue<'_>, ExpressionError>) {
@@ -441,7 +608,7 @@ mod tests {
                     actual
                 );
             }
-            _ => assert!(false)
+            _ => panic!("test failure"),
         }
     }
 
