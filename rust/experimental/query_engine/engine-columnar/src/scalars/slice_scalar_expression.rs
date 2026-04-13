@@ -18,13 +18,13 @@ where
     let inner_value =
         execute_scalar_expression(execution_context, slice_scalar_expression.get_source())?;
 
-    let range_start_inclusive_expression = slice_scalar_expression.get_range_start_inclusive();
+    let range_start_inclusive_expression = slice_scalar_expression.get_range_start();
     let range_start_inclusive = match range_start_inclusive_expression {
         Some(start) => execute_scalar_expression(execution_context, start)?,
         None => ResolvedScalarValue::new_int(0),
     };
 
-    let range_length_expression = slice_scalar_expression.get_range_end_exclusive();
+    let range_length_expression = slice_scalar_expression.get_range_length();
     let range_length = match range_length_expression {
         Some(length) => execute_scalar_expression(execution_context, length)?,
         None => ResolvedScalarValue::new_null(),
@@ -175,7 +175,7 @@ where
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
                         slice_scalar_expression
-                            .get_range_start_inclusive()
+                            .get_range_start()
                             .expect("has range start"),
                         || "Range start for a slice expression should be an integer type".into(),
                     );
@@ -189,7 +189,7 @@ where
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
                         slice_scalar_expression
-                            .get_range_end_exclusive()
+                            .get_range_length()
                             .expect("has range end"),
                         || "Range end for a slice expression should be an integer type".into(),
                     );
@@ -201,7 +201,7 @@ where
                 Ok(Some(ValueOrRef::Integer(match v {
                     Some(start) => SliceScalarExpression::validate_resolved_range_value(
                         slice_scalar_expression
-                            .get_range_start_inclusive()
+                            .get_range_start()
                             .expect("has range start")
                             .get_query_location(),
                         "start",
@@ -216,7 +216,7 @@ where
                     Some(length) => Some(ValueOrRef::Integer(
                         SliceScalarExpression::validate_resolved_range_value(
                             slice_scalar_expression
-                                .get_range_end_exclusive()
+                                .get_range_length()
                                 .expect("has range end")
                                 .get_query_location(),
                             "length",
@@ -358,7 +358,7 @@ mod tests {
                 3)))),
             Some(ScalarExpression::Static(StaticScalarExpression::Integer(IntegerScalarExpression::new(
                 QueryLocation::new_fake(),
-                5)))),);
+                2)))),);
 
         run_scalar_expression_test(
             TestRecords::new(HashMap::from([("values".into(), values_dictionary.clone())])),
@@ -418,6 +418,12 @@ mod tests {
                 _ => assert!(false)
             }
         });
+
+        // todo: start failure
+
+        // todo: length failure
+
+        // todo: range failure
     }
 
     fn valid_full_range_result(result: Result<ResolvedScalarValue<'_>, ExpressionError>) {

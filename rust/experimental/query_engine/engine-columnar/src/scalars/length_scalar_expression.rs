@@ -79,3 +79,22 @@ where
         }
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::test_helpers::*;
+
+    use super::*;
+
+    #[test]
+    fn test_length_single() {
+        todo!()
+    }
+
+    #[test]
+    fn test_length_dictionary() {
+        todo!()
+    }
+}
