@@ -29,4 +29,22 @@ impl ExpressionError {
             ExpressionError::NotSupported(l, _) => l,
         }
     }
+
+    pub fn get_message(&self) -> &str {
+        match self {
+            ExpressionError::TypeMismatch(_, message) => message,
+            ExpressionError::ValidationFailure(_, message) => message,
+            ExpressionError::ParseError(_, message) => message,
+            ExpressionError::NotSupported(_, message) => message,
+        }
+    }
+
+    pub fn into_parts(self) -> (QueryLocation, String) {
+        match self {
+            ExpressionError::TypeMismatch(l, m) => (l, m),
+            ExpressionError::ValidationFailure(l, m) => (l, m),
+            ExpressionError::ParseError(l, m) => (l, m),
+            ExpressionError::NotSupported(l, m) => (l, m),
+        }
+    }
 }
