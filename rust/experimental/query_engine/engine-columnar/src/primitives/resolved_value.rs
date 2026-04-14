@@ -120,12 +120,14 @@ pub(crate) enum ResolvedSingleValue<'a> {
 impl<'a> ResolvedSingleValue<'a> {
     pub fn new_from_value(value: Value<'a>) -> ResolvedSingleValue<'a> {
         match value {
-            Value::Array(a) => todo!(),
+            Value::Array(a) => {
+                ResolvedSingleValue::Value(ValueOrRef::Array(ArrayValueOrRef::Ref(a)))
+            }
             Value::Boolean(b) => ResolvedSingleValue::Value(ValueOrRef::Boolean(b.get_value())),
             Value::DateTime(d) => ResolvedSingleValue::Value(ValueOrRef::DateTime(d.get_value())),
             Value::Double(d) => ResolvedSingleValue::Value(ValueOrRef::Double(d.get_value())),
             Value::Integer(i) => ResolvedSingleValue::Value(ValueOrRef::Integer(i.get_value())),
-            Value::Map(m) => todo!(),
+            Value::Map(m) => ResolvedSingleValue::Value(ValueOrRef::Map(MapValueOrRef::Ref(m))),
             Value::Null => ResolvedSingleValue::Null,
             Value::Regex(r) => {
                 ResolvedSingleValue::Value(ValueOrRef::Regex(RegexValueOrRef::Ref(r.get_value())))

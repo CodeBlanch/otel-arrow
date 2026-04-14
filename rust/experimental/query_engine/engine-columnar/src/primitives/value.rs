@@ -47,13 +47,25 @@ pub(crate) fn fmt_value(value: Value<'_>, f: &mut std::fmt::Formatter<'_>) -> st
 
 #[derive(Debug, Clone)]
 pub enum ValueOrRef<'a> {
-    String(StringValueOrRef<'a>),
-    Integer(i64),
-    Double(f64),
+    Array(ArrayValueOrRef<'a>),
     Boolean(bool),
     DateTime(DateTime<FixedOffset>),
-    TimeSpan(TimeDelta),
+    Double(f64),
+    Integer(i64),
+    Map(MapValueOrRef<'a>),
     Regex(RegexValueOrRef<'a>),
+    String(StringValueOrRef<'a>),
+    TimeSpan(TimeDelta),
+}
+
+#[derive(Debug, Clone)]
+pub enum ArrayValueOrRef<'a> {
+    Ref(&'a dyn ArrayValue),
+}
+
+#[derive(Debug, Clone)]
+pub enum MapValueOrRef<'a> {
+    Ref(&'a dyn MapValue),
 }
 
 #[derive(Debug, Clone)]
@@ -191,7 +203,6 @@ impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a> {
 
 impl Hash for ValueOrRef<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        //core::mem::discriminant(self).hash(state);
         match self {
             ValueOrRef::String(s) => {
                 [0].hash(state);
@@ -220,6 +231,39 @@ impl Hash for ValueOrRef<'_> {
             ValueOrRef::Regex(r) => {
                 [6].hash(state);
                 r.get_value().as_str().hash(state);
+            }
+            ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => {
+                [7].hash(state);
+                a.len().hash(state);
+                a.get_items(&mut IndexValueClosureCallback::new(|_, v| {
+                    match TryInto::<ValueOrRef>::try_into(v) {
+                        Ok(v) => {
+                            [1].hash(state);
+                            v.hash(state)
+                        }
+                        Err(()) => {
+                            [0].hash(state);
+                        }
+                    }
+                    true
+                }));
+            }
+            ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
+                [8].hash(state);
+                m.len().hash(state);
+                m.get_items(&mut KeyValueClosureCallback::new(|k, v| {
+                    k.hash(state);
+                    match TryInto::<ValueOrRef>::try_into(v) {
+                        Ok(v) => {
+                            [1].hash(state);
+                            v.hash(state)
+                        }
+                        Err(()) => {
+                            [0].hash(state);
+                        }
+                    }
+                    true
+                }));
             }
         }
     }
@@ -262,6 +306,56 @@ impl PartialEq for ValueOrRef<'_> {
                     false
                 }
             }
+            ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => {
+                if let ValueOrRef::Array(ArrayValueOrRef::Ref(other)) = other
+                    && a.len() == other.len()
+                {
+                    for index in 0..a.len() {
+                        match (a.get(index), other.get(index)) {
+                            (None, None) => {}
+                            (Some(l), Some(r)) => {
+                                match (
+                                    TryInto::<ValueOrRef>::try_into(l.to_value()),
+                                    TryInto::<ValueOrRef>::try_into(r.to_value()),
+                                ) {
+                                    (Ok(l), Ok(r)) => {
+                                        if l != r {
+                                            return false;
+                                        }
+                                    }
+                                    (Err(()), Err(())) => {}
+                                    _ => return false,
+                                }
+                            }
+                            _ => return false,
+                        }
+                    }
+                    return true;
+                }
+
+                false
+            }
+            ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
+                if let ValueOrRef::Map(MapValueOrRef::Ref(other)) = other
+                    && m.len() == other.len()
+                {
+                    return m.get_items(&mut KeyValueClosureCallback::new(|k, l| {
+                        match other.get(k) {
+                            None => false,
+                            Some(r) => match (
+                                TryInto::<ValueOrRef>::try_into(l),
+                                TryInto::<ValueOrRef>::try_into(r.to_value()),
+                            ) {
+                                (Ok(l), Ok(r)) => l == r,
+                                (Err(()), Err(())) => true,
+                                _ => false,
+                            },
+                        }
+                    }));
+                }
+
+                false
+            }
         }
     }
 }
@@ -271,6 +365,7 @@ impl Eq for ValueOrRef<'_> {}
 impl AsValue for ValueOrRef<'_> {
     fn get_value_type(&self) -> ValueType {
         match self {
+            ValueOrRef::Array(_) => ValueType::Array,
             ValueOrRef::String(_) => ValueType::String,
             ValueOrRef::Integer(_) => ValueType::Integer,
             ValueOrRef::Double(_) => ValueType::Double,
@@ -278,6 +373,7 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::DateTime(_) => ValueType::DateTime,
             ValueOrRef::TimeSpan(_) => ValueType::TimeSpan,
             ValueOrRef::Regex(_) => ValueType::Regex,
+            ValueOrRef::Map(_) => ValueType::Map,
         }
     }
 
@@ -290,6 +386,27 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::DateTime(d) => Value::DateTime(d),
             ValueOrRef::TimeSpan(t) => Value::TimeSpan(t),
             ValueOrRef::Regex(r) => Value::Regex(r),
+            ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => Value::Array(*a),
+            ValueOrRef::Map(MapValueOrRef::Ref(m)) => Value::Map(*m),
+        }
+    }
+}
+
+impl<'a> TryInto<ValueOrRef<'a>> for Value<'a> {
+    type Error = ();
+
+    fn try_into(self) -> Result<ValueOrRef<'a>, Self::Error> {
+        match self {
+            Value::Array(a) => Ok(ValueOrRef::Array(ArrayValueOrRef::Ref(a))),
+            Value::Boolean(b) => Ok(ValueOrRef::Boolean(b.get_value())),
+            Value::DateTime(d) => Ok(ValueOrRef::DateTime(d.get_value())),
+            Value::Double(d) => Ok(ValueOrRef::Double(d.get_value())),
+            Value::Integer(i) => Ok(ValueOrRef::Integer(i.get_value())),
+            Value::Map(m) => Ok(ValueOrRef::Map(MapValueOrRef::Ref(m))),
+            Value::Null => Err(()),
+            Value::Regex(r) => Ok(ValueOrRef::Regex(RegexValueOrRef::Ref(r.get_value()))),
+            Value::String(s) => Ok(ValueOrRef::String(StringValueOrRef::Ref(s.get_value()))),
+            Value::TimeSpan(t) => Ok(ValueOrRef::TimeSpan(t.get_value())),
         }
     }
 }

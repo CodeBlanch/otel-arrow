@@ -90,7 +90,62 @@ mod tests {
 
     #[test]
     fn test_length_single() {
-        todo!()
+        let length_string = LengthScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Static(StaticScalarExpression::String(StringScalarExpression::new(
+                QueryLocation::new_fake(),
+                "hello world",
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Length(length_string),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Single(ResolvedSingleValue::Value(actual)) => {
+                    assert_eq!(Value::Integer(&11), actual.to_value());
+                }
+                _ => panic!("test failure"),
+            },
+        );
+
+        let length_array = LengthScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Static(StaticScalarExpression::Array(ArrayScalarExpression::new(
+                QueryLocation::new_fake(),
+                vec![],
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Length(length_array),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Single(ResolvedSingleValue::Value(actual)) => {
+                    assert_eq!(Value::Integer(&0), actual.to_value());
+                }
+                _ => panic!("test failure"),
+            },
+        );
+
+        let length_map = LengthScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Static(StaticScalarExpression::Map(MapScalarExpression::new(
+                QueryLocation::new_fake(),
+                HashMap::new(),
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Length(length_map),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Single(ResolvedSingleValue::Value(actual)) => {
+                    assert_eq!(Value::Integer(&0), actual.to_value());
+                }
+                _ => panic!("test failure"),
+            },
+        );
     }
 
     #[test]
