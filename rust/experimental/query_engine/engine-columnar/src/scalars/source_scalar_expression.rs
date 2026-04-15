@@ -39,30 +39,37 @@ where
         .get_value_accessor()
         .get_selectors()
     {
-        let next = execute_scalar_expression(execution_context, selector)?.map_into(
-            |s| match s.to_value() {
-                Value::String(single) => match &current {
+        let next = execute_scalar_expression(execution_context, selector)?.map_into_with_state(
+            current,
+            |current, s| match s.to_value() {
+                Value::String(single) => match current {
                     ResolvedScalarValue::Table(t) => Ok(t.get_values(single.get_value())),
-                    ResolvedScalarValue::Dictionary(_) => {
-                        // todo: support dictionary... foreach key in dictionary if value is a map select using the string
-                        todo!()
+                    ResolvedScalarValue::Dictionary(d) => {
+                        Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
+                            Ok(v.and_then(|v| {
+                                if let ValueOrRef::Map(m) = v {
+                                    match m {
+                                        MapValueOrRef::Ref(m) => {
+                                            m.get(single.get_value()).and_then(|v| {
+                                                TryInto::<ValueOrRef>::try_into(v.to_value()).ok()
+                                            })
+                                        }
+                                        MapValueOrRef::Owned(mut o) => {
+                                            o.get_values_mut().remove(single.get_value())
+                                        }
+                                    }
+                                } else {
+                                    execution_context.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        source_scalar_expression,
+                                        || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
+                                    );
+                                    None
+                                }
+                            }))
+                        })?)))
                     }
-                    ResolvedScalarValue::Single(s) => {
-                        match s.to_value() {
-                            Value::Map(_) => {
-                                // todo: support map
-                                todo!()
-                            }
-                            v => {
-                                execution_context.add_diagnostic_if_enabled(
-                                    ColumnarEngineDiagnosticLevel::Warn,
-                                    source_scalar_expression,
-                                    || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
-                                );
-                                Ok(None)
-                            }
-                        }
-                    }
+                    ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                 },
                 // todo: integer support for arrays
                 v => {
@@ -74,7 +81,7 @@ where
                     Ok(None)
                 }
             },
-            |dictionary| {
+            |current, dictionary| {
                 Ok(Some(match key_data_type {
                     DataType::UInt8 => select_using_dictionary::<UInt8Type>(&current, dictionary),
                     DataType::UInt16 => select_using_dictionary::<UInt16Type>(&current, dictionary),
@@ -89,7 +96,7 @@ where
                     _ => panic!("Key type is not supported"),
                 }))
             },
-            |_| {
+            |_, _| {
                 execution_context.add_diagnostic_if_enabled(
                     ColumnarEngineDiagnosticLevel::Warn,
                     source_scalar_expression,
@@ -175,4 +182,120 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
         .into(),
         values.into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::test_helpers::*;
+
+    use super::*;
+
+    #[test]
+    fn test_select_from_source_table_using_single_string() {
+        let values_dictionary = build_indexset_dictionary(
+            vec![Some(0), Some(0), None, Some(1), Some(2), Some(3)],
+            vec![
+                ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
+                ValueOrRef::String(StringValueOrRef::new_owned("goodbye world".into())),
+                ValueOrRef::Map(MapValueOrRef::from([(
+                    "key1".into(),
+                    ValueOrRef::Integer(18),
+                )])),
+                ValueOrRef::Integer(0),
+            ],
+        );
+
+        let select_valid_key = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                StaticScalarExpression::String(StringScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    "values",
+                )),
+            )]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Source(select_valid_key),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => assert_eq!(values_dictionary, actual),
+                _ => panic!("test failure"),
+            },
+        );
+
+        let select_invalid_key = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                StaticScalarExpression::String(StringScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    "unknown",
+                )),
+            )]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Source(select_invalid_key),
+            |r| {
+                matches!(
+                    r,
+                    Ok(ResolvedScalarValue::Single(ResolvedSingleValue::Null))
+                );
+            },
+        );
+
+        let select_root =
+            SourceScalarExpression::new(QueryLocation::new_fake(), ValueAccessor::new());
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Source(select_root),
+            |r| {
+                matches!(r, Ok(ResolvedScalarValue::Table(_)));
+            },
+        );
+
+        let select_sub_key = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "key1"),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Source(select_sub_key),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![None, None, None, None, Some(0), None],
+                            vec![ValueOrRef::Integer(18)]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
+    }
+
+    #[test]
+    fn test_select_from_source_table_using_dictionary() {
+        todo!()
+    }
 }

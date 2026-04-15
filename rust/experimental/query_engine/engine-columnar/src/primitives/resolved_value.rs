@@ -48,6 +48,25 @@ impl<'a> ResolvedScalarValue<'a> {
         }
     }
 
+    pub fn map_into_with_state<TState, FSingle, FDictionary, FTable, FRet>(
+        self,
+        state: TState,
+        when_single: FSingle,
+        when_dictionary: FDictionary,
+        when_table: FTable,
+    ) -> Result<FRet, ExpressionError>
+    where
+        FSingle: FnOnce(TState, ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
+        FDictionary: FnOnce(TState, Dictionary<'a>) -> Result<FRet, ExpressionError>,
+        FTable: FnOnce(TState, &'a dyn RecordTable) -> Result<FRet, ExpressionError>,
+    {
+        match self {
+            ResolvedScalarValue::Single(single) => when_single(state, single),
+            ResolvedScalarValue::Dictionary(dictionary) => when_dictionary(state, dictionary),
+            ResolvedScalarValue::Table(table) => when_table(state, table),
+        }
+    }
+
     pub fn try_into_dictionary(
         self,
         key_count: usize,

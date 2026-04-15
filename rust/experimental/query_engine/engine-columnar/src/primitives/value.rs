@@ -1,10 +1,12 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use ahash::RandomState;
 use chrono::{DateTime, FixedOffset, TimeDelta};
 use data_engine_expressions::*;
 use regex::Regex;
@@ -67,7 +69,77 @@ pub enum ArrayValueOrRef<'a> {
 #[derive(Debug, Clone)]
 pub enum MapValueOrRef<'a> {
     Ref(&'a dyn MapValue),
-    //Owned(AHashMap<Box<str>, ValueOrRef<'a>>)
+    Owned(OwnedMapValue<'a>),
+}
+
+impl<'a> MapValueOrRef<'a> {
+    pub fn as_map_value(&'a self) -> &'a dyn MapValue {
+        match self {
+            MapValueOrRef::Ref(m) => *m,
+            MapValueOrRef::Owned(m) => m,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnedMapValue<'a> {
+    values: HashMap<Box<str>, ValueOrRef<'a>, RandomState>,
+}
+
+impl<'a> OwnedMapValue<'a> {
+    pub fn new() -> OwnedMapValue<'a> {
+        Self {
+            values: HashMap::with_hasher(RandomState::new()),
+        }
+    }
+
+    pub fn get_values(&self) -> &HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
+        &self.values
+    }
+
+    pub fn get_values_mut(&mut self) -> &mut HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
+        &mut self.values
+    }
+}
+
+impl<'a, const N: usize> From<[(Box<str>, ValueOrRef<'a>); N]> for MapValueOrRef<'a> {
+    fn from(arr: [(Box<str>, ValueOrRef<'a>); N]) -> Self {
+        MapValueOrRef::Owned(OwnedMapValue {
+            values: HashMap::<Box<str>, ValueOrRef<'a>, RandomState>::from_iter(arr),
+        })
+    }
+}
+
+impl<'a> MapValue for OwnedMapValue<'a> {
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
+    fn get(&self, key: &str) -> Option<&(dyn AsValue + 'a)> {
+        self.values.get(key).map(|v| v as &dyn AsValue)
+    }
+
+    fn get_static(&self, _key: &str) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        unreachable!("should never be called by columnar engine")
+    }
+
+    fn get_items(&self, item_callback: &mut dyn KeyValueCallback) -> bool {
+        for (key, value) in self.values.iter() {
+            if !item_callback.next(key, value.to_value()) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +339,15 @@ impl Hash for ValueOrRef<'_> {
                     true
                 }));
             }
+            ValueOrRef::Map(MapValueOrRef::Owned(m)) => {
+                [8].hash(state);
+                m.len().hash(state);
+                for (k, v) in &m.values {
+                    k.hash(state);
+                    [1].hash(state);
+                    v.hash(state);
+                }
+            }
         }
     }
 }
@@ -337,12 +418,15 @@ impl PartialEq for ValueOrRef<'_> {
 
                 false
             }
-            ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
-                if let ValueOrRef::Map(MapValueOrRef::Ref(other)) = other
-                    && m.len() == other.len()
-                {
-                    return m.get_items(&mut KeyValueClosureCallback::new(|k, l| {
-                        match other.get(k) {
+            ValueOrRef::Map(m) => {
+                let m = m.as_map_value();
+
+                if let ValueOrRef::Map(other) = other {
+                    let other = other.as_map_value();
+                    if m.len() == other.len() {
+                        return m.get_items(&mut KeyValueClosureCallback::new(|k, l| match other
+                            .get(k)
+                        {
                             None => false,
                             Some(r) => match (
                                 TryInto::<ValueOrRef>::try_into(l),
@@ -352,8 +436,8 @@ impl PartialEq for ValueOrRef<'_> {
                                 (Err(()), Err(())) => true,
                                 _ => false,
                             },
-                        }
-                    }));
+                        }));
+                    }
                 }
 
                 false
@@ -389,7 +473,7 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::TimeSpan(t) => Value::TimeSpan(t),
             ValueOrRef::Regex(r) => Value::Regex(r),
             ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => Value::Array(*a),
-            ValueOrRef::Map(MapValueOrRef::Ref(m)) => Value::Map(*m),
+            ValueOrRef::Map(m) => Value::Map(m.as_map_value()),
         }
     }
 }
