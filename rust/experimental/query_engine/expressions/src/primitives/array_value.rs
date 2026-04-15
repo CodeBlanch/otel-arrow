@@ -53,49 +53,6 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VecArrayValue<T: AsStaticValue + 'static> {
-    values: Vec<T>,
-}
-
-impl<T: AsStaticValue + 'static> VecArrayValue<T> {
-    pub fn new(values: Vec<T>) -> VecArrayValue<T> {
-        Self { values }
-    }
-}
-
-impl<T: AsStaticValue + 'static> ArrayValue for VecArrayValue<T> {
-    fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    fn get(&self, index: usize) -> Option<&(dyn AsValue + 'static)> {
-        self.values.get(index).map(|v| v as &dyn AsValue)
-    }
-
-    fn get_static(&self, index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
-        Ok(self.values.get(index).map(|v| v as &dyn AsStaticValue))
-    }
-
-    fn get_item_range(
-        &self,
-        range: ArrayRange,
-        item_callback: &mut dyn IndexValueCallback,
-    ) -> bool {
-        for (index, value) in range.get_slice(&self.values).iter().enumerate() {
-            if !item_callback.next(index, value.to_value()) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
 #[derive(Debug)]
 pub struct ArrayRange {
     start_range_inclusize: Option<usize>,

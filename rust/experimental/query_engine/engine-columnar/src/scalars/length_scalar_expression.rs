@@ -52,8 +52,12 @@ where
                         Some(ValueOrRef::String(s)) => {
                             Some(ValueOrRef::Integer(s.get_value().chars().count() as i64))
                         }
-                        // todo: Map
-                        // todo: Array
+                        Some(ValueOrRef::Map(MapValueOrRef::Ref(m))) => {
+                            Some(ValueOrRef::Integer(m.len() as i64))
+                        }
+                        Some(ValueOrRef::Array(ArrayValueOrRef::Ref(a))) => {
+                            Some(ValueOrRef::Integer(a.len() as i64))
+                        }
                         Some(v) => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
@@ -150,6 +154,50 @@ mod tests {
 
     #[test]
     fn test_length_dictionary() {
-        todo!()
+        let array = ArrayScalarExpression::new(QueryLocation::new_fake(), vec![]);
+        let map = MapScalarExpression::new(QueryLocation::new_fake(), HashMap::new());
+
+        let values_dictionary = build_indexset_dictionary(
+            vec![Some(0), Some(0), None, Some(1), Some(2), Some(3)],
+            vec![
+                ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
+                ValueOrRef::Array(ArrayValueOrRef::Ref(&array)),
+                ValueOrRef::Map(MapValueOrRef::Ref(&map)),
+                ValueOrRef::Integer(0),
+            ],
+        );
+
+        let length = LengthScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Length(length),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![Some(0), Some(0), None, Some(1), Some(1), None],
+                            vec![ValueOrRef::Integer(11), ValueOrRef::Integer(0),]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
     }
 }

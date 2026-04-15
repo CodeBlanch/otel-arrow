@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Borrow, collections::HashMap, fmt::Debug, hash::Hash};
+use std::{collections::HashMap, fmt::Debug};
 
 use crate::*;
 
@@ -76,51 +76,6 @@ where
 {
     fn next(&mut self, key: &str, value: Value) -> bool {
         (self.callback)(key, value)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct HashMapValue<TKey: Borrow<str> + Debug, TValue: AsStaticValue + 'static> {
-    values: HashMap<TKey, TValue>,
-}
-
-impl<TKey: Borrow<str> + Debug, TValue: AsStaticValue + 'static> HashMapValue<TKey, TValue> {
-    pub fn new(values: HashMap<TKey, TValue>) -> HashMapValue<TKey, TValue> {
-        Self { values }
-    }
-}
-
-impl<TKey: Borrow<str> + Hash + Eq + Debug, TValue: AsStaticValue + 'static> MapValue
-    for HashMapValue<TKey, TValue>
-{
-    fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    fn contains_key(&self, key: &str) -> bool {
-        self.values.contains_key(key)
-    }
-
-    fn get(&self, key: &str) -> Option<&(dyn AsValue + 'static)> {
-        self.values.get(key).map(|v| v as &dyn AsValue)
-    }
-
-    fn get_static(&self, key: &str) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
-        Ok(self.values.get(key).map(|v| v as &dyn AsStaticValue))
-    }
-
-    fn get_items(&self, item_callback: &mut dyn KeyValueCallback) -> bool {
-        for (key, value) in self.values.iter() {
-            if !item_callback.next(key.borrow(), value.to_value()) {
-                return false;
-            }
-        }
-
-        true
     }
 }
 

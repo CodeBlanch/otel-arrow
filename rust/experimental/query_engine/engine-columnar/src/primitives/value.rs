@@ -61,11 +61,13 @@ pub enum ValueOrRef<'a> {
 #[derive(Debug, Clone)]
 pub enum ArrayValueOrRef<'a> {
     Ref(&'a dyn ArrayValue),
+    //Owned(Vec<ValueOrRef<'a>>)
 }
 
 #[derive(Debug, Clone)]
 pub enum MapValueOrRef<'a> {
     Ref(&'a dyn MapValue),
+    //Owned(AHashMap<Box<str>, ValueOrRef<'a>>)
 }
 
 #[derive(Debug, Clone)]
