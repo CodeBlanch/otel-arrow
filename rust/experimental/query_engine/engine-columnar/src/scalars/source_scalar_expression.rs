@@ -47,10 +47,9 @@ where
                     ResolvedScalarValue::Dictionary(d) => {
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Map(m) = v {
-                                if !m.as_map_value().contains_key(key.get_value()) {
-                                    Ok(ValueOrRef::Null)
-                                } else {
-                                    Ok(ValueOrRef::MapValue(m, key.clone()))
+                                match m {
+                                    MapValueOrRef::Ref(m) => Ok(m.get(key.get_value()).map_or(ValueOrRef::Null, |v| v.to_value().into())),
+                                    MapValueOrRef::Owned(m) => Ok(m.get_values().get(key.get_value()).map_or(ValueOrRef::Null, |v| v.clone()))
                                 }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
@@ -72,7 +71,7 @@ where
                                 if index < 0 {
                                     index += a.as_array_value().len() as i64;
                                 }
-                                if index < 0 || index >= a.as_array_value().len() as i64 {
+                                if index < 0 {
                                     execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
                                         source_scalar_expression,
@@ -80,7 +79,10 @@ where
                                     );
                                     Ok(ValueOrRef::Null)
                                 } else {
-                                    Ok(ValueOrRef::ArrayValue(a, index as usize))
+                                    match a {
+                                        ArrayValueOrRef::Ref(a) => Ok(a.get(index as usize).map_or(ValueOrRef::Null, |v| v.to_value().into())),
+                                        ArrayValueOrRef::Owned(a) => Ok(a.get_values().get(index as usize).map_or(ValueOrRef::Null, |v| v.clone()))
+                                    }
                                 }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
@@ -113,15 +115,15 @@ where
             },
             |current, dictionary| {
                 Ok(Some(match key_data_type {
-                    DataType::UInt8 => select_using_dictionary::<UInt8Type>(&current, dictionary),
-                    DataType::UInt16 => select_using_dictionary::<UInt16Type>(&current, dictionary),
-                    DataType::UInt32 => select_using_dictionary::<UInt32Type>(&current, dictionary),
-                    DataType::UInt64 => select_using_dictionary::<UInt64Type>(&current, dictionary),
+                    DataType::UInt8 => select_using_dictionary::<UInt8Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
+                    DataType::UInt16 => select_using_dictionary::<UInt16Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
+                    DataType::UInt32 => select_using_dictionary::<UInt32Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
+                    DataType::UInt64 => select_using_dictionary::<UInt64Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
 
-                    DataType::Int8 => select_using_dictionary::<Int8Type>(&current, dictionary),
-                    DataType::Int16 => select_using_dictionary::<Int16Type>(&current, dictionary),
-                    DataType::Int32 => select_using_dictionary::<Int32Type>(&current, dictionary),
-                    DataType::Int64 => select_using_dictionary::<Int64Type>(&current, dictionary),
+                    DataType::Int8 => select_using_dictionary::<Int8Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
+                    DataType::Int16 => select_using_dictionary::<Int16Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
+                    DataType::Int32 => select_using_dictionary::<Int32Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
+                    DataType::Int64 => select_using_dictionary::<Int64Type, TRecords>(execution_context, source_scalar_expression, &current, dictionary),
 
                     _ => panic!("Key type is not supported"),
                 }))
@@ -151,7 +153,9 @@ where
     Ok(current)
 }
 
-fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
+fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: ColumnarRecords>(
+    execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
+    source_scalar_expression: &'pipeline SourceScalarExpression,
     source: &ResolvedScalarValue<'a>,
     selector: Dictionary<'a>,
 ) -> RecordTableValue<'a> {
@@ -167,20 +171,37 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
 
     for key_index in 0..key_count {
         match selector.get_value(key_index).to_value() {
-            Value::String(selector_value_string) => {
+            Value::String(key) => {
                 let value = match source {
-                    ResolvedScalarValue::Table(t) => {
-                        if let Some(RecordTableValue::Dictionary(d)) =
-                            t.get_values(selector_value_string.get_value())
-                        {
-                            d.get_value(key_index)
-                        } else {
-                            todo!()
+                    ResolvedScalarValue::Table(t) => match t.get_values(key.get_value()) {
+                        Some(RecordTableValue::Dictionary(d)) => d.get_value(key_index),
+                        Some(RecordTableValue::Table(_)) => {
+                            todo!("table returning a table for a key is not currently supported")
                         }
+                        None => ValueOrRef::Null,
+                    },
+                    ResolvedScalarValue::Dictionary(d) => match d.get_value(key_index) {
+                        ValueOrRef::Map(m) => match m {
+                            MapValueOrRef::Ref(m) => m
+                                .get(key.get_value())
+                                .map_or(ValueOrRef::Null, |v| v.to_value().into()),
+                            MapValueOrRef::Owned(m) => m
+                                .get_values()
+                                .get(key.get_value())
+                                .map_or(ValueOrRef::Null, |v| v.clone()),
+                        },
+                        v => {
+                            execution_context.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    source_scalar_expression,
+                                    || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), v.get_value_type()),
+                                );
+                            ValueOrRef::Null
+                        }
+                    },
+                    ResolvedScalarValue::Single(_) => {
+                        unreachable!("single should never be returned from a source selector")
                     }
-                    // todo: Support single map (single_map[selector_value_string])
-                    // todo: Support dictionary of maps (dictionary[key_index][selector_value_string])
-                    _ => todo!(),
                 };
                 if let ValueOrRef::Null = value {
                     push_null(&mut null_buffer, key_index, key_bit_length);
@@ -192,10 +213,71 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
                     };
                 }
             }
-            // todo: support integer with arrays
-            _ => {
+            Value::Integer(index) => {
+                let value = match source {
+                    ResolvedScalarValue::Table(_) => {
+                        execution_context.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Warn,
+                            source_scalar_expression,
+                            || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", index.get_value()),
+                        );
+                        ValueOrRef::Null
+                    }
+                    ResolvedScalarValue::Dictionary(d) => match d.get_value(key_index) {
+                        ValueOrRef::Array(a) => {
+                            let mut index = index.get_value();
+                            if index < 0 {
+                                index += a.as_array_value().len() as i64;
+                            }
+                            if index < 0 {
+                                execution_context.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        source_scalar_expression,
+                                        || format!("Array index '{index}' specified in accessor expression is invalid"),
+                                    );
+                                ValueOrRef::Null
+                            } else {
+                                match a {
+                                    ArrayValueOrRef::Ref(m) => m
+                                        .get(index as usize)
+                                        .map_or(ValueOrRef::Null, |v| v.to_value().into()),
+                                    ArrayValueOrRef::Owned(m) => m
+                                        .get_values()
+                                        .get(index as usize)
+                                        .map_or(ValueOrRef::Null, |v| v.clone()),
+                                }
+                            }
+                        }
+                        v => {
+                            execution_context.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    source_scalar_expression,
+                                    || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", index.get_value(), v.get_value_type()),
+                                );
+                            ValueOrRef::Null
+                        }
+                    },
+                    ResolvedScalarValue::Single(_) => {
+                        unreachable!("single should never be returned from a source selector")
+                    }
+                };
+                if let ValueOrRef::Null = value {
+                    push_null(&mut null_buffer, key_index, key_bit_length);
+                } else {
+                    let (index, _) = values.insert_full(value);
+                    unsafe {
+                        *key_builder.add(key_index) =
+                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap()
+                    };
+                }
+            }
+            v => {
+                execution_context.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    source_scalar_expression,
+                    || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
+                );
                 push_null(&mut null_buffer, key_index, key_bit_length);
-                todo!()
             }
         }
     }
@@ -337,10 +419,7 @@ mod tests {
             |r| match r.unwrap() {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
-                            vec![None, None, None, None, None, None],
-                            vec![]
-                        ),
+                        build_indexset_dictionary(vec![None, None, None, None, None, None], vec![]),
                         actual
                     );
                 }
@@ -448,10 +527,7 @@ mod tests {
             |r| match r.unwrap() {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
-                            vec![None, None, None, None],
-                            vec![]
-                        ),
+                        build_indexset_dictionary(vec![None, None, None, None], vec![]),
                         actual
                     );
                 }
@@ -462,6 +538,170 @@ mod tests {
 
     #[test]
     fn test_select_from_source_table_using_dictionary() {
-        todo!()
+        let values_dictionary = build_indexset_dictionary(
+            vec![
+                Some(0), // string value: hello world
+                Some(0), // string value: hello world
+                None,
+                Some(1), // string value: goodbye world
+                Some(2), // map value
+                Some(2), // map value
+                Some(3), // array value
+                Some(3), // array value
+                Some(4), // integer value
+            ],
+            vec![
+                ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
+                ValueOrRef::String(StringValueOrRef::new_owned("goodebye world".into())),
+                ValueOrRef::Map(MapValueOrRef::from([
+                    (
+                        "key1".into(),
+                        ValueOrRef::String(StringValueOrRef::new_owned("value1".into())),
+                    ),
+                    (
+                        "key2".into(),
+                        ValueOrRef::String(StringValueOrRef::new_owned("value2".into())),
+                    ),
+                ])),
+                ValueOrRef::Array(ArrayValueOrRef::from([
+                    ValueOrRef::Integer(0),
+                    ValueOrRef::Integer(1),
+                    ValueOrRef::Integer(2),
+                ])),
+                ValueOrRef::Integer(0),
+            ],
+        );
+
+        let keys_dictionary = build_indexset_dictionary(
+            vec![
+                None,
+                None,
+                None,
+                None,
+                Some(0), // Should eval as map['key1']
+                Some(1), // Should eval as map['key2']
+                None,
+                None,
+                None,
+            ],
+            vec![
+                ValueOrRef::String(StringValueOrRef::new_owned("key1".into())),
+                ValueOrRef::String(StringValueOrRef::new_owned("key2".into())),
+            ],
+        );
+
+        let indicies_dictionary = build_indexset_dictionary(
+            vec![
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(0), // Should eval as array[0]
+                Some(1), // Should eval as array[-1]
+                None,
+            ],
+            vec![ValueOrRef::Integer(0), ValueOrRef::Integer(-1)],
+        );
+
+        let select_sub_key = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Source(SourceScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                        StaticScalarExpression::String(StringScalarExpression::new(
+                            QueryLocation::new_fake(),
+                            "keys",
+                        )),
+                    )]),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([
+                ("values".into(), values_dictionary.clone()),
+                ("keys".into(), keys_dictionary.clone()),
+            ])),
+            ScalarExpression::Source(select_sub_key),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(0), // Should eval as map['key1']
+                                Some(1), // Should eval as map['key2']
+                                None,
+                                None,
+                                None,
+                            ],
+                            vec![
+                                ValueOrRef::String(StringValueOrRef::new_owned("value1".into())),
+                                ValueOrRef::String(StringValueOrRef::new_owned("value2".into())),
+                            ],
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
+
+        let select_sub_element = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Source(SourceScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                        StaticScalarExpression::String(StringScalarExpression::new(
+                            QueryLocation::new_fake(),
+                            "indicies",
+                        )),
+                    )]),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([
+                ("values".into(), values_dictionary.clone()),
+                ("indicies".into(), indicies_dictionary.clone()),
+            ])),
+            ScalarExpression::Source(select_sub_element),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(0), // Should eval as array[0]
+                                Some(1), // Should eval as array[-1]
+                                None,
+                            ],
+                            vec![ValueOrRef::Integer(0), ValueOrRef::Integer(2),],
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
     }
 }

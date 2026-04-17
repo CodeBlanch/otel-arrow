@@ -288,11 +288,11 @@ where
                 |mut v| {
                     debug_assert!(v.len() == 3);
 
-                    let (start_inclusive, length) = match (&v[1], &v[2]) {
-                        (ValueOrRef::Integer(start), ValueOrRef::Integer(end)) => {
-                            (*start as usize, Some(*end as usize))
+                    let (start_inclusive, length) = match (v[1].to_value(), v[2].to_value()) {
+                        (Value::Integer(start), Value::Integer(end)) => {
+                            (start.get_value() as usize, Some(end.get_value() as usize))
                         }
-                        (ValueOrRef::Integer(start), ValueOrRef::Null) => (*start as usize, None),
+                        (Value::Integer(start), Value::Null) => (start.get_value() as usize, None),
                         _ => unreachable!(),
                     };
 

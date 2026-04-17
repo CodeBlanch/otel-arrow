@@ -48,14 +48,12 @@ where
         |dictionary| {
             Ok(ResolvedScalarValue::Dictionary(
                 dictionary.transform_into_any(|v| {
-                    Ok(match v {
-                        ValueOrRef::String(s) => {
+                    Ok(match v.to_value() {
+                        Value::String(s) => {
                             ValueOrRef::Integer(s.get_value().chars().count() as i64)
                         }
-                        ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
-                        ValueOrRef::Array(a) => {
-                            ValueOrRef::Integer(a.as_array_value().len() as i64)
-                        }
+                        Value::Map(m) => ValueOrRef::Integer(m.len() as i64),
+                        Value::Array(a) => ValueOrRef::Integer(a.len() as i64),
                         v => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
@@ -63,7 +61,7 @@ where
                                 || {
                                     format!(
                                         "Cannot calculate the length of '{}' input",
-                                        v.to_value().get_value_type()
+                                        v.get_value_type()
                                     )
                                 },
                             );
