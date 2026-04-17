@@ -10,24 +10,37 @@ use crate::*;
 
 #[derive(Debug)]
 pub(crate) enum ResolvedScalarValue<'a> {
-    Single(ResolvedSingleValue<'a>),
+    Single(ValueOrRef<'a>),
     Dictionary(Dictionary<'a>),
     Table(&'a dyn RecordTable),
 }
 
 impl<'a> ResolvedScalarValue<'a> {
     pub fn new_null() -> ResolvedScalarValue<'a> {
-        ResolvedScalarValue::Single(ResolvedSingleValue::Null)
+        ResolvedScalarValue::Single(ValueOrRef::Null)
     }
 
     pub fn new_int(value: i64) -> ResolvedScalarValue<'a> {
-        ResolvedScalarValue::Single(ResolvedSingleValue::new_from_value_or_ref(
-            ValueOrRef::Integer(value),
-        ))
+        ResolvedScalarValue::Single(ValueOrRef::Integer(value))
     }
 
     pub fn new_from_value(value: Value<'a>) -> ResolvedScalarValue<'a> {
-        ResolvedScalarValue::Single(ResolvedSingleValue::new_from_value(value))
+        ResolvedScalarValue::Single(match value {
+            Value::Array(a) => ValueOrRef::Array(ArrayValueOrRef::Ref(a)),
+            Value::Boolean(b) => ValueOrRef::Boolean(b.get_value()),
+            Value::DateTime(d) => ValueOrRef::DateTime(d.get_value()),
+            Value::Double(d) => ValueOrRef::Double(d.get_value()),
+            Value::Integer(i) => ValueOrRef::Integer(i.get_value()),
+            Value::Map(m) => ValueOrRef::Map(MapValueOrRef::Ref(m)),
+            Value::Null => ValueOrRef::Null,
+            Value::Regex(r) => ValueOrRef::Regex(RegexValueOrRef::Ref(r.get_value())),
+            Value::String(s) => ValueOrRef::String(StringValueOrRef::Ref(s.get_value())),
+            Value::TimeSpan(t) => ValueOrRef::TimeSpan(t.get_value()),
+        })
+    }
+
+    pub fn new_from_value_or_ref(value: ValueOrRef<'a>) -> ResolvedScalarValue<'a> {
+        ResolvedScalarValue::Single(value)
     }
 
     pub fn map_into<FSingle, FDictionary, FTable, FRet>(
@@ -37,7 +50,7 @@ impl<'a> ResolvedScalarValue<'a> {
         when_table: FTable,
     ) -> Result<FRet, ExpressionError>
     where
-        FSingle: FnOnce(ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(ValueOrRef<'a>) -> Result<FRet, ExpressionError>,
         FDictionary: FnOnce(Dictionary<'a>) -> Result<FRet, ExpressionError>,
         FTable: FnOnce(&'a dyn RecordTable) -> Result<FRet, ExpressionError>,
     {
@@ -56,7 +69,7 @@ impl<'a> ResolvedScalarValue<'a> {
         when_table: FTable,
     ) -> Result<FRet, ExpressionError>
     where
-        FSingle: FnOnce(TState, ResolvedSingleValue<'a>) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(TState, ValueOrRef<'a>) -> Result<FRet, ExpressionError>,
         FDictionary: FnOnce(TState, Dictionary<'a>) -> Result<FRet, ExpressionError>,
         FTable: FnOnce(TState, &'a dyn RecordTable) -> Result<FRet, ExpressionError>,
     {
@@ -74,7 +87,7 @@ impl<'a> ResolvedScalarValue<'a> {
     ) -> Result<Dictionary<'a>, ()> {
         match self {
             ResolvedScalarValue::Single(s) => Ok(match s {
-                ResolvedSingleValue::Null => match key_type {
+                ValueOrRef::Null => match key_type {
                     DataType::Int8 => Dictionary::new_null::<Int8Type>(key_count),
                     DataType::Int16 => Dictionary::new_null::<Int16Type>(key_count),
                     DataType::Int32 => Dictionary::new_null::<Int32Type>(key_count),
@@ -85,7 +98,7 @@ impl<'a> ResolvedScalarValue<'a> {
                     DataType::UInt64 => Dictionary::new_null::<UInt64Type>(key_count),
                     _ => todo!(),
                 },
-                ResolvedSingleValue::Value(value) => match key_type {
+                value => match key_type {
                     DataType::Int8 => Dictionary::new_scalar::<Int8Type>(key_count, value),
                     DataType::Int16 => Dictionary::new_scalar::<Int16Type>(key_count, value),
                     DataType::Int32 => Dictionary::new_scalar::<Int32Type>(key_count, value),
@@ -126,55 +139,6 @@ impl Display for ResolvedScalarValue<'_> {
                 f.write_char(']')
             }
             ResolvedScalarValue::Dictionary(d) => d.fmt(f),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum ResolvedSingleValue<'a> {
-    Null,
-    Value(ValueOrRef<'a>),
-}
-
-impl<'a> ResolvedSingleValue<'a> {
-    pub fn new_from_value(value: Value<'a>) -> ResolvedSingleValue<'a> {
-        match value {
-            Value::Array(a) => {
-                ResolvedSingleValue::Value(ValueOrRef::Array(ArrayValueOrRef::Ref(a)))
-            }
-            Value::Boolean(b) => ResolvedSingleValue::Value(ValueOrRef::Boolean(b.get_value())),
-            Value::DateTime(d) => ResolvedSingleValue::Value(ValueOrRef::DateTime(d.get_value())),
-            Value::Double(d) => ResolvedSingleValue::Value(ValueOrRef::Double(d.get_value())),
-            Value::Integer(i) => ResolvedSingleValue::Value(ValueOrRef::Integer(i.get_value())),
-            Value::Map(m) => ResolvedSingleValue::Value(ValueOrRef::Map(MapValueOrRef::Ref(m))),
-            Value::Null => ResolvedSingleValue::Null,
-            Value::Regex(r) => {
-                ResolvedSingleValue::Value(ValueOrRef::Regex(RegexValueOrRef::Ref(r.get_value())))
-            }
-            Value::String(s) => {
-                ResolvedSingleValue::Value(ValueOrRef::String(StringValueOrRef::Ref(s.get_value())))
-            }
-            Value::TimeSpan(t) => ResolvedSingleValue::Value(ValueOrRef::TimeSpan(t.get_value())),
-        }
-    }
-
-    pub fn new_from_value_or_ref(value: ValueOrRef<'a>) -> ResolvedSingleValue<'a> {
-        ResolvedSingleValue::Value(value)
-    }
-}
-
-impl<'a> AsValue for ResolvedSingleValue<'a> {
-    fn get_value_type(&self) -> ValueType {
-        match self {
-            ResolvedSingleValue::Null => ValueType::Null,
-            ResolvedSingleValue::Value(v) => v.get_value_type(),
-        }
-    }
-
-    fn to_value(&self) -> Value<'_> {
-        match self {
-            ResolvedSingleValue::Null => Value::Null,
-            ResolvedSingleValue::Value(v) => v.to_value(),
         }
     }
 }
@@ -230,9 +194,7 @@ impl Display for ResolvedLogicalValue<'_> {
 impl<'a> From<ResolvedLogicalValue<'a>> for ResolvedScalarValue<'a> {
     fn from(value: ResolvedLogicalValue<'a>) -> Self {
         match value {
-            ResolvedLogicalValue::Single(s) => {
-                ResolvedScalarValue::Single(ResolvedSingleValue::Value(ValueOrRef::Boolean(s)))
-            }
+            ResolvedLogicalValue::Single(s) => ResolvedScalarValue::Single(ValueOrRef::Boolean(s)),
             ResolvedLogicalValue::DictionaryRef(a) => ResolvedScalarValue::Dictionary(a.into()),
             ResolvedLogicalValue::DictionaryOwned(a) => ResolvedScalarValue::Dictionary(a.into()),
         }

@@ -55,6 +55,7 @@ pub enum ValueOrRef<'a> {
     Double(f64),
     Integer(i64),
     Map(MapValueOrRef<'a>),
+    Null,
     Regex(RegexValueOrRef<'a>),
     String(StringValueOrRef<'a>),
     TimeSpan(TimeDelta),
@@ -62,21 +63,92 @@ pub enum ValueOrRef<'a> {
 
 #[derive(Debug, Clone)]
 pub enum ArrayValueOrRef<'a> {
-    Ref(&'a dyn ArrayValue),
-    //Owned(Vec<ValueOrRef<'a>>)
+    Ref(&'a (dyn ArrayValue + 'a)),
+    Owned(Rc<OwnedArrayValue<'a>>),
+}
+
+impl<'a> ArrayValueOrRef<'a> {
+    pub fn as_array_value(&self) -> &'_ (dyn ArrayValue + 'a) {
+        match self {
+            ArrayValueOrRef::Ref(a) => *a,
+            ArrayValueOrRef::Owned(a) => a.as_ref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnedArrayValue<'a> {
+    values: Vec<ValueOrRef<'a>>,
+}
+
+impl<'a> OwnedArrayValue<'a> {
+    pub fn new() -> OwnedArrayValue<'a> {
+        Self { values: vec![] }
+    }
+
+    pub fn get_values(&self) -> &[ValueOrRef<'a>] {
+        &self.values
+    }
+
+    /*pub fn get_values_mut(&mut self) -> &mut Vec<ValueOrRef<'a>> {
+        &mut self.values
+    }*/
+}
+
+impl<'a, const N: usize> From<[ValueOrRef<'a>; N]> for ArrayValueOrRef<'a> {
+    fn from(arr: [ValueOrRef<'a>; N]) -> Self {
+        ArrayValueOrRef::Owned(
+            OwnedArrayValue {
+                values: Vec::from_iter(arr),
+            }
+            .into(),
+        )
+    }
+}
+
+impl<'a> ArrayValue for OwnedArrayValue<'a> {
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&(dyn AsValue + 'a)> {
+        self.values.get(index).map(|v| v as &dyn AsValue)
+    }
+
+    fn get_static(&self, _index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        unreachable!("should never be called by columnar engine")
+    }
+
+    fn get_item_range(
+        &self,
+        range: ArrayRange,
+        item_callback: &mut dyn IndexValueCallback,
+    ) -> bool {
+        for (index, value) in range.get_slice(&self.values).iter().enumerate() {
+            if !item_callback.next(index, value.to_value()) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum MapValueOrRef<'a> {
-    Ref(&'a dyn MapValue),
-    Owned(OwnedMapValue<'a>),
+    Ref(&'a (dyn MapValue + 'a)),
+    Owned(Rc<OwnedMapValue<'a>>),
 }
 
 impl<'a> MapValueOrRef<'a> {
-    pub fn as_map_value(&'a self) -> &'a dyn MapValue {
+    pub fn as_map_value(&self) -> &'_ (dyn MapValue + 'a) {
         match self {
             MapValueOrRef::Ref(m) => *m,
-            MapValueOrRef::Owned(m) => m,
+            MapValueOrRef::Owned(m) => m.as_ref(),
         }
     }
 }
@@ -97,16 +169,19 @@ impl<'a> OwnedMapValue<'a> {
         &self.values
     }
 
-    pub fn get_values_mut(&mut self) -> &mut HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
+    /*pub fn get_values_mut(&mut self) -> &mut HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
         &mut self.values
-    }
+    }*/
 }
 
 impl<'a, const N: usize> From<[(Box<str>, ValueOrRef<'a>); N]> for MapValueOrRef<'a> {
     fn from(arr: [(Box<str>, ValueOrRef<'a>); N]) -> Self {
-        MapValueOrRef::Owned(OwnedMapValue {
-            values: HashMap::<Box<str>, ValueOrRef<'a>, RandomState>::from_iter(arr),
-        })
+        MapValueOrRef::Owned(
+            OwnedMapValue {
+                values: HashMap::<Box<str>, ValueOrRef<'a>, RandomState>::from_iter(arr),
+            }
+            .into(),
+        )
     }
 }
 
@@ -258,20 +333,9 @@ impl StringValue for StringValueOrRef<'_> {
     }
 }
 
-impl<'a> TryFrom<ResolvedSingleValue<'a>> for StringValueOrRef<'a> {
-    type Error = ResolvedSingleValue<'a>;
-
-    fn try_from(value: ResolvedSingleValue<'a>) -> Result<Self, Self::Error> {
-        match value {
-            ResolvedSingleValue::Value(ValueOrRef::String(s)) => Ok(s),
-            _ => Err(value),
-        }
-    }
-}
-
 impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a> {
     fn from(value: StringValueOrRef<'a>) -> Self {
-        ResolvedScalarValue::Single(ResolvedSingleValue::Value(ValueOrRef::String(value)))
+        ResolvedScalarValue::Single(ValueOrRef::String(value))
     }
 }
 
@@ -310,32 +374,23 @@ impl Hash for ValueOrRef<'_> {
                 [7].hash(state);
                 a.len().hash(state);
                 a.get_items(&mut IndexValueClosureCallback::new(|_, v| {
-                    match TryInto::<ValueOrRef>::try_into(v) {
-                        Ok(v) => {
-                            [1].hash(state);
-                            v.hash(state)
-                        }
-                        Err(()) => {
-                            [0].hash(state);
-                        }
-                    }
+                    Into::<ValueOrRef>::into(v).hash(state);
                     true
                 }));
+            }
+            ValueOrRef::Array(ArrayValueOrRef::Owned(a)) => {
+                [7].hash(state);
+                a.len().hash(state);
+                for v in &a.values {
+                    v.hash(state);
+                }
             }
             ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
                 [8].hash(state);
                 m.len().hash(state);
                 m.get_items(&mut KeyValueClosureCallback::new(|k, v| {
                     k.hash(state);
-                    match TryInto::<ValueOrRef>::try_into(v) {
-                        Ok(v) => {
-                            [1].hash(state);
-                            v.hash(state)
-                        }
-                        Err(()) => {
-                            [0].hash(state);
-                        }
-                    }
+                    Into::<ValueOrRef>::into(v).hash(state);
                     true
                 }));
             }
@@ -348,6 +403,7 @@ impl Hash for ValueOrRef<'_> {
                     v.hash(state);
                 }
             }
+            ValueOrRef::Null => [9].hash(state),
         }
     }
 }
@@ -389,31 +445,26 @@ impl PartialEq for ValueOrRef<'_> {
                     false
                 }
             }
-            ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => {
-                if let ValueOrRef::Array(ArrayValueOrRef::Ref(other)) = other
-                    && a.len() == other.len()
-                {
-                    for index in 0..a.len() {
-                        match (a.get(index), other.get(index)) {
-                            (None, None) => {}
-                            (Some(l), Some(r)) => {
-                                match (
-                                    TryInto::<ValueOrRef>::try_into(l.to_value()),
-                                    TryInto::<ValueOrRef>::try_into(r.to_value()),
-                                ) {
-                                    (Ok(l), Ok(r)) => {
-                                        if l != r {
-                                            return false;
-                                        }
+            ValueOrRef::Array(a) => {
+                let a = a.as_array_value();
+                if let ValueOrRef::Array(other) = other {
+                    let other = other.as_array_value();
+                    if a.len() == other.len() {
+                        for index in 0..a.len() {
+                            match (a.get(index), other.get(index)) {
+                                (None, None) => {}
+                                (Some(l), Some(r)) => {
+                                    if Into::<ValueOrRef>::into(l.to_value())
+                                        != Into::<ValueOrRef>::into(r.to_value())
+                                    {
+                                        return false;
                                     }
-                                    (Err(()), Err(())) => {}
-                                    _ => return false,
                                 }
+                                _ => return false,
                             }
-                            _ => return false,
                         }
+                        return true;
                     }
-                    return true;
                 }
 
                 false
@@ -428,20 +479,17 @@ impl PartialEq for ValueOrRef<'_> {
                             .get(k)
                         {
                             None => false,
-                            Some(r) => match (
-                                TryInto::<ValueOrRef>::try_into(l),
-                                TryInto::<ValueOrRef>::try_into(r.to_value()),
-                            ) {
-                                (Ok(l), Ok(r)) => l == r,
-                                (Err(()), Err(())) => true,
-                                _ => false,
-                            },
+                            Some(r) => {
+                                Into::<ValueOrRef>::into(l)
+                                    == Into::<ValueOrRef>::into(r.to_value())
+                            }
                         }));
                     }
                 }
 
                 false
             }
+            ValueOrRef::Null => matches!(other, ValueOrRef::Null),
         }
     }
 }
@@ -460,6 +508,7 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::TimeSpan(_) => ValueType::TimeSpan,
             ValueOrRef::Regex(_) => ValueType::Regex,
             ValueOrRef::Map(_) => ValueType::Map,
+            ValueOrRef::Null => ValueType::Null,
         }
     }
 
@@ -474,25 +523,25 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::Regex(r) => Value::Regex(r),
             ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => Value::Array(*a),
             ValueOrRef::Map(m) => Value::Map(m.as_map_value()),
+            ValueOrRef::Array(a) => Value::Array(a.as_array_value()),
+            ValueOrRef::Null => Value::Null,
         }
     }
 }
 
-impl<'a> TryInto<ValueOrRef<'a>> for Value<'a> {
-    type Error = ();
-
-    fn try_into(self) -> Result<ValueOrRef<'a>, Self::Error> {
+impl<'a> Into<ValueOrRef<'a>> for Value<'a> {
+    fn into(self) -> ValueOrRef<'a> {
         match self {
-            Value::Array(a) => Ok(ValueOrRef::Array(ArrayValueOrRef::Ref(a))),
-            Value::Boolean(b) => Ok(ValueOrRef::Boolean(b.get_value())),
-            Value::DateTime(d) => Ok(ValueOrRef::DateTime(d.get_value())),
-            Value::Double(d) => Ok(ValueOrRef::Double(d.get_value())),
-            Value::Integer(i) => Ok(ValueOrRef::Integer(i.get_value())),
-            Value::Map(m) => Ok(ValueOrRef::Map(MapValueOrRef::Ref(m))),
-            Value::Null => Err(()),
-            Value::Regex(r) => Ok(ValueOrRef::Regex(RegexValueOrRef::Ref(r.get_value()))),
-            Value::String(s) => Ok(ValueOrRef::String(StringValueOrRef::Ref(s.get_value()))),
-            Value::TimeSpan(t) => Ok(ValueOrRef::TimeSpan(t.get_value())),
+            Value::Array(a) => ValueOrRef::Array(ArrayValueOrRef::Ref(a)),
+            Value::Boolean(b) => ValueOrRef::Boolean(b.get_value()),
+            Value::DateTime(d) => ValueOrRef::DateTime(d.get_value()),
+            Value::Double(d) => ValueOrRef::Double(d.get_value()),
+            Value::Integer(i) => ValueOrRef::Integer(i.get_value()),
+            Value::Map(m) => ValueOrRef::Map(MapValueOrRef::Ref(m)),
+            Value::Null => ValueOrRef::Null,
+            Value::Regex(r) => ValueOrRef::Regex(RegexValueOrRef::Ref(r.get_value())),
+            Value::String(s) => ValueOrRef::String(StringValueOrRef::Ref(s.get_value())),
+            Value::TimeSpan(t) => ValueOrRef::TimeSpan(t.get_value()),
         }
     }
 }

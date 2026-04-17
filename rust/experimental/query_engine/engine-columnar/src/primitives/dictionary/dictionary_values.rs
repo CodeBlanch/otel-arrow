@@ -39,12 +39,15 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn get_value_at(&self, index: usize) -> Option<ValueOrRef<'a>> {
+    pub fn get_value_at(&self, index: usize) -> ValueOrRef<'a> {
         match self {
             DictionaryValueArray::ArrayRef(a) => get_value_from_array(*a, index),
-            DictionaryValueArray::VecAnyOwned(a) => Some(a[index].clone()),
-            DictionaryValueArray::IndexAnyOwned(a) => a.get_index(index).cloned(),
-            DictionaryValueArray::Boolean => Some(ValueOrRef::Boolean(index != 0)),
+            DictionaryValueArray::VecAnyOwned(a) => a[index].clone(),
+            DictionaryValueArray::IndexAnyOwned(a) => a
+                .get_index(index)
+                .map(|v| v.clone())
+                .unwrap_or(ValueOrRef::Null),
+            DictionaryValueArray::Boolean => ValueOrRef::Boolean(index != 0),
         }
     }
 
@@ -80,7 +83,7 @@ impl<'a> DictionaryValueArray<'a> {
         transform: &mut FTransform,
     ) -> Result<(IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>), ExpressionError>
     where
-        FTransform: FnMut(Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
     {
         match self {
             DictionaryValueArray::ArrayRef(a) => transform_array_into_set(transform, a),
@@ -99,24 +102,22 @@ impl<'a> DictionaryValueArray<'a> {
         transform: &mut FTransform,
     ) -> Result<Vec<Option<T>>, ExpressionError>
     where
-        FTransform: FnMut(Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
     {
         Ok(match self {
             DictionaryValueArray::ArrayRef(a) => transform_array_into_vec(transform, a)?,
-            DictionaryValueArray::VecAnyOwned(a) => {
-                a.into_iter()
-                    .map(|v| transform(Some(v)))
-                    .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-            }
-            DictionaryValueArray::IndexAnyOwned(a) => {
-                a.into_iter()
-                    .map(|v| transform(Some(v)))
-                    .collect::<Result<Vec<Option<T>>, ExpressionError>>()?
-            }
+            DictionaryValueArray::VecAnyOwned(a) => a
+                .into_iter()
+                .map(|v| transform(v))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            DictionaryValueArray::IndexAnyOwned(a) => a
+                .into_iter()
+                .map(|v| transform(v))
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
             DictionaryValueArray::Boolean => {
                 vec![
-                    transform(Some(ValueOrRef::Boolean(false)))?,
-                    transform(Some(ValueOrRef::Boolean(true)))?,
+                    transform(ValueOrRef::Boolean(false))?,
+                    transform(ValueOrRef::Boolean(true))?,
                 ]
             }
         })
@@ -146,76 +147,84 @@ fn transform_array_into_vec<'a, T, FTransform>(
     value: &'a dyn Array,
 ) -> Result<Vec<Option<T>>, ExpressionError>
 where
-    FTransform: FnMut(Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
 {
     Ok(match value.data_type() {
         DataType::Int8 => value
             .as_primitive::<Int8Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::Int16 => value
             .as_primitive::<Int16Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::Int32 => value
             .as_primitive::<Int32Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::Int64 => value
             .as_primitive::<Int64Type>()
             .into_iter()
-            .map(|v| transform(v.map(ValueOrRef::Integer)))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, ValueOrRef::Integer)))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         DataType::UInt8 => value
             .as_primitive::<UInt8Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::UInt16 => value
             .as_primitive::<UInt16Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::UInt32 => value
             .as_primitive::<UInt32Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::UInt64 => value
             .as_primitive::<UInt64Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Integer(v as i64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         DataType::Float16 => value
             .as_primitive::<Float16Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Double(f64::from(v)))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::Float32 => value
             .as_primitive::<Float32Type>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::Double(v as f64))))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::Float64 => value
             .as_primitive::<Float64Type>()
             .into_iter()
-            .map(|v| transform(v.map(ValueOrRef::Double)))
+            .map(|v| transform(v.map_or(ValueOrRef::Null, ValueOrRef::Double)))
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         DataType::Utf8 => value
             .as_string::<i32>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::String(StringValueOrRef::Ref(v)))))
+            .map(|v| {
+                transform(v.map_or(ValueOrRef::Null, |v| {
+                    ValueOrRef::String(StringValueOrRef::Ref(v))
+                }))
+            })
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         DataType::LargeUtf8 => value
             .as_string::<i64>()
             .into_iter()
-            .map(|v| transform(v.map(|v| ValueOrRef::String(StringValueOrRef::Ref(v)))))
+            .map(|v| {
+                transform(v.map_or(ValueOrRef::Null, |v| {
+                    ValueOrRef::String(StringValueOrRef::Ref(v))
+                }))
+            })
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
         _ => todo!(),
@@ -227,7 +236,7 @@ fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(
     value: &'a dyn Array,
 ) -> Result<(IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>), ExpressionError>
 where
-    FTransform: FnMut(Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
 {
     match value.data_type() {
         DataType::Int8 => {
@@ -376,14 +385,14 @@ fn transform_iter_into_set<'a, T: Hash + Eq, FTransform, I>(
     iter: I,
 ) -> Result<(IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>), ExpressionError>
 where
-    FTransform: FnMut(Option<ValueOrRef<'a>>) -> Result<Option<T>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
     I: Iterator<Item = (usize, ValueOrRef<'a>)>,
 {
     let mut value_index_lookup = AHashMap::with_capacity(max_length);
     let mut transformed_values = IndexSet::with_capacity_and_hasher(max_length, RandomState::new());
 
     for (index, value) in iter {
-        if let Some(transformed_value) = transform(Some(value))? {
+        if let Some(transformed_value) = transform(value)? {
             let (transformed_index, _) = transformed_values.insert_full(transformed_value);
             value_index_lookup.insert(index, Some(transformed_index));
         } else {
@@ -394,91 +403,91 @@ where
     Ok((transformed_values, value_index_lookup))
 }
 
-pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> Option<ValueOrRef<'_>> {
+pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> ValueOrRef<'_> {
     if let Some(nulls) = value.nulls()
         && nulls.is_null(index)
     {
-        return None;
+        return ValueOrRef::Null;
     }
 
     unsafe {
         match value.data_type() {
-            DataType::Int8 => Some(ValueOrRef::Integer(
+            DataType::Int8 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<Int8Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
-            DataType::Int16 => Some(ValueOrRef::Integer(
+            ),
+            DataType::Int16 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<Int16Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
-            DataType::Int32 => Some(ValueOrRef::Integer(
+            ),
+            DataType::Int32 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<Int32Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
-            DataType::Int64 => Some(ValueOrRef::Integer(
+            ),
+            DataType::Int64 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<Int64Type>()
                     .values()
                     .get_unchecked(index),
-            )),
+            ),
 
-            DataType::UInt8 => Some(ValueOrRef::Integer(
+            DataType::UInt8 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<UInt8Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
-            DataType::UInt16 => Some(ValueOrRef::Integer(
+            ),
+            DataType::UInt16 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<UInt16Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
-            DataType::UInt32 => Some(ValueOrRef::Integer(
+            ),
+            DataType::UInt32 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<UInt32Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
-            DataType::UInt64 => Some(ValueOrRef::Integer(
+            ),
+            DataType::UInt64 => ValueOrRef::Integer(
                 *value
                     .as_primitive::<UInt64Type>()
                     .values()
                     .get_unchecked(index) as i64,
-            )),
+            ),
 
-            DataType::Float16 => Some(ValueOrRef::Double(
+            DataType::Float16 => ValueOrRef::Double(
                 (*value
                     .as_primitive::<Float16Type>()
                     .values()
                     .get_unchecked(index))
                 .into(),
-            )),
-            DataType::Float32 => Some(ValueOrRef::Double(
+            ),
+            DataType::Float32 => ValueOrRef::Double(
                 *value
                     .as_primitive::<Float32Type>()
                     .values()
                     .get_unchecked(index) as f64,
-            )),
-            DataType::Float64 => Some(ValueOrRef::Double(
+            ),
+            DataType::Float64 => ValueOrRef::Double(
                 *value
                     .as_primitive::<Float64Type>()
                     .values()
                     .get_unchecked(index),
-            )),
+            ),
 
-            DataType::Utf8 => Some(ValueOrRef::String(StringValueOrRef::Ref(
+            DataType::Utf8 => ValueOrRef::String(StringValueOrRef::Ref(
                 value.as_string::<i32>().value_unchecked(index),
-            ))),
-            DataType::LargeUtf8 => Some(ValueOrRef::String(StringValueOrRef::Ref(
+            )),
+            DataType::LargeUtf8 => ValueOrRef::String(StringValueOrRef::Ref(
                 value.as_string::<i64>().value_unchecked(index),
-            ))),
+            )),
 
             _ => todo!(),
         }

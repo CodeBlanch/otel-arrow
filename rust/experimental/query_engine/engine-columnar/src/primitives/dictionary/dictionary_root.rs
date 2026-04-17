@@ -72,12 +72,12 @@ impl<'a> Dictionary<'a> {
         self.keys.get_value_index_for_key_index(key_index)
     }
 
-    pub fn get_value(&self, key_index: usize) -> Option<ValueOrRef<'a>> {
+    pub fn get_value(&self, key_index: usize) -> ValueOrRef<'a> {
         if let Some(value_index) = self.get_value_index(key_index) {
             return self.values.get_value_at(value_index);
         }
 
-        None
+        ValueOrRef::Null
     }
 }
 
@@ -88,15 +88,8 @@ impl Display for Dictionary<'_> {
             if key > 0 {
                 f.write_char(',')?;
             }
-            match self.get_value(key) {
-                None => {
-                    write!(f, "{key}:Null")?;
-                }
-                Some(v) => {
-                    write!(f, "{key}:")?;
-                    fmt_value(v.to_value(), f)?;
-                }
-            }
+            write!(f, "{key}:")?;
+            fmt_value(self.get_value(key).to_value(), f)?;
         }
         f.write_char('}')
     }

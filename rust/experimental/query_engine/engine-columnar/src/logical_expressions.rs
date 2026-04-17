@@ -46,7 +46,7 @@ where
                         ResolvedLogicalValue::DictionaryOwned(
                             Dictionary::new(keys, values).transform_into_boolean(
                                 |v| {
-                                    let value = v.as_ref().map(|v| v.to_value()).unwrap_or_else(|| Value::Null);
+                                    let value = v.to_value();
 
                                     if let Some(b) = value.convert_to_bool() {
                                         Ok(Some(b))
@@ -254,7 +254,7 @@ where
 
 fn compare_dictionary_to_single<FCompare>(
     dictionary: Dictionary,
-    value: &ResolvedSingleValue,
+    value: &ValueOrRef,
     compare: FCompare,
 ) -> Result<BooleanArray, ExpressionError>
 where
@@ -262,16 +262,11 @@ where
 {
     let right = value.to_value();
 
-    dictionary.transform_into_boolean(|v| {
-        Ok(Some(match v {
-            None => compare(&Value::Null, &right)?,
-            Some(v) => compare(&v.to_value(), &right)?,
-        }))
-    })
+    dictionary.transform_into_boolean(|v| Ok(Some(compare(&v.to_value(), &right)?)))
 }
 
 fn compare_single_to_dictionary<FCompare>(
-    value: &ResolvedSingleValue,
+    value: &ValueOrRef,
     dictionary: Dictionary,
     compare: FCompare,
 ) -> Result<BooleanArray, ExpressionError>
@@ -280,12 +275,7 @@ where
 {
     let left = value.to_value();
 
-    dictionary.transform_into_boolean(|v| {
-        Ok(Some(match v {
-            None => compare(&left, &Value::Null)?,
-            Some(v) => compare(&left, &v.to_value())?,
-        }))
-    })
+    dictionary.transform_into_boolean(|v| Ok(Some(compare(&left, &v.to_value())?)))
 }
 
 fn compare_dictionary_to_dictionary<F>(
@@ -328,21 +318,14 @@ where
             Entry::Vacant(vacant) => {
                 let (left_value_index, right_value_index) = vacant.key();
 
-                let left_value = left_value_index.and_then(|i| left_values.get_value_at(i));
-                let right_value = right_value_index.and_then(|i| right_values.get_value_at(i));
+                let left_value = left_value_index
+                    .map(|i| left_values.get_value_at(i))
+                    .unwrap_or(ValueOrRef::Null);
+                let right_value = right_value_index
+                    .map(|i| right_values.get_value_at(i))
+                    .unwrap_or(ValueOrRef::Null);
 
-                let value = compare(
-                    left_value
-                        .as_ref()
-                        .map(|v| v.to_value())
-                        .as_ref()
-                        .unwrap_or(&Value::Null),
-                    right_value
-                        .as_ref()
-                        .map(|v| v.to_value())
-                        .as_ref()
-                        .unwrap_or(&Value::Null),
-                )?;
+                let value = compare(&left_value.to_value(), &right_value.to_value())?;
 
                 vacant.insert(value);
                 value

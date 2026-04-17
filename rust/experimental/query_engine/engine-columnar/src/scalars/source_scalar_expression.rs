@@ -46,32 +46,80 @@ where
                     ResolvedScalarValue::Table(t) => Ok(t.get_values(single.get_value())),
                     ResolvedScalarValue::Dictionary(d) => {
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
-                            Ok(v.and_then(|v| {
-                                if let ValueOrRef::Map(m) = v {
-                                    match m {
-                                        MapValueOrRef::Ref(m) => {
-                                            m.get(single.get_value()).and_then(|v| {
-                                                TryInto::<ValueOrRef>::try_into(v.to_value()).ok()
-                                            })
-                                        }
-                                        MapValueOrRef::Owned(mut o) => {
-                                            o.get_values_mut().remove(single.get_value())
-                                        }
+                            if let ValueOrRef::Map(m) = v {
+                                /*match m {
+                                    MapValueOrRef::Ref(m) => {
+                                        m.get(single.get_value()).and_then(|v| {
+                                            TryInto::<ValueOrRef>::try_into(v.to_value()).ok()
+                                        })
                                     }
-                                } else {
-                                    execution_context.add_diagnostic_if_enabled(
-                                        ColumnarEngineDiagnosticLevel::Warn,
-                                        source_scalar_expression,
-                                        || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
-                                    );
-                                    None
-                                }
-                            }))
+                                    MapValueOrRef::Owned(mut o) => {
+                                        o.get_values_mut().remove(single.get_value())
+                                    }
+                                }*/
+                                //m.as_map_value().get(single.get_value()).and_then(|v| TryInto::<ValueOrRef>::try_into(v.to_value()).ok())
+                                todo!()
+                            } else {
+                                execution_context.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    source_scalar_expression,
+                                    || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
+                                );
+                                Ok(ValueOrRef::Null)
+                            }
                         })?)))
                     }
                     ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                 },
-                // todo: integer support for arrays
+                Value::Integer(single) => match current {
+                    ResolvedScalarValue::Dictionary(d) => {
+                        Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
+                            if let ValueOrRef::Array(a) = v {
+                                let mut index = single.get_value();
+                                if index < 0 {
+                                    index += a.as_array_value().len() as i64;
+                                }
+                                if index < 0 {
+                                    execution_context.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        source_scalar_expression,
+                                        || format!("Array index '{index}' specified in accessor expression is invalid"),
+                                    );
+                                    Ok(ValueOrRef::Null)
+                                } else {
+                                    /*match a {
+                                        ArrayValueOrRef::Ref(a) => {
+                                            a.get(index as usize).and_then(|v| {
+                                                TryInto::<ValueOrRef>::try_into(v.to_value()).ok()
+                                            })
+                                        }
+                                        ArrayValueOrRef::Owned(mut a) => {
+                                            std::mem::take(&mut a.get_values_mut()[index as usize])
+                                        }
+                                    }*/
+                                    //a.as_array_value().get(index as usize).and_then(|v| TryInto::<ValueOrRef>::try_into(v.to_value()).ok())
+                                    todo!()
+                                }
+                            } else {
+                                execution_context.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    source_scalar_expression,
+                                    || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
+                                );
+                                Ok(ValueOrRef::Null)
+                            }
+                        })?)))
+                    }
+                    ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
+                    ResolvedScalarValue::Table(_) => {
+                        execution_context.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Warn,
+                            source_scalar_expression,
+                            || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", single.get_value()),
+                        );
+                        Ok(None)
+                    }
+                }
                 v => {
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
@@ -136,11 +184,7 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
     let mut values = IndexSet::with_hasher(RandomState::new());
 
     for key_index in 0..key_count {
-        match selector
-            .get_value(key_index)
-            .as_ref()
-            .map_or(Value::Null, |v| v.to_value())
-        {
+        match selector.get_value(key_index).to_value() {
             Value::String(selector_value_string) => {
                 let value = match source {
                     ResolvedScalarValue::Table(t) => {
@@ -156,14 +200,14 @@ fn select_using_dictionary<'a, K: ArrowDictionaryKeyType>(
                     // todo: Support dictionary of maps (dictionary[key_index][selector_value_string])
                     _ => todo!(),
                 };
-                if let Some(v) = value {
-                    let (index, _) = values.insert_full(v);
+                if let ValueOrRef::Null = value {
+                    push_null(&mut null_buffer, key_index, key_bit_length);
+                } else {
+                    let (index, _) = values.insert_full(value);
                     unsafe {
                         *key_builder.add(key_index) =
                             <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap()
                     };
-                } else {
-                    push_null(&mut null_buffer, key_index, key_bit_length);
                 }
             }
             // todo: support integer with arrays
@@ -243,10 +287,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Source(select_invalid_key),
             |r| {
-                matches!(
-                    r,
-                    Ok(ResolvedScalarValue::Single(ResolvedSingleValue::Null))
-                );
+                matches!(r, Ok(ResolvedScalarValue::Single(ValueOrRef::Null)));
             },
         );
 
@@ -292,6 +333,11 @@ mod tests {
                 _ => panic!("test failure"),
             },
         );
+    }
+
+    #[test]
+    fn test_select_from_source_table_using_single_integer() {
+        todo!()
     }
 
     #[test]

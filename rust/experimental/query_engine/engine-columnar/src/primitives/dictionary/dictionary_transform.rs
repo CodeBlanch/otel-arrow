@@ -14,7 +14,7 @@ impl<'a> Dictionary<'a> {
         transform: FTransform,
     ) -> Result<BooleanArray, ExpressionError>
     where
-        FTransform: FnMut(Option<ValueOrRef<'_>>) -> Result<Option<bool>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'_>) -> Result<Option<bool>, ExpressionError>,
     {
         let (keys, values) = self.into_parts();
 
@@ -56,8 +56,7 @@ impl<'a> Dictionary<'a> {
         transform: FTransform,
     ) -> Result<Dictionary<'a>, ExpressionError>
     where
-        FTransform:
-            FnMut(Option<ValueOrRef<'a>>) -> Result<Option<ValueOrRef<'a>>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
     {
         let (keys, values) = self.into_parts();
 
@@ -101,7 +100,7 @@ fn transform_boolean_typed<K: ArrowDictionaryKeyType, FTransform>(
     mut transform: FTransform,
 ) -> Result<BooleanArray, ExpressionError>
 where
-    FTransform: FnMut(Option<ValueOrRef<'_>>) -> Result<Option<bool>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'_>) -> Result<Option<bool>, ExpressionError>,
 {
     let key_length = keys.len();
 
@@ -123,7 +122,7 @@ where
                         .get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
                 }
             } else {
-                match null_value.get_or_init(|| transform(None)) {
+                match null_value.get_or_init(|| transform(ValueOrRef::Null)) {
                     Err(_) => return Err(null_value.take().unwrap().unwrap_err()),
                     Ok(v) => v,
                 }
@@ -193,7 +192,7 @@ fn transform_any_typed<'a, K: ArrowDictionaryKeyType, FTransform>(
     mut transform: FTransform,
 ) -> Result<Dictionary<'a>, ExpressionError>
 where
-    FTransform: FnMut(Option<ValueOrRef<'a>>) -> Result<Option<ValueOrRef<'a>>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
 {
     let key_length = keys.len();
     let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
@@ -202,7 +201,12 @@ where
     let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
     let mut null_buffer = None;
 
-    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut transform)?;
+    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut |v| {
+        Ok(match transform(v)? {
+            ValueOrRef::Null => None,
+            v => Some(v),
+        })
+    })?;
 
     let mut null_index = None;
 
@@ -220,17 +224,18 @@ where
         let (has_value_index, value_index) = match null_index {
             Some(v) => v,
             None => {
-                let v = if let Some(null_value) = transform(None)? {
-                    let (index, _) = transformed_values.insert_full(null_value);
-                    (
-                        true,
-                        <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap(),
-                    )
-                } else {
-                    (
+                let v = match transform(ValueOrRef::Null)? {
+                    ValueOrRef::Null => (
                         false,
                         <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),
-                    )
+                    ),
+                    v => {
+                        let (index, _) = transformed_values.insert_full(v);
+                        (
+                            true,
+                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap(),
+                        )
+                    }
                 };
                 null_index = Some(v);
                 v

@@ -15,8 +15,7 @@ pub(crate) fn merge<'a, FMerge, const COUNT: usize>(
     merge: FMerge,
 ) -> Result<Dictionary<'a>, ExpressionError>
 where
-    FMerge:
-        FnMut([Option<ValueOrRef<'a>>; COUNT]) -> Result<Option<ValueOrRef<'a>>, ExpressionError>,
+    FMerge: FnMut([ValueOrRef<'a>; COUNT]) -> Result<ValueOrRef<'a>, ExpressionError>,
 {
     assert!(COUNT > 0);
 
@@ -40,8 +39,7 @@ fn merge_typed<'a, K: ArrowDictionaryKeyType, FMerge, const COUNT: usize>(
     mut merge: FMerge,
 ) -> Result<Dictionary<'a>, ExpressionError>
 where
-    FMerge:
-        FnMut([Option<ValueOrRef<'a>>; COUNT]) -> Result<Option<ValueOrRef<'a>>, ExpressionError>,
+    FMerge: FnMut([ValueOrRef<'a>; COUNT]) -> Result<ValueOrRef<'a>, ExpressionError>,
 {
     debug_assert!(COUNT > 0);
 
@@ -75,24 +73,24 @@ where
                 }
             },
             Entry::Vacant(vacant) => {
-                let mut values_to_merge: [Option<ValueOrRef<'_>>; COUNT] =
-                    std::array::from_fn(|_| None);
+                let mut values_to_merge: [ValueOrRef<'_>; COUNT] =
+                    std::array::from_fn(|_| ValueOrRef::Null);
                 for (i, value_index) in vacant.key().iter().enumerate() {
                     values_to_merge[i] =
-                        value_index.and_then(|v| values[i].values().get_value_at(v))
+                        value_index.map_or(ValueOrRef::Null, |v| values[i].values().get_value_at(v))
                 }
                 match merge(values_to_merge)? {
-                    Some(v) => {
+                    ValueOrRef::Null => {
+                        vacant.insert(None);
+                        push_null(&mut null_buffer, key_index, key_bit_length);
+                    }
+                    v => {
                         let (merged_value_index, _) = merged_values.insert_full(v);
                         let native_merged_value_index =
                             <K as ArrowPrimitiveType>::Native::from_usize(merged_value_index)
                                 .unwrap();
                         vacant.insert(Some(native_merged_value_index));
                         unsafe { *key_builder.add(key_index) = native_merged_value_index };
-                    }
-                    None => {
-                        vacant.insert(None);
-                        push_null(&mut null_buffer, key_index, key_bit_length);
                     }
                 }
             }
@@ -139,37 +137,31 @@ mod tests {
 
         let c_dict: Dictionary = c_array.downcast_dict::<StringArray>().unwrap().into();
 
-        let merged = merge([a_dict, b_dict, c_dict], |mut values| {
+        let merged = merge([a_dict, b_dict, c_dict], |values| {
             debug_assert!(values.len() == 3);
 
-            let start = match values[0].take() {
-                Some(v) => match v.to_value() {
-                    Value::Integer(i) => i.get_value() as usize,
-                    _ => 0,
-                },
-                None => 0,
+            let start = match values[0].to_value() {
+                Value::Integer(i) => i.get_value() as usize,
+                _ => 0,
             };
 
-            let end = match values[1].take() {
-                Some(v) => match v.to_value() {
-                    Value::Integer(i) => Some(i.get_value() as usize),
-                    _ => None,
-                },
-                None => None,
+            let end = match values[1].to_value() {
+                Value::Integer(i) => Some(i.get_value() as usize),
+                _ => None,
             };
 
-            Ok(values[2].take().and_then(|v| match v {
+            Ok(match &values[2] {
                 ValueOrRef::String(string_value) => {
                     let v = string_value.get_value();
                     let end = end.unwrap_or(v.len());
-                    Some(ValueOrRef::String(StringValueOrRef::new_slice(
-                        string_value,
+                    ValueOrRef::String(StringValueOrRef::new_slice(
+                        string_value.clone(),
                         start,
                         end,
-                    )))
+                    ))
                 }
-                _ => None,
-            }))
+                _ => ValueOrRef::Null,
+            })
         })
         .unwrap();
 

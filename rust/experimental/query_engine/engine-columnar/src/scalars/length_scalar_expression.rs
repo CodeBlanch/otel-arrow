@@ -49,16 +49,14 @@ where
             Ok(ResolvedScalarValue::Dictionary(
                 dictionary.transform_into_any(|v| {
                     Ok(match v {
-                        Some(ValueOrRef::String(s)) => {
-                            Some(ValueOrRef::Integer(s.get_value().chars().count() as i64))
+                        ValueOrRef::String(s) => {
+                            ValueOrRef::Integer(s.get_value().chars().count() as i64)
                         }
-                        Some(ValueOrRef::Map(MapValueOrRef::Ref(m))) => {
-                            Some(ValueOrRef::Integer(m.len() as i64))
+                        ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
+                        ValueOrRef::Array(a) => {
+                            ValueOrRef::Integer(a.as_array_value().len() as i64)
                         }
-                        Some(ValueOrRef::Array(ArrayValueOrRef::Ref(a))) => {
-                            Some(ValueOrRef::Integer(a.len() as i64))
-                        }
-                        Some(v) => {
+                        v => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
                                 length_scalar_expression,
@@ -69,9 +67,8 @@ where
                                     )
                                 },
                             );
-                            None
+                            ValueOrRef::Null
                         }
-                        _ => None,
                     })
                 })?,
             ))
@@ -106,7 +103,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Length(length_string),
             |r| match r.unwrap() {
-                ResolvedScalarValue::Single(ResolvedSingleValue::Value(actual)) => {
+                ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::Integer(&11), actual.to_value());
                 }
                 _ => panic!("test failure"),
@@ -125,7 +122,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Length(length_array),
             |r| match r.unwrap() {
-                ResolvedScalarValue::Single(ResolvedSingleValue::Value(actual)) => {
+                ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::Integer(&0), actual.to_value());
                 }
                 _ => panic!("test failure"),
@@ -144,7 +141,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Length(length_map),
             |r| match r.unwrap() {
-                ResolvedScalarValue::Single(ResolvedSingleValue::Value(actual)) => {
+                ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::Integer(&0), actual.to_value());
                 }
                 _ => panic!("test failure"),
