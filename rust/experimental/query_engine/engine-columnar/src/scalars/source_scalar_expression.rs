@@ -41,29 +41,18 @@ where
     {
         let next = execute_scalar_expression(execution_context, selector)?.map_into_with_state(
             current,
-            |current, s| match s.to_value() {
-                Value::String(single) => match current {
-                    ResolvedScalarValue::Table(t) => Ok(t.get_values(single.get_value())),
+            |current, s| match s {
+                ValueOrRef::String(key) => match current {
+                    ResolvedScalarValue::Table(t) => Ok(t.get_values(key.get_value())),
                     ResolvedScalarValue::Dictionary(d) => {
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Map(m) = v {
-                                /*match m {
-                                    MapValueOrRef::Ref(m) => {
-                                        m.get(single.get_value()).and_then(|v| {
-                                            TryInto::<ValueOrRef>::try_into(v.to_value()).ok()
-                                        })
-                                    }
-                                    MapValueOrRef::Owned(mut o) => {
-                                        o.get_values_mut().remove(single.get_value())
-                                    }
-                                }*/
-                                //m.as_map_value().get(single.get_value()).and_then(|v| TryInto::<ValueOrRef>::try_into(v.to_value()).ok())
-                                todo!()
+                                Ok(ValueOrRef::MapValue(m, key.clone()))
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
                                     source_scalar_expression,
-                                    || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
+                                    || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), v.get_value_type()),
                                 );
                                 Ok(ValueOrRef::Null)
                             }
@@ -71,11 +60,11 @@ where
                     }
                     ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                 },
-                Value::Integer(single) => match current {
+                ValueOrRef::Integer(index) => match current {
                     ResolvedScalarValue::Dictionary(d) => {
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Array(a) = v {
-                                let mut index = single.get_value();
+                                let mut index = index.get_value();
                                 if index < 0 {
                                     index += a.as_array_value().len() as i64;
                                 }
@@ -87,24 +76,13 @@ where
                                     );
                                     Ok(ValueOrRef::Null)
                                 } else {
-                                    /*match a {
-                                        ArrayValueOrRef::Ref(a) => {
-                                            a.get(index as usize).and_then(|v| {
-                                                TryInto::<ValueOrRef>::try_into(v.to_value()).ok()
-                                            })
-                                        }
-                                        ArrayValueOrRef::Owned(mut a) => {
-                                            std::mem::take(&mut a.get_values_mut()[index as usize])
-                                        }
-                                    }*/
-                                    //a.as_array_value().get(index as usize).and_then(|v| TryInto::<ValueOrRef>::try_into(v.to_value()).ok())
-                                    todo!()
+                                    Ok(ValueOrRef::ArrayValue(a, index as usize))
                                 }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
                                     source_scalar_expression,
-                                    || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", single.get_value(), v.get_value_type()),
+                                    || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", index.get_value(), v.get_value_type()),
                                 );
                                 Ok(ValueOrRef::Null)
                             }
@@ -115,7 +93,7 @@ where
                         execution_context.add_diagnostic_if_enabled(
                             ColumnarEngineDiagnosticLevel::Warn,
                             source_scalar_expression,
-                            || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", single.get_value()),
+                            || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", index.get_value()),
                         );
                         Ok(None)
                     }

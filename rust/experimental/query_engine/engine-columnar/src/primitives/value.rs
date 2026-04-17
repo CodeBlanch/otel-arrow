@@ -50,11 +50,13 @@ pub(crate) fn fmt_value(value: Value<'_>, f: &mut std::fmt::Formatter<'_>) -> st
 #[derive(Debug, Clone)]
 pub enum ValueOrRef<'a> {
     Array(ArrayValueOrRef<'a>),
+    ArrayValue(ArrayValueOrRef<'a>, usize),
     Boolean(bool),
     DateTime(DateTime<FixedOffset>),
     Double(f64),
     Integer(i64),
     Map(MapValueOrRef<'a>),
+    MapValue(MapValueOrRef<'a>, StringValueOrRef<'a>),
     Null,
     Regex(RegexValueOrRef<'a>),
     String(StringValueOrRef<'a>),
@@ -90,9 +92,9 @@ impl<'a> OwnedArrayValue<'a> {
         &self.values
     }
 
-    /*pub fn get_values_mut(&mut self) -> &mut Vec<ValueOrRef<'a>> {
+    pub fn get_values_mut(&mut self) -> &mut Vec<ValueOrRef<'a>> {
         &mut self.values
-    }*/
+    }
 }
 
 impl<'a, const N: usize> From<[ValueOrRef<'a>; N]> for ArrayValueOrRef<'a> {
@@ -385,6 +387,10 @@ impl Hash for ValueOrRef<'_> {
                     v.hash(state);
                 }
             }
+            ValueOrRef::ArrayValue(array, index) => match array.as_array_value().get(*index) {
+                None => ValueOrRef::Null.hash(state),
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()).hash(state),
+            },
             ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
                 [8].hash(state);
                 m.len().hash(state);
@@ -403,6 +409,10 @@ impl Hash for ValueOrRef<'_> {
                     v.hash(state);
                 }
             }
+            ValueOrRef::MapValue(map, key) => match map.as_map_value().get(key.get_value()) {
+                None => ValueOrRef::Null.hash(state),
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()).hash(state),
+            },
             ValueOrRef::Null => [9].hash(state),
         }
     }
@@ -410,6 +420,20 @@ impl Hash for ValueOrRef<'_> {
 
 impl PartialEq for ValueOrRef<'_> {
     fn eq(&self, other: &Self) -> bool {
+        if let ValueOrRef::MapValue(map, key) = other {
+            let other = match map.as_map_value().get(key.get_value()) {
+                None => ValueOrRef::Null,
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()),
+            };
+            return self.eq(&other);
+        } else if let ValueOrRef::ArrayValue(array, index) = other {
+            let other = match array.as_array_value().get(*index) {
+                None => ValueOrRef::Null,
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()),
+            };
+            return self.eq(&other);
+        }
+
         match self {
             ValueOrRef::String(s) => {
                 if let ValueOrRef::String(other) = other {
@@ -469,6 +493,10 @@ impl PartialEq for ValueOrRef<'_> {
 
                 false
             }
+            ValueOrRef::ArrayValue(array, index) => match array.as_array_value().get(*index) {
+                None => ValueOrRef::Null.eq(other),
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()).eq(other),
+            },
             ValueOrRef::Map(m) => {
                 let m = m.as_map_value();
 
@@ -489,6 +517,10 @@ impl PartialEq for ValueOrRef<'_> {
 
                 false
             }
+            ValueOrRef::MapValue(map, key) => match map.as_map_value().get(key.get_value()) {
+                None => ValueOrRef::Null.eq(other),
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()).eq(other),
+            },
             ValueOrRef::Null => matches!(other, ValueOrRef::Null),
         }
     }
@@ -500,6 +532,10 @@ impl AsValue for ValueOrRef<'_> {
     fn get_value_type(&self) -> ValueType {
         match self {
             ValueOrRef::Array(_) => ValueType::Array,
+            ValueOrRef::ArrayValue(array, index) => match array.as_array_value().get(*index) {
+                None => ValueType::Null,
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()).get_value_type(),
+            },
             ValueOrRef::String(_) => ValueType::String,
             ValueOrRef::Integer(_) => ValueType::Integer,
             ValueOrRef::Double(_) => ValueType::Double,
@@ -508,6 +544,10 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::TimeSpan(_) => ValueType::TimeSpan,
             ValueOrRef::Regex(_) => ValueType::Regex,
             ValueOrRef::Map(_) => ValueType::Map,
+            ValueOrRef::MapValue(map, key) => match map.as_map_value().get(key.get_value()) {
+                None => ValueType::Null,
+                Some(v) => Into::<ValueOrRef>::into(v.to_value()).get_value_type(),
+            },
             ValueOrRef::Null => ValueType::Null,
         }
     }
@@ -523,7 +563,15 @@ impl AsValue for ValueOrRef<'_> {
             ValueOrRef::Regex(r) => Value::Regex(r),
             ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => Value::Array(*a),
             ValueOrRef::Map(m) => Value::Map(m.as_map_value()),
+            ValueOrRef::MapValue(map, key) => match map.as_map_value().get(key.get_value()) {
+                None => Value::Null,
+                Some(v) => v.to_value(),
+            },
             ValueOrRef::Array(a) => Value::Array(a.as_array_value()),
+            ValueOrRef::ArrayValue(array, index) => match array.as_array_value().get(*index) {
+                None => Value::Null,
+                Some(v) => v.to_value(),
+            },
             ValueOrRef::Null => Value::Null,
         }
     }
