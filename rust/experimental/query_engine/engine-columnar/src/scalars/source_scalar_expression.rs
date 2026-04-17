@@ -47,7 +47,11 @@ where
                     ResolvedScalarValue::Dictionary(d) => {
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Map(m) = v {
-                                Ok(ValueOrRef::MapValue(m, key.clone()))
+                                if !m.as_map_value().contains_key(key.get_value()) {
+                                    Ok(ValueOrRef::Null)
+                                } else {
+                                    Ok(ValueOrRef::MapValue(m, key.clone()))
+                                }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
@@ -68,7 +72,7 @@ where
                                 if index < 0 {
                                     index += a.as_array_value().len() as i64;
                                 }
-                                if index < 0 {
+                                if index < 0 || index >= a.as_array_value().len() as i64 {
                                     execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
                                         source_scalar_expression,
@@ -311,11 +315,149 @@ mod tests {
                 _ => panic!("test failure"),
             },
         );
+
+        let select_sub_key_invalid = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "invalid"),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Source(select_sub_key_invalid),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![None, None, None, None, None, None],
+                            vec![]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
     }
 
     #[test]
     fn test_select_from_source_table_using_single_integer() {
-        todo!()
+        let values_dictionary = build_indexset_dictionary(
+            vec![Some(0), Some(0), None, Some(1)],
+            vec![
+                ValueOrRef::Array(ArrayValueOrRef::from([
+                    ValueOrRef::Integer(0),
+                    ValueOrRef::Integer(1),
+                    ValueOrRef::Integer(2),
+                ])),
+                ValueOrRef::Integer(0),
+            ],
+        );
+
+        let select_sub_index = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Static(StaticScalarExpression::Integer(
+                    IntegerScalarExpression::new(QueryLocation::new_fake(), 0),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Source(select_sub_index),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![Some(0), Some(0), None, None],
+                            vec![ValueOrRef::Integer(0)]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
+
+        let select_sub_index_negative = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Static(StaticScalarExpression::Integer(
+                    IntegerScalarExpression::new(QueryLocation::new_fake(), -1),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Source(select_sub_index_negative),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![Some(0), Some(0), None, None],
+                            vec![ValueOrRef::Integer(2)]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
+
+        let select_sub_index_invalid = SourceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ValueAccessor::new_with_selectors(vec![
+                ScalarExpression::Static(StaticScalarExpression::String(
+                    StringScalarExpression::new(QueryLocation::new_fake(), "values"),
+                )),
+                ScalarExpression::Static(StaticScalarExpression::Integer(
+                    IntegerScalarExpression::new(QueryLocation::new_fake(), 100),
+                )),
+            ]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "values".into(),
+                values_dictionary.clone(),
+            )])),
+            ScalarExpression::Source(select_sub_index_invalid),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![None, None, None, None],
+                            vec![]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
     }
 
     #[test]
