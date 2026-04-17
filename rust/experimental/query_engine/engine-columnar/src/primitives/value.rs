@@ -529,9 +529,9 @@ impl AsValue for ValueOrRef<'_> {
     }
 }
 
-impl<'a> Into<ValueOrRef<'a>> for Value<'a> {
-    fn into(self) -> ValueOrRef<'a> {
-        match self {
+impl<'a> From<Value<'a>> for ValueOrRef<'a> {
+    fn from(val: Value<'a>) -> Self {
+        match val {
             Value::Array(a) => ValueOrRef::Array(ArrayValueOrRef::Ref(a)),
             Value::Boolean(b) => ValueOrRef::Boolean(b.get_value()),
             Value::DateTime(d) => ValueOrRef::DateTime(d.get_value()),

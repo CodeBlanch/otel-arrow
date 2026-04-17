@@ -43,10 +43,9 @@ impl<'a> DictionaryValueArray<'a> {
         match self {
             DictionaryValueArray::ArrayRef(a) => get_value_from_array(*a, index),
             DictionaryValueArray::VecAnyOwned(a) => a[index].clone(),
-            DictionaryValueArray::IndexAnyOwned(a) => a
-                .get_index(index)
-                .map(|v| v.clone())
-                .unwrap_or(ValueOrRef::Null),
+            DictionaryValueArray::IndexAnyOwned(a) => {
+                a.get_index(index).cloned().unwrap_or(ValueOrRef::Null)
+            }
             DictionaryValueArray::Boolean => ValueOrRef::Boolean(index != 0),
         }
     }
@@ -99,7 +98,7 @@ impl<'a> DictionaryValueArray<'a> {
 
     pub(crate) fn transform_into_vec<T, FTransform>(
         self,
-        transform: &mut FTransform,
+        mut transform: &mut FTransform,
     ) -> Result<Vec<Option<T>>, ExpressionError>
     where
         FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
@@ -108,11 +107,11 @@ impl<'a> DictionaryValueArray<'a> {
             DictionaryValueArray::ArrayRef(a) => transform_array_into_vec(transform, a)?,
             DictionaryValueArray::VecAnyOwned(a) => a
                 .into_iter()
-                .map(|v| transform(v))
+                .map(&mut transform)
                 .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
             DictionaryValueArray::IndexAnyOwned(a) => a
                 .into_iter()
-                .map(|v| transform(v))
+                .map(&mut transform)
                 .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
             DictionaryValueArray::Boolean => {
                 vec![
