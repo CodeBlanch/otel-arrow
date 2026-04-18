@@ -67,11 +67,12 @@ where
                     ResolvedScalarValue::Dictionary(d) => {
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Array(a) = v {
+                                let len = a.len();
                                 let mut index = index.get_value();
                                 if index < 0 {
-                                    index += a.as_array_value().len() as i64;
+                                    index += len as i64;
                                 }
-                                if index < 0 {
+                                if index < 0 || index >= len as i64 {
                                     execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
                                         source_scalar_expression,
@@ -79,10 +80,7 @@ where
                                     );
                                     Ok(ValueOrRef::Null)
                                 } else {
-                                    match a {
-                                        ArrayValueOrRef::Ref(a) => Ok(a.get(index as usize).map_or(ValueOrRef::Null, |v| v.to_value().into())),
-                                        ArrayValueOrRef::Owned(a) => Ok(a.get_values().get(index as usize).map_or(ValueOrRef::Null, |v| v.clone()))
-                                    }
+                                    Ok(a.get(index as usize))
                                 }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
@@ -225,11 +223,12 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     }
                     ResolvedScalarValue::Dictionary(d) => match d.get_value(key_index) {
                         ValueOrRef::Array(a) => {
+                            let len = a.len();
                             let mut index = index.get_value();
                             if index < 0 {
-                                index += a.as_array_value().len() as i64;
+                                index += len as i64;
                             }
-                            if index < 0 {
+                            if index < 0 || index >= len as i64 {
                                 execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
                                         source_scalar_expression,
@@ -237,15 +236,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                                     );
                                 ValueOrRef::Null
                             } else {
-                                match a {
-                                    ArrayValueOrRef::Ref(m) => m
-                                        .get(index as usize)
-                                        .map_or(ValueOrRef::Null, |v| v.to_value().into()),
-                                    ArrayValueOrRef::Owned(m) => m
-                                        .get_values()
-                                        .get(index as usize)
-                                        .map_or(ValueOrRef::Null, |v| v.clone()),
-                                }
+                                a.get(index as usize)
                             }
                         }
                         v => {

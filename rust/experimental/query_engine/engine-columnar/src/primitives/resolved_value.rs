@@ -39,10 +39,6 @@ impl<'a> ResolvedScalarValue<'a> {
         })
     }
 
-    pub fn new_from_value_or_ref(value: ValueOrRef<'a>) -> ResolvedScalarValue<'a> {
-        ResolvedScalarValue::Single(value)
-    }
-
     pub fn map_into<FSingle, FDictionary, FTable, FRet>(
         self,
         when_single: FSingle,

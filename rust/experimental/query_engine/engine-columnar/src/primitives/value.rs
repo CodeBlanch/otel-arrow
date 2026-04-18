@@ -11,7 +11,7 @@ use chrono::{DateTime, FixedOffset, TimeDelta};
 use data_engine_expressions::*;
 use regex::Regex;
 
-use crate::resolved_value::*;
+use crate::*;
 
 // todo: Make Display impl on Value do this work
 pub(crate) fn fmt_value(value: Value<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,83 +62,6 @@ pub enum ValueOrRef<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub enum ArrayValueOrRef<'a> {
-    Ref(&'a (dyn ArrayValue + 'a)),
-    Owned(Rc<OwnedArrayValue<'a>>),
-}
-
-impl<'a> ArrayValueOrRef<'a> {
-    pub fn as_array_value(&self) -> &'_ (dyn ArrayValue + 'a) {
-        match self {
-            ArrayValueOrRef::Ref(a) => *a,
-            ArrayValueOrRef::Owned(a) => a.as_ref(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct OwnedArrayValue<'a> {
-    values: Vec<ValueOrRef<'a>>,
-}
-
-impl<'a> OwnedArrayValue<'a> {
-    pub fn new() -> OwnedArrayValue<'a> {
-        Self { values: vec![] }
-    }
-
-    pub fn get_values(&self) -> &[ValueOrRef<'a>] {
-        &self.values
-    }
-
-    pub fn get_values_mut(&mut self) -> &mut Vec<ValueOrRef<'a>> {
-        &mut self.values
-    }
-}
-
-impl<'a, const N: usize> From<[ValueOrRef<'a>; N]> for ArrayValueOrRef<'a> {
-    fn from(arr: [ValueOrRef<'a>; N]) -> Self {
-        ArrayValueOrRef::Owned(
-            OwnedArrayValue {
-                values: Vec::from_iter(arr),
-            }
-            .into(),
-        )
-    }
-}
-
-impl<'a> ArrayValue for OwnedArrayValue<'a> {
-    fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    fn get(&self, index: usize) -> Option<&(dyn AsValue + 'a)> {
-        self.values.get(index).map(|v| v as &dyn AsValue)
-    }
-
-    fn get_static(&self, _index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
-        unreachable!("should never be called by columnar engine")
-    }
-
-    fn get_item_range(
-        &self,
-        range: ArrayRange,
-        item_callback: &mut dyn IndexValueCallback,
-    ) -> bool {
-        for (index, value) in range.get_slice(&self.values).iter().enumerate() {
-            if !item_callback.next(index, value.to_value()) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-#[derive(Debug, Clone)]
 pub enum MapValueOrRef<'a> {
     Ref(&'a (dyn MapValue + 'a)),
     Owned(Rc<OwnedMapValue<'a>>),
@@ -169,9 +92,9 @@ impl<'a> OwnedMapValue<'a> {
         &self.values
     }
 
-    /*pub fn get_values_mut(&mut self) -> &mut HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
+    pub fn get_values_mut(&mut self) -> &mut HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
         &mut self.values
-    }*/
+    }
 }
 
 impl<'a, const N: usize> From<[(Box<str>, ValueOrRef<'a>); N]> for MapValueOrRef<'a> {
@@ -244,101 +167,6 @@ impl RegexValue for RegexValueOrRef<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum StringValueOrRef<'a> {
-    Ref(&'a str),
-    Owned(Rc<String>),
-    OwnedSlice {
-        value: Rc<String>,
-        start: usize,
-        end: usize,
-    },
-}
-
-impl StringValueOrRef<'_> {
-    pub fn new_owned(value: String) -> StringValueOrRef<'static> {
-        StringValueOrRef::Owned(value.into())
-    }
-}
-
-impl<'a> StringValueOrRef<'a> {
-    pub fn new_ref(value: &'a str) -> StringValueOrRef<'a> {
-        StringValueOrRef::Ref(value)
-    }
-
-    pub(crate) fn new_slice(
-        inner_value: StringValueOrRef<'a>,
-        range_start_inclusive: usize,
-        range_end_exclusive: usize,
-    ) -> StringValueOrRef<'a> {
-        let value = inner_value.get_value();
-
-        // Note: Slice of a str returns raw utf8 bytes. Chars can take 1 to 4
-        // bytes. In order to correctly slice the str as chars we have to find
-        // the correct byte indices to do the slicing
-        let count = range_end_exclusive - range_start_inclusive;
-        if count == 0 {
-            return StringValueOrRef::Ref("");
-        }
-
-        let mut chars = value.char_indices().skip(range_start_inclusive).take(count);
-
-        if let Some(first) = chars.next() {
-            let mut buf = [0; 4];
-            let (start, end) = if let Some(last) = chars.last() {
-                let encoded = last.1.encode_utf8(&mut buf);
-
-                (first.0, last.0 + encoded.len())
-            } else {
-                let encoded = first.1.encode_utf8(&mut buf);
-
-                (first.0, first.0 + encoded.len())
-            };
-
-            if end - start == value.len() {
-                inner_value
-            } else {
-                match inner_value {
-                    StringValueOrRef::Ref(r) => StringValueOrRef::Ref(&r[start..end]),
-                    StringValueOrRef::Owned(o) => StringValueOrRef::OwnedSlice {
-                        value: o,
-                        start,
-                        end,
-                    },
-                    StringValueOrRef::OwnedSlice {
-                        value,
-                        start: s,
-                        end: _,
-                    } => {
-                        let start = start + s;
-                        let end = end + s;
-
-                        StringValueOrRef::OwnedSlice { value, start, end }
-                    }
-                }
-            }
-        } else {
-            StringValueOrRef::Ref("")
-        }
-    }
-}
-
-impl StringValue for StringValueOrRef<'_> {
-    fn get_value(&self) -> &str {
-        match self {
-            StringValueOrRef::Ref(s) => s,
-            StringValueOrRef::Owned(o) => o,
-            StringValueOrRef::OwnedSlice { value, start, end } => &value[*start..*end],
-        }
-    }
-}
-
-impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a> {
-    fn from(value: StringValueOrRef<'a>) -> Self {
-        ResolvedScalarValue::Single(ValueOrRef::String(value))
-    }
-}
-
 impl Hash for ValueOrRef<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
@@ -370,20 +198,8 @@ impl Hash for ValueOrRef<'_> {
                 [6].hash(state);
                 r.get_value().as_str().hash(state);
             }
-            ValueOrRef::Array(ArrayValueOrRef::Ref(a)) => {
-                [7].hash(state);
-                a.len().hash(state);
-                a.get_items(&mut IndexValueClosureCallback::new(|_, v| {
-                    Into::<ValueOrRef>::into(v).hash(state);
-                    true
-                }));
-            }
-            ValueOrRef::Array(ArrayValueOrRef::Owned(a)) => {
-                [7].hash(state);
-                a.len().hash(state);
-                for v in &a.values {
-                    v.hash(state);
-                }
+            ValueOrRef::Array(a) => {
+                a.hash(state);
             }
             ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
                 [8].hash(state);
