@@ -24,12 +24,12 @@ where
 
     inner_value.map_into(
         |single| {
-            Ok(match single.to_value() {
-                Value::String(s) => {
-                    ResolvedScalarValue::new_int(s.get_value().chars().count() as i64)
+            Ok(match single {
+                ValueOrRef::String(s) => ResolvedScalarValue::new_int(s.char_len() as i64),
+                ValueOrRef::Array(a) => {
+                    ResolvedScalarValue::new_int(a.as_array_value().len() as i64)
                 }
-                Value::Array(a) => ResolvedScalarValue::new_int(a.len() as i64),
-                Value::Map(m) => ResolvedScalarValue::new_int(m.len() as i64),
+                ValueOrRef::Map(m) => ResolvedScalarValue::new_int(m.as_map_value().len() as i64),
                 v => {
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
@@ -48,12 +48,12 @@ where
         |dictionary| {
             Ok(ResolvedScalarValue::Dictionary(
                 dictionary.transform_into_any(|v| {
-                    Ok(match v.to_value() {
-                        Value::String(s) => {
-                            ValueOrRef::Integer(s.get_value().chars().count() as i64)
+                    Ok(match v {
+                        ValueOrRef::String(s) => ValueOrRef::Integer(s.char_len() as i64),
+                        ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
+                        ValueOrRef::Array(a) => {
+                            ValueOrRef::Integer(a.as_array_value().len() as i64)
                         }
-                        Value::Map(m) => ValueOrRef::Integer(m.len() as i64),
-                        Value::Array(a) => ValueOrRef::Integer(a.len() as i64),
                         v => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,

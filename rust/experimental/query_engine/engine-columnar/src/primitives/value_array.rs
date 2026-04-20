@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use data_engine_expressions::*;
 
+use crate::resolved_value::*;
 use crate::*;
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,12 @@ fn hash_array_value<H: Hasher>(state: &mut H, a: &dyn ArrayValue) {
     }));
 }
 
+impl<'a> From<ArrayValueOrRef<'a>> for ResolvedScalarValue<'a> {
+    fn from(value: ArrayValueOrRef<'a>) -> Self {
+        ResolvedScalarValue::Single(ValueOrRef::Array(value))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OwnedArrayValue<'a> {
     values: Vec<ValueOrRef<'a>>,
@@ -151,6 +158,18 @@ pub struct ArrayValueOrRefSlice<'a> {
 }
 
 impl<'a> ArrayValueOrRefSlice<'a> {
+    pub fn new(
+        value: ArrayValueOrRef<'a>,
+        range_start_inclusive: usize,
+        range_end_exclusive: usize,
+    ) -> ArrayValueOrRefSlice<'a> {
+        Self {
+            value: value.into(),
+            range_start_inclusive,
+            range_end_exclusive,
+        }
+    }
+
     pub fn get(&self, index: usize) -> ValueOrRef<'a> {
         match self.value.as_ref() {
             ArrayValueOrRef::Ref(a) => a

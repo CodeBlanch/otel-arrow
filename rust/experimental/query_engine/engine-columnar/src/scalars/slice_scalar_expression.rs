@@ -80,7 +80,7 @@ where
                             match SliceScalarExpression::validate_slice_range(
                                 slice_scalar_expression.get_query_location(),
                                 "String",
-                                string_value.get_value().chars().count(),
+                                string_value.char_len(),
                                 range_start_inclusive,
                                 range_length,
                             ) {
@@ -102,7 +102,34 @@ where
                                 }
                             }
                         }
-                        // todo: support arrays
+                        ValueOrRef::Array(array_value) => {
+                            match SliceScalarExpression::validate_slice_range(
+                                slice_scalar_expression.get_query_location(),
+                                "Array",
+                                array_value.len(),
+                                range_start_inclusive,
+                                range_length,
+                            ) {
+                                Ok(range_end_exclusive) => {
+                                    ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
+                                        array_value,
+                                        range_start_inclusive,
+                                        range_end_exclusive,
+                                    ))
+                                    .into()
+                                }
+                                Err(e) => {
+                                    execution_context.add_diagnostic(
+                                        ColumnarEngineDiagnostic::new(
+                                            ColumnarEngineDiagnosticLevel::Error,
+                                            slice_scalar_expression,
+                                            e.into_parts().1,
+                                        ),
+                                    );
+                                    ResolvedScalarValue::new_null()
+                                }
+                            }
+                        }
                         single => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
@@ -126,7 +153,7 @@ where
                                     match SliceScalarExpression::validate_slice_range(
                                         slice_scalar_expression.get_query_location(),
                                         "String",
-                                        string_value.get_value().chars().count(),
+                                        string_value.char_len(),
                                         range_start_inclusive,
                                         range_length,
                                     ) {
@@ -149,7 +176,33 @@ where
                                         }
                                     }
                                 }
-                                // todo: support arrays
+                                ValueOrRef::Array(array_value) => {
+                                    match SliceScalarExpression::validate_slice_range(
+                                        slice_scalar_expression.get_query_location(),
+                                        "Array",
+                                        array_value.len(),
+                                        range_start_inclusive,
+                                        range_length,
+                                    ) {
+                                        Ok(range_end_exclusive) => ValueOrRef::Array(
+                                            ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
+                                                array_value,
+                                                range_start_inclusive,
+                                                range_end_exclusive,
+                                            )),
+                                        ),
+                                        Err(e) => {
+                                            execution_context.add_diagnostic(
+                                                ColumnarEngineDiagnostic::new(
+                                                    ColumnarEngineDiagnosticLevel::Error,
+                                                    slice_scalar_expression,
+                                                    e.into_parts().1,
+                                                ),
+                                            );
+                                            ValueOrRef::Null
+                                        }
+                                    }
+                                }
                                 v => {
                                     execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
@@ -301,7 +354,7 @@ where
                             match SliceScalarExpression::validate_slice_range(
                                 slice_scalar_expression.get_query_location(),
                                 "String",
-                                string_value.get_value().chars().count(),
+                                string_value.char_len(),
                                 start_inclusive,
                                 length,
                             ) {
@@ -324,7 +377,33 @@ where
                                 }
                             }
                         }
-                        // todo: support arrays
+                        ValueOrRef::Array(array_value) => {
+                            match SliceScalarExpression::validate_slice_range(
+                                slice_scalar_expression.get_query_location(),
+                                "Array",
+                                array_value.len(),
+                                start_inclusive,
+                                length,
+                            ) {
+                                Ok(end_exlusive) => ValueOrRef::Array(ArrayValueOrRef::Slice(
+                                    ArrayValueOrRefSlice::new(
+                                        array_value,
+                                        start_inclusive,
+                                        end_exlusive,
+                                    ),
+                                )),
+                                Err(e) => {
+                                    execution_context.add_diagnostic(
+                                        ColumnarEngineDiagnostic::new(
+                                            ColumnarEngineDiagnosticLevel::Error,
+                                            slice_scalar_expression,
+                                            e.into_parts().1,
+                                        ),
+                                    );
+                                    ValueOrRef::Null
+                                }
+                            }
+                        }
                         v => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
