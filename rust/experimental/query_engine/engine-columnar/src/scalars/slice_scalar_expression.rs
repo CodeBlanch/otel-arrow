@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slice_any_with_any_ranges() {
+    fn test_slice_string_any_with_any_ranges() {
         let values_dictionary = build_indexset_dictionary(
             vec![
                 Some(0),
@@ -1360,6 +1360,137 @@ mod tests {
             ScalarExpression::Static(StaticScalarExpression::String(StringScalarExpression::new(
                 QueryLocation::new_fake(),
                 "hello world",
+            ))),
+            Some(ScalarExpression::Static(StaticScalarExpression::Integer(
+                IntegerScalarExpression::new(QueryLocation::new_fake(), 100),
+            ))),
+            Some(ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "range_length_values",
+                    )),
+                )]),
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([(
+                "range_length_values".into(),
+                range_length_empty,
+            )])),
+            ScalarExpression::Slice(slice_invalid_range),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(build_indexset_dictionary(vec![None], vec![]), actual);
+                }
+                _ => panic!("test failure"),
+            },
+        );
+    }
+
+    #[test]
+    fn test_slice_array_any_with_any_ranges() {
+        let values_dictionary = build_indexset_dictionary(
+            vec![Some(0), Some(0), Some(0), Some(0), None, Some(1)],
+            vec![
+                ValueOrRef::Array(
+                    [
+                        ValueOrRef::Integer(0),
+                        ValueOrRef::Integer(1),
+                        ValueOrRef::Integer(2),
+                        ValueOrRef::Integer(3),
+                    ]
+                    .into(),
+                ),
+                ValueOrRef::Integer(0),
+            ],
+        );
+
+        let range_start_values = build_indexset_dictionary(
+            vec![None, None, Some(0), Some(1), None, Some(1)],
+            vec![ValueOrRef::Integer(0), ValueOrRef::Integer(3)],
+        );
+
+        let range_length_values = build_indexset_dictionary(
+            vec![None, Some(0), None, Some(1), None, Some(1)],
+            vec![ValueOrRef::Integer(2), ValueOrRef::Integer(4)],
+        );
+
+        let slice_all_dictionary = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "values",
+                    )),
+                )]),
+            )),
+            Some(ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "range_start_values",
+                    )),
+                )]),
+            ))),
+            Some(ScalarExpression::Source(SourceScalarExpression::new(
+                QueryLocation::new_fake(),
+                ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                    StaticScalarExpression::String(StringScalarExpression::new(
+                        QueryLocation::new_fake(),
+                        "range_length_values",
+                    )),
+                )]),
+            ))),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::from([
+                ("values".into(), values_dictionary.clone()),
+                ("range_start_values".into(), range_start_values),
+                ("range_length_values".into(), range_length_values.clone()),
+            ])),
+            ScalarExpression::Slice(slice_all_dictionary),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(
+                        build_indexset_dictionary(
+                            vec![Some(0), Some(1), Some(0), Some(2), None, None],
+                            vec![
+                                ValueOrRef::Array(
+                                    [
+                                        ValueOrRef::Integer(0),
+                                        ValueOrRef::Integer(1),
+                                        ValueOrRef::Integer(2),
+                                        ValueOrRef::Integer(3),
+                                    ]
+                                    .into(),
+                                ),
+                                ValueOrRef::Array(
+                                    [ValueOrRef::Integer(0), ValueOrRef::Integer(1),].into(),
+                                ),
+                                ValueOrRef::Array([ValueOrRef::Integer(3),].into(),),
+                            ]
+                        ),
+                        actual
+                    );
+                }
+                _ => panic!("test failure"),
+            },
+        );
+
+        let range_length_empty = build_indexset_dictionary(vec![None], vec![]);
+
+        let slice_invalid_range = SliceScalarExpression::new(
+            QueryLocation::new_fake(),
+            ScalarExpression::Static(StaticScalarExpression::Array(ArrayScalarExpression::new(
+                QueryLocation::new_fake(),
+                vec![],
             ))),
             Some(ScalarExpression::Static(StaticScalarExpression::Integer(
                 IntegerScalarExpression::new(QueryLocation::new_fake(), 100),
