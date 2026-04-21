@@ -116,8 +116,8 @@ impl ResolvedScalarValue<'_> {
     pub fn try_get_key_info(values: &[&ResolvedScalarValue<'_>]) -> Result<(usize, DataType), ()> {
         for value in values {
             if let ResolvedScalarValue::Dictionary(d) = value {
-                let keys = d.keys().as_array();
-                return Ok((keys.len(), keys.data_type().clone()));
+                let keys = d.keys();
+                return Ok((keys.len(), keys.data_type()));
             }
         }
 

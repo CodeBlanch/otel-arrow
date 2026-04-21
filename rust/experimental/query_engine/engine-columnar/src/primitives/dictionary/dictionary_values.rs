@@ -42,7 +42,9 @@ impl<'a> DictionaryValueArray<'a> {
     pub fn get_value_at(&self, index: usize) -> ValueOrRef<'a> {
         match self {
             DictionaryValueArray::ArrayRef(a) => get_value_from_array(*a, index),
-            DictionaryValueArray::VecAnyOwned(a) => a[index].clone(),
+            DictionaryValueArray::VecAnyOwned(a) => {
+                a.get(index).unwrap_or(&ValueOrRef::Null).clone()
+            }
             DictionaryValueArray::IndexAnyOwned(a) => {
                 a.get_index(index).cloned().unwrap_or(ValueOrRef::Null)
             }
@@ -403,9 +405,7 @@ where
 }
 
 pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> ValueOrRef<'_> {
-    if let Some(nulls) = value.nulls()
-        && nulls.is_null(index)
-    {
+    if index > value.len() || value.nulls().map(|n| n.is_null(index)).unwrap_or(false) {
         return ValueOrRef::Null;
     }
 

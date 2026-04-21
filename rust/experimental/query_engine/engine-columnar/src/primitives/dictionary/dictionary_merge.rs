@@ -19,7 +19,7 @@ where
 {
     assert!(COUNT > 0);
 
-    match values[0].keys().as_array().data_type() {
+    match values[0].keys().data_type() {
         DataType::UInt8 => merge_typed::<UInt8Type, FMerge, COUNT>(values, merge),
         DataType::UInt16 => merge_typed::<UInt16Type, FMerge, COUNT>(values, merge),
         DataType::UInt32 => merge_typed::<UInt32Type, FMerge, COUNT>(values, merge),

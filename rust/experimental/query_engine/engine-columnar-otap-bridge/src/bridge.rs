@@ -49,6 +49,10 @@ static LOG_RECORD_SCHEMA: LazyLock<ParserMapSchema> = LazyLock::new(|| {
         ])
 });
 
+pub(crate) fn get_log_record_schema() -> &'static ParserMapSchema {
+    &LOG_RECORD_SCHEMA
+}
+
 #[derive(Debug)]
 pub struct BridgePipeline {
     attributes_schema: Option<ParserMapSchema>,
@@ -138,7 +142,6 @@ pub fn process_otap_logs_using_pipeline<'a>(
 
     let results = batch.flush();
 
-    //let mut logs = Logs::new();
     let mut logs = RawLogsStore::new();
 
     if !results.included_batches.is_empty() {
@@ -253,14 +256,7 @@ fn build_log_record_schema(
 mod tests {
     use bytes::Bytes;
     use data_engine_kql_parser::{KqlParser, Parser};
-    use otap_df_pdata::{
-        otap::OtapBatchStore,
-        proto::OtlpProtoMessage,
-        testing::{
-            fixtures::logs_with_varying_attributes_and_properties, round_trip::otlp_to_otap,
-        },
-        *,
-    };
+    use otap_df_pdata::{otap::OtapBatchStore, *};
 
     use super::*;
 
@@ -327,8 +323,6 @@ mod tests {
         assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
 
         let pipeline = KqlParser::parse("source | where severity_text == 'Info'")
-            //let pipeline = KqlParser::parse("source | where severity_text != 'aInfo' or false")
-            //let pipeline = KqlParser::parse("source | where thing > 0 and thing2 == 2")
             .unwrap()
             .pipeline;
 
@@ -356,13 +350,56 @@ mod tests {
         println!("{results}");
     }
 
-    fn generate_logs_batch(batch_size: usize) -> Logs {
-        let logs_data = logs_with_varying_attributes_and_properties(batch_size);
-        let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
-        match pdata {
-            OtapArrowRecords::Logs(logs) => logs,
+    #[test]
+    fn test_engine_() {
+        let pdata: OtapPayload = OtlpProtoBytes::ExportLogsRequest(Bytes::from_static(&[
+            10, 95, 10, 0, 18, 91, 18, 89, 9, 1, 0, 0, 0, 0, 0, 0, 0, 16, 1, 26, 4, 73, 110, 102,
+            111, 50, 17, 10, 5, 97, 116, 116, 114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 49,
+            69, 1, 0, 0, 0, 74, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 82, 8, 0,
+            1, 2, 3, 4, 5, 6, 7, 89, 1, 0, 0, 0, 0, 0, 0, 0, 98, 9, 83, 111, 109, 101, 69, 118,
+            101, 110, 116,
+        ]))
+        .into();
+
+        let otap_batch: OtapArrowRecords = pdata.try_into().unwrap();
+
+        let logs = match otap_batch {
+            OtapArrowRecords::Logs(l) => l,
             _ => panic!(),
-        }
+        };
+
+        let batches = logs.into_batches();
+
+        println!("{:?}", batches[2]);
+
+        assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
+
+        let pipeline = KqlParser::parse("source | where severity_text == 'Info'")
+            .unwrap()
+            .pipeline;
+
+        let engine = ColumnarEngine::new_with_options(
+            pipeline,
+            ColumnarEngineOptions::new()
+                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
+        );
+
+        let mut batch = engine.begin_batch().unwrap();
+
+        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
+
+        let results = batch.flush();
+
+        assert_eq!(3, results.dropped_record_count);
+        assert_eq!(1, results.included_batches.len());
+        assert_eq!(
+            1,
+            results.included_batches[0][2]
+                .as_ref()
+                .map_or(0, |v| v.num_rows())
+        );
+
+        println!("{results}");
     }
 
     #[test]
@@ -387,10 +424,7 @@ mod tests {
 
         assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
 
-        let batches = generate_logs_batch(8192).into_batches();
-
-        //let pipeline = KqlParser::parse("source | where Attributes['attr1'] == 'value1'")
-        let pipeline = KqlParser::parse("logs | where attributes[\"code.line.number\"] > 1000 and attributes[\"code.line.number\"] == 2")
+        let pipeline = KqlParser::parse("source | where Attributes['attr1'] == 'value1'")
             .unwrap()
             .pipeline;
 
@@ -405,16 +439,15 @@ mod tests {
 
         let results = batch.flush();
 
-        /*assert_eq!(2, results.dropped_record_count);
+        assert_eq!(2, results.dropped_record_count);
         assert_eq!(1, results.included_batches.len());
         assert_eq!(
             2,
             results.included_batches[0][2]
                 .as_ref()
                 .map_or(0, |v| v.num_rows())
-        );*/
+        );
 
-        //println!("{:?}", results.included_batches);
         println!("{results}");
     }
 }

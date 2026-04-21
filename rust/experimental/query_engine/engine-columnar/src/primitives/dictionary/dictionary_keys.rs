@@ -11,6 +11,7 @@ pub enum DictionaryKeyArray<'a> {
     ArrayOwned(Arc<dyn Array>),
     BooleanRef(&'a BooleanArray),
     BooleanOwned(BooleanArray),
+    None { data_type: DataType, length: usize },
 }
 
 impl DictionaryKeyArray<'_> {
@@ -20,6 +21,10 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayOwned(a) => a.len(),
             DictionaryKeyArray::BooleanRef(a) => a.len(),
             DictionaryKeyArray::BooleanOwned(a) => a.len(),
+            DictionaryKeyArray::None {
+                data_type: _,
+                length,
+            } => *length,
         }
     }
 
@@ -29,15 +34,36 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayOwned(a) => a.is_empty(),
             DictionaryKeyArray::BooleanRef(a) => a.is_empty(),
             DictionaryKeyArray::BooleanOwned(a) => a.is_empty(),
+            DictionaryKeyArray::None {
+                data_type: _,
+                length,
+            } => *length == 0,
         }
     }
 
-    pub fn as_array(&self) -> &dyn Array {
+    pub fn data_type(&self) -> DataType {
         match self {
-            DictionaryKeyArray::ArrayRef(a) => *a,
-            DictionaryKeyArray::ArrayOwned(a) => a,
-            DictionaryKeyArray::BooleanRef(a) => *a,
-            DictionaryKeyArray::BooleanOwned(a) => a,
+            DictionaryKeyArray::ArrayRef(a) => a.data_type().clone(),
+            DictionaryKeyArray::ArrayOwned(a) => a.data_type().clone(),
+            DictionaryKeyArray::BooleanRef(a) => a.data_type().clone(),
+            DictionaryKeyArray::BooleanOwned(a) => a.data_type().clone(),
+            DictionaryKeyArray::None {
+                data_type,
+                length: _,
+            } => data_type.clone(),
+        }
+    }
+
+    pub fn values(&self) -> DictionaryKeyArrayValues<'_> {
+        match self {
+            DictionaryKeyArray::ArrayRef(a) => DictionaryKeyArrayValues::Array(*a),
+            DictionaryKeyArray::ArrayOwned(a) => DictionaryKeyArrayValues::Array(a.as_ref()),
+            DictionaryKeyArray::BooleanRef(a) => DictionaryKeyArrayValues::Array(*a),
+            DictionaryKeyArray::BooleanOwned(a) => DictionaryKeyArrayValues::Array(a),
+            DictionaryKeyArray::None { data_type, length } => DictionaryKeyArrayValues::None {
+                data_type: data_type.clone(),
+                length: *length,
+            },
         }
     }
 
@@ -49,34 +75,23 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::BooleanOwned(a) => {
                 get_bool_array_value_index_for_key_index(a, index)
             }
+            DictionaryKeyArray::None {
+                data_type: _,
+                length,
+            } => {
+                if index > *length {
+                    None
+                } else {
+                    Some(index)
+                }
+            }
         }
     }
+}
 
-    pub fn create_builder(&self) -> Box<dyn DictionaryKeyArrayBuilder> {
-        let key_count = self.len();
-
-        let array = self.as_array();
-
-        match array.data_type() {
-            DataType::Int8 => Box::new(TypeDictionaryKeyArrayBuilder::<Int8Type>::new(key_count)),
-            DataType::Int16 => Box::new(TypeDictionaryKeyArrayBuilder::<Int16Type>::new(key_count)),
-            DataType::Int32 => Box::new(TypeDictionaryKeyArrayBuilder::<Int32Type>::new(key_count)),
-            DataType::Int64 => Box::new(TypeDictionaryKeyArrayBuilder::<Int64Type>::new(key_count)),
-
-            DataType::UInt8 => Box::new(TypeDictionaryKeyArrayBuilder::<UInt8Type>::new(key_count)),
-            DataType::UInt16 => {
-                Box::new(TypeDictionaryKeyArrayBuilder::<UInt16Type>::new(key_count))
-            }
-            DataType::UInt32 => {
-                Box::new(TypeDictionaryKeyArrayBuilder::<UInt32Type>::new(key_count))
-            }
-            DataType::UInt64 => {
-                Box::new(TypeDictionaryKeyArrayBuilder::<UInt64Type>::new(key_count))
-            }
-
-            _ => panic!("Unexpected dictionary key type"),
-        }
-    }
+pub enum DictionaryKeyArrayValues<'a> {
+    Array(&'a dyn Array),
+    None { data_type: DataType, length: usize },
 }
 
 impl<T: ArrowDictionaryKeyType> From<PrimitiveArray<T>> for DictionaryKeyArray<'_> {
@@ -91,43 +106,8 @@ impl<'a, T: ArrowDictionaryKeyType> From<&'a PrimitiveArray<T>> for DictionaryKe
     }
 }
 
-pub trait DictionaryKeyArrayBuilder {
-    fn push_value_index(&mut self, value_index: usize);
-
-    fn push_null(&mut self);
-
-    fn finish(&mut self) -> DictionaryKeyArray<'static>;
-}
-
-struct TypeDictionaryKeyArrayBuilder<K: ArrowDictionaryKeyType> {
-    builder: PrimitiveBuilder<K>,
-}
-
-impl<K: ArrowDictionaryKeyType> TypeDictionaryKeyArrayBuilder<K> {
-    pub fn new(capacity: usize) -> TypeDictionaryKeyArrayBuilder<K> {
-        Self {
-            builder: PrimitiveBuilder::with_capacity(capacity),
-        }
-    }
-}
-
-impl<K: ArrowDictionaryKeyType> DictionaryKeyArrayBuilder for TypeDictionaryKeyArrayBuilder<K> {
-    fn push_value_index(&mut self, value_index: usize) {
-        self.builder
-            .append_value(K::Native::from_usize(value_index).unwrap());
-    }
-
-    fn push_null(&mut self) {
-        self.builder.append_null();
-    }
-
-    fn finish(&mut self) -> DictionaryKeyArray<'static> {
-        PrimitiveBuilder::<K>::finish(&mut self.builder).into()
-    }
-}
-
 fn get_key_array_value_index_for_key_index(array: &dyn Array, key_index: usize) -> Option<usize> {
-    if array.is_null(key_index) {
+    if array.is_null(key_index) || key_index > array.len() {
         return None;
     }
 
@@ -184,10 +164,10 @@ fn get_bool_array_value_index_for_key_index(
     array: &BooleanArray,
     key_index: usize,
 ) -> Option<usize> {
-    if array.is_null(key_index) {
+    if key_index > array.len() || array.is_null(key_index) {
         return None;
     }
-    Some(match array.value(key_index) {
+    Some(match unsafe { array.value_unchecked(key_index) } {
         true => 1,
         false => 0,
     })

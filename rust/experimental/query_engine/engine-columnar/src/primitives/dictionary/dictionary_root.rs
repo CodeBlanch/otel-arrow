@@ -23,6 +23,18 @@ impl<'a> Dictionary<'a> {
         Self { keys, values }
     }
 
+    pub fn from_array<K: ArrowDictionaryKeyType, V: ArrowPrimitiveType>(
+        values: &'a PrimitiveArray<V>,
+    ) -> Dictionary<'a> {
+        Self {
+            keys: DictionaryKeyArray::None {
+                data_type: K::DATA_TYPE,
+                length: values.len(),
+            },
+            values: values.into(),
+        }
+    }
+
     pub fn new_scalar<K: ArrowDictionaryKeyType>(
         count: usize,
         value: ValueOrRef<'a>,

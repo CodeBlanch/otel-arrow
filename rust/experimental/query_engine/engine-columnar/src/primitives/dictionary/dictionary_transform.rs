@@ -11,43 +11,88 @@ use crate::*;
 impl<'a> Dictionary<'a> {
     pub(crate) fn transform_into_boolean<FTransform>(
         self,
-        transform: FTransform,
+        mut transform: FTransform,
     ) -> Result<BooleanArray, ExpressionError>
     where
         FTransform: FnMut(ValueOrRef<'_>) -> Result<Option<bool>, ExpressionError>,
     {
         let (keys, values) = self.into_parts();
 
-        let array = keys.as_array();
+        match keys.values() {
+            DictionaryKeyArrayValues::Array(key_array) => match key_array.data_type() {
+                DataType::Int8 => {
+                    transform_boolean_typed(key_array.as_primitive::<Int8Type>(), values, transform)
+                }
+                DataType::Int16 => transform_boolean_typed(
+                    key_array.as_primitive::<Int16Type>(),
+                    values,
+                    transform,
+                ),
+                DataType::Int32 => transform_boolean_typed(
+                    key_array.as_primitive::<Int32Type>(),
+                    values,
+                    transform,
+                ),
+                DataType::Int64 => transform_boolean_typed(
+                    key_array.as_primitive::<Int64Type>(),
+                    values,
+                    transform,
+                ),
 
-        match array.data_type() {
-            DataType::Int8 => {
-                transform_boolean_typed(array.as_primitive::<Int8Type>(), values, transform)
-            }
-            DataType::Int16 => {
-                transform_boolean_typed(array.as_primitive::<Int16Type>(), values, transform)
-            }
-            DataType::Int32 => {
-                transform_boolean_typed(array.as_primitive::<Int32Type>(), values, transform)
-            }
-            DataType::Int64 => {
-                transform_boolean_typed(array.as_primitive::<Int64Type>(), values, transform)
-            }
+                DataType::UInt8 => transform_boolean_typed(
+                    key_array.as_primitive::<UInt8Type>(),
+                    values,
+                    transform,
+                ),
+                DataType::UInt16 => transform_boolean_typed(
+                    key_array.as_primitive::<UInt16Type>(),
+                    values,
+                    transform,
+                ),
+                DataType::UInt32 => transform_boolean_typed(
+                    key_array.as_primitive::<UInt32Type>(),
+                    values,
+                    transform,
+                ),
+                DataType::UInt64 => transform_boolean_typed(
+                    key_array.as_primitive::<UInt64Type>(),
+                    values,
+                    transform,
+                ),
 
-            DataType::UInt8 => {
-                transform_boolean_typed(array.as_primitive::<UInt8Type>(), values, transform)
-            }
-            DataType::UInt16 => {
-                transform_boolean_typed(array.as_primitive::<UInt16Type>(), values, transform)
-            }
-            DataType::UInt32 => {
-                transform_boolean_typed(array.as_primitive::<UInt32Type>(), values, transform)
-            }
-            DataType::UInt64 => {
-                transform_boolean_typed(array.as_primitive::<UInt64Type>(), values, transform)
-            }
+                _ => panic!("Unexpected dictionary key type"),
+            },
+            DictionaryKeyArrayValues::None {
+                data_type: _,
+                length,
+            } => {
+                let key_bit_length = arrow::util::bit_util::ceil(length, 8);
 
-            _ => panic!("Unexpected dictionary key type"),
+                let mut key_buffer = MutableBuffer::from_len_zeroed(key_bit_length);
+                let key_builder = key_buffer.typed_data_mut::<u8>().as_mut_ptr();
+
+                let mut null_buffer = None;
+
+                let transformered_values = values.transform_into_vec(&mut transform)?;
+
+                assert!(transformered_values.len() == length);
+
+                for key_index in 0..length {
+                    if let Some(v) = unsafe { transformered_values.get_unchecked(key_index) } {
+                        if *v {
+                            unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
+                        }
+                    } else {
+                        push_null(&mut null_buffer, key_index, key_bit_length);
+                    }
+                }
+
+                Ok(BooleanArray::new(
+                    BooleanBufferBuilder::new_from_buffer(key_buffer, length).finish(),
+                    null_buffer
+                        .and_then(|v| NullBufferBuilder::new_from_buffer(v, length).finish()),
+                ))
+            }
         }
     }
 
@@ -60,36 +105,65 @@ impl<'a> Dictionary<'a> {
     {
         let (keys, values) = self.into_parts();
 
-        let array = keys.as_array();
+        match keys.values() {
+            DictionaryKeyArrayValues::Array(key_array) => match key_array.data_type() {
+                DataType::Int8 => {
+                    transform_any_typed(key_array.as_primitive::<Int8Type>(), values, transform)
+                }
+                DataType::Int16 => {
+                    transform_any_typed(key_array.as_primitive::<Int16Type>(), values, transform)
+                }
+                DataType::Int32 => {
+                    transform_any_typed(key_array.as_primitive::<Int32Type>(), values, transform)
+                }
+                DataType::Int64 => {
+                    transform_any_typed(key_array.as_primitive::<Int64Type>(), values, transform)
+                }
 
-        match array.data_type() {
-            DataType::Int8 => {
-                transform_any_typed(array.as_primitive::<Int8Type>(), values, transform)
-            }
-            DataType::Int16 => {
-                transform_any_typed(array.as_primitive::<Int16Type>(), values, transform)
-            }
-            DataType::Int32 => {
-                transform_any_typed(array.as_primitive::<Int32Type>(), values, transform)
-            }
-            DataType::Int64 => {
-                transform_any_typed(array.as_primitive::<Int64Type>(), values, transform)
-            }
+                DataType::UInt8 => {
+                    transform_any_typed(key_array.as_primitive::<UInt8Type>(), values, transform)
+                }
+                DataType::UInt16 => {
+                    transform_any_typed(key_array.as_primitive::<UInt16Type>(), values, transform)
+                }
+                DataType::UInt32 => {
+                    transform_any_typed(key_array.as_primitive::<UInt32Type>(), values, transform)
+                }
+                DataType::UInt64 => {
+                    transform_any_typed(key_array.as_primitive::<UInt64Type>(), values, transform)
+                }
 
-            DataType::UInt8 => {
-                transform_any_typed(array.as_primitive::<UInt8Type>(), values, transform)
-            }
-            DataType::UInt16 => {
-                transform_any_typed(array.as_primitive::<UInt16Type>(), values, transform)
-            }
-            DataType::UInt32 => {
-                transform_any_typed(array.as_primitive::<UInt32Type>(), values, transform)
-            }
-            DataType::UInt64 => {
-                transform_any_typed(array.as_primitive::<UInt64Type>(), values, transform)
-            }
+                _ => panic!("Unexpected dictionary key type"),
+            },
+            DictionaryKeyArrayValues::None { data_type, length } => match data_type {
+                DataType::Int8 => {
+                    transform_any_typed_keyless::<Int8Type, _>(length, values, transform)
+                }
+                DataType::Int16 => {
+                    transform_any_typed_keyless::<Int16Type, _>(length, values, transform)
+                }
+                DataType::Int32 => {
+                    transform_any_typed_keyless::<Int32Type, _>(length, values, transform)
+                }
+                DataType::Int64 => {
+                    transform_any_typed_keyless::<Int64Type, _>(length, values, transform)
+                }
 
-            _ => panic!("Unexpected dictionary key type"),
+                DataType::UInt8 => {
+                    transform_any_typed_keyless::<UInt8Type, _>(length, values, transform)
+                }
+                DataType::UInt16 => {
+                    transform_any_typed_keyless::<UInt16Type, _>(length, values, transform)
+                }
+                DataType::UInt32 => {
+                    transform_any_typed_keyless::<UInt32Type, _>(length, values, transform)
+                }
+                DataType::UInt64 => {
+                    transform_any_typed_keyless::<UInt64Type, _>(length, values, transform)
+                }
+
+                _ => panic!("Unexpected dictionary key type"),
+            },
         }
     }
 }
@@ -115,12 +189,11 @@ where
 
     if keys.is_nullable() {
         let mut null_value = OnceCell::new();
-        for (index, value_index) in keys.iter().enumerate() {
+        for (key_index, value_index) in keys.iter().enumerate() {
             let v = if let Some(value_index) = value_index {
-                unsafe {
-                    transformered_values
-                        .get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
-                }
+                transformered_values
+                    .get(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
+                    .unwrap_or(&None)
             } else {
                 match null_value.get_or_init(|| transform(ValueOrRef::Null)) {
                     Err(_) => return Err(null_value.take().unwrap().unwrap_err()),
@@ -130,26 +203,26 @@ where
 
             if let Some(v) = v {
                 if *v {
-                    unsafe { arrow::util::bit_util::set_bit_raw(key_builder, index) };
+                    unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                 }
             } else {
-                push_null(&mut null_buffer, index, key_bit_length);
+                push_null(&mut null_buffer, key_index, key_bit_length);
             }
         }
     } else {
         let values = keys.values().as_ptr();
 
-        for index in 0..key_length {
-            let value_index = unsafe { *values.add(index) };
-            if let Some(v) = unsafe {
-                transformered_values
-                    .get_unchecked(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
-            } {
+        for key_index in 0..key_length {
+            let value_index = unsafe { *values.add(key_index) };
+            if let Some(v) = transformered_values
+                .get(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
+                .unwrap_or(&None)
+            {
                 if *v {
-                    unsafe { arrow::util::bit_util::set_bit_raw(key_builder, index) };
+                    unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                 }
             } else {
-                push_null(&mut null_buffer, index, key_bit_length);
+                push_null(&mut null_buffer, key_index, key_bit_length);
             }
         }
     }
@@ -214,6 +287,77 @@ where
         if let Some(value_index) = value_index.map(<K as ArrowPrimitiveType>::Native::as_usize)
             && let Some(Some(transformed_value_index)) = value_index_lookup.get(&value_index)
         {
+            unsafe {
+                *key_builder.add(key_index) =
+                    <K as ArrowPrimitiveType>::Native::from_usize(*transformed_value_index).unwrap()
+            };
+            continue;
+        }
+
+        let (has_value_index, value_index) = match null_index {
+            Some(v) => v,
+            None => {
+                let v = match transform(ValueOrRef::Null)? {
+                    ValueOrRef::Null => (
+                        false,
+                        <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),
+                    ),
+                    v => {
+                        let (index, _) = transformed_values.insert_full(v);
+                        (
+                            true,
+                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap(),
+                        )
+                    }
+                };
+                null_index = Some(v);
+                v
+            }
+        };
+
+        if has_value_index {
+            unsafe { *key_builder.add(key_index) = value_index };
+            continue;
+        }
+
+        push_null(&mut null_buffer, key_index, key_bit_length);
+    }
+
+    Ok(Dictionary::new(
+        PrimitiveArray::<K>::new(
+            key_buffer.into(),
+            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
+        )
+        .into(),
+        transformed_values.into(),
+    ))
+}
+
+fn transform_any_typed_keyless<'a, K: ArrowDictionaryKeyType, FTransform>(
+    key_length: usize,
+    values: DictionaryValueArray<'a>,
+    mut transform: FTransform,
+) -> Result<Dictionary<'a>, ExpressionError>
+where
+    FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
+{
+    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
+
+    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length);
+    let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
+    let mut null_buffer = None;
+
+    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut |v| {
+        Ok(match transform(v)? {
+            ValueOrRef::Null => None,
+            v => Some(v),
+        })
+    })?;
+
+    let mut null_index = None;
+
+    for key_index in 0..key_length {
+        if let Some(Some(transformed_value_index)) = value_index_lookup.get(&key_index) {
             unsafe {
                 *key_builder.add(key_index) =
                     <K as ArrowPrimitiveType>::Native::from_usize(*transformed_value_index).unwrap()
