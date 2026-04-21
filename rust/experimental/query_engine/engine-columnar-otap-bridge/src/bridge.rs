@@ -351,58 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_() {
-        let pdata: OtapPayload = OtlpProtoBytes::ExportLogsRequest(Bytes::from_static(&[
-            10, 95, 10, 0, 18, 91, 18, 89, 9, 1, 0, 0, 0, 0, 0, 0, 0, 16, 1, 26, 4, 73, 110, 102,
-            111, 50, 17, 10, 5, 97, 116, 116, 114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 49,
-            69, 1, 0, 0, 0, 74, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 82, 8, 0,
-            1, 2, 3, 4, 5, 6, 7, 89, 1, 0, 0, 0, 0, 0, 0, 0, 98, 9, 83, 111, 109, 101, 69, 118,
-            101, 110, 116,
-        ]))
-        .into();
-
-        let otap_batch: OtapArrowRecords = pdata.try_into().unwrap();
-
-        let logs = match otap_batch {
-            OtapArrowRecords::Logs(l) => l,
-            _ => panic!(),
-        };
-
-        let batches = logs.into_batches();
-
-        println!("{:?}", batches[2]);
-
-        assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
-
-        let pipeline = KqlParser::parse("source | where severity_text == 'Info'")
-            .unwrap()
-            .pipeline;
-
-        let engine = ColumnarEngine::new_with_options(
-            pipeline,
-            ColumnarEngineOptions::new()
-                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
-        );
-
-        let mut batch = engine.begin_batch().unwrap();
-
-        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
-
-        let results = batch.flush();
-
-        assert_eq!(3, results.dropped_record_count);
-        assert_eq!(1, results.included_batches.len());
-        assert_eq!(
-            1,
-            results.included_batches[0][2]
-                .as_ref()
-                .map_or(0, |v| v.num_rows())
-        );
-
-        println!("{results}");
-    }
-
-    #[test]
     fn test_engine_filter_attribute() {
         let pdata: OtapPayload = OtlpProtoBytes::ExportLogsRequest(Bytes::from_static(&[
             10, 100, 10, 0, 18, 96, 18, 25, 26, 4, 73, 110, 102, 111, 50, 17, 10, 5, 97, 116, 116,
