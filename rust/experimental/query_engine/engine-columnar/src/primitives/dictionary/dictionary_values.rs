@@ -268,6 +268,16 @@ where
                 .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
         },
 
+        DataType::FixedSizeBinary(_) => value
+            .as_fixed_size_binary()
+            .into_iter()
+            .map(|v| {
+                transform(v.map_or(ValueOrRef::Null, |v| {
+                    ValueOrRef::Array(ArrayValueOrRef::WrappedRef(ArrayValueWrappedRef::new_u8(v)))
+                }))
+            })
+            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+
         d => todo!("{d} is not implemented"),
     })
 }
@@ -559,6 +569,12 @@ pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> ValueOrRe
                 }
             }),
 
+            DataType::FixedSizeBinary(_) => {
+                let v: &[u8] = value.as_fixed_size_binary().value_unchecked(index);
+
+                ValueOrRef::Array(ArrayValueOrRef::WrappedRef(ArrayValueWrappedRef::new_u8(v)))
+            }
+
             d => todo!("{d} is not implemented"),
         }
     }
@@ -673,6 +689,6 @@ where
             Ok(())
         }
 
-        _ => todo!(),
+        d => todo!("{d} is not implemented"),
     }
 }

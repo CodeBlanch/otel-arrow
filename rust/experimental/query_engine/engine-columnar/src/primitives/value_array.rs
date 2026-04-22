@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -12,6 +13,7 @@ use crate::*;
 #[derive(Debug, Clone)]
 pub enum ArrayValueOrRef<'a> {
     Ref(&'a (dyn ArrayValue + 'a)),
+    WrappedRef(ArrayValueWrappedRef<'a>),
     Owned(Rc<OwnedArrayValue<'a>>),
     Slice(ArrayValueOrRefSlice<'a>),
 }
@@ -20,6 +22,7 @@ impl<'a> ArrayValueOrRef<'a> {
     pub fn as_array_value(&self) -> &'_ (dyn ArrayValue + 'a) {
         match self {
             ArrayValueOrRef::Ref(a) => *a,
+            ArrayValueOrRef::WrappedRef(a) => a.as_array_value(),
             ArrayValueOrRef::Owned(a) => a.as_ref(),
             ArrayValueOrRef::Slice(a) => a,
         }
@@ -32,6 +35,7 @@ impl<'a> ArrayValueOrRef<'a> {
     pub fn len(&self) -> usize {
         match self {
             ArrayValueOrRef::Ref(a) => a.len(),
+            ArrayValueOrRef::WrappedRef(a) => a.as_array_value().len(),
             ArrayValueOrRef::Owned(a) => a.len(),
             ArrayValueOrRef::Slice(a) => a.len(),
         }
@@ -40,6 +44,10 @@ impl<'a> ArrayValueOrRef<'a> {
     pub fn get(&self, index: usize) -> ValueOrRef<'a> {
         match self {
             ArrayValueOrRef::Ref(a) => a
+                .get(index)
+                .map(|v| v.to_value().into())
+                .unwrap_or(ValueOrRef::Null),
+            ArrayValueOrRef::WrappedRef(a) => a
                 .get(index)
                 .map(|v| v.to_value().into())
                 .unwrap_or(ValueOrRef::Null),
@@ -58,6 +66,9 @@ impl Hash for ArrayValueOrRef<'_> {
         match self {
             ArrayValueOrRef::Ref(a) => {
                 hash_array_value(state, *a);
+            }
+            ArrayValueOrRef::WrappedRef(a) => {
+                hash_array_value(state, a.as_array_value());
             }
             ArrayValueOrRef::Owned(a) => {
                 [7].hash(state);
@@ -176,6 +187,10 @@ impl<'a> ArrayValueOrRefSlice<'a> {
                 .get(self.range_start_inclusive + index)
                 .map(|v| v.to_value().into())
                 .unwrap_or(ValueOrRef::Null),
+            ArrayValueOrRef::WrappedRef(a) => a
+                .get(self.range_start_inclusive + index)
+                .map(|v| v.to_value().into())
+                .unwrap_or(ValueOrRef::Null),
             ArrayValueOrRef::Owned(a) => a
                 .get_values()
                 .get(self.range_start_inclusive + index)
@@ -232,5 +247,65 @@ impl ArrayValue for ArrayValueOrRefSlice<'_> {
         self.value
             .as_array_value()
             .get_item_range((start..end).into(), item_callback)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ArrayValueWrapper<'a, T> {
+    value: &'a [T],
+}
+
+impl<T: AsStaticValue + Debug + 'static> ArrayValue for ArrayValueWrapper<'_, T> {
+    fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.value.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&dyn AsValue> {
+        self.value.get(index).map(|v| v as &dyn AsValue)
+    }
+
+    fn get_static(&self, index: usize) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
+        Ok(self.value.get(index).map(|v| v as &dyn AsStaticValue))
+    }
+
+    fn get_item_range(
+        &self,
+        range: ArrayRange,
+        item_callback: &mut dyn IndexValueCallback,
+    ) -> bool {
+        for (index, value) in range.get_slice(self.value).iter().enumerate() {
+            if !item_callback.next(index, value.to_value()) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ArrayValueWrappedRef<'a> {
+    U8(ArrayValueWrapper<'a, u8>),
+}
+
+impl<'a> ArrayValueWrappedRef<'a> {
+    pub fn new_u8(value: &'a [u8]) -> ArrayValueWrappedRef<'a> {
+        ArrayValueWrappedRef::U8(ArrayValueWrapper { value })
+    }
+
+    pub fn as_array_value(&self) -> &(dyn ArrayValue + 'a) {
+        match self {
+            ArrayValueWrappedRef::U8(a) => a,
+        }
+    }
+
+    pub fn get(&self, index: usize) -> Option<&'a (dyn AsValue + 'a)> {
+        match self {
+            ArrayValueWrappedRef::U8(a) => a.value.get(index).map(|v| v as &dyn AsValue),
+        }
     }
 }

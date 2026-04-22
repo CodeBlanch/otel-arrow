@@ -1085,6 +1085,12 @@ impl<T: AsStaticValue> AsValue for T {
     }
 }
 
+impl<T: Into<i64> + Copy + Debug + 'static> AsStaticValue for T {
+    fn to_static_value(&self) -> StaticValue<'_> {
+        StaticValue::Integer(self)
+    }
+}
+
 pub trait BooleanValue: Debug {
     fn get_value(&self) -> bool;
 
