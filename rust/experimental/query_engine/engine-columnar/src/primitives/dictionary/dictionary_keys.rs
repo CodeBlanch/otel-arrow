@@ -107,7 +107,7 @@ impl<'a, T: ArrowDictionaryKeyType> From<&'a PrimitiveArray<T>> for DictionaryKe
 }
 
 fn get_key_array_value_index_for_key_index(array: &dyn Array, key_index: usize) -> Option<usize> {
-    if array.is_null(key_index) || key_index > array.len() {
+    if key_index > array.len() || array.is_null(key_index) {
         return None;
     }
 

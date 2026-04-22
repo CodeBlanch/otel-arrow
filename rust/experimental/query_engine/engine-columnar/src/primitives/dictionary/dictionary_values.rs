@@ -5,6 +5,7 @@ use std::hash::Hash;
 
 use ahash::{AHashMap, RandomState};
 use arrow::{array::*, datatypes::*};
+use chrono::{TimeZone, Utc};
 use data_engine_expressions::*;
 use indexmap::IndexSet;
 
@@ -228,7 +229,46 @@ where
             })
             .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
 
-        _ => todo!(),
+        DataType::Timestamp(time_unit, _) => match time_unit {
+            TimeUnit::Second => value
+                .as_primitive::<TimestampSecondType>()
+                .into_iter()
+                .map(|v| {
+                    transform(v.map_or(ValueOrRef::Null, |secs| {
+                        ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
+                    }))
+                })
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            TimeUnit::Millisecond => value
+                .as_primitive::<TimestampMillisecondType>()
+                .into_iter()
+                .map(|v| {
+                    transform(v.map_or(ValueOrRef::Null, |millis| {
+                        ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
+                    }))
+                })
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            TimeUnit::Microsecond => value
+                .as_primitive::<TimestampMicrosecondType>()
+                .into_iter()
+                .map(|v| {
+                    transform(v.map_or(ValueOrRef::Null, |micros| {
+                        ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
+                    }))
+                })
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            TimeUnit::Nanosecond => value
+                .as_primitive::<TimestampNanosecondType>()
+                .into_iter()
+                .map(|v| {
+                    transform(v.map_or(ValueOrRef::Null, |nanos| {
+                        ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
+                    }))
+                })
+                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+        },
+
+        d => todo!("{d} is not implemented"),
     })
 }
 
@@ -488,7 +528,38 @@ pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> ValueOrRe
                 value.as_string::<i64>().value_unchecked(index),
             )),
 
-            _ => todo!(),
+            DataType::Timestamp(time_unit, _) => ValueOrRef::DateTime(match time_unit {
+                TimeUnit::Second => {
+                    let secs = *value
+                        .as_primitive::<TimestampSecondType>()
+                        .values()
+                        .get_unchecked(index);
+                    Utc.timestamp_opt(secs, 0).unwrap().into()
+                }
+                TimeUnit::Millisecond => {
+                    let millis = *value
+                        .as_primitive::<TimestampMillisecondType>()
+                        .values()
+                        .get_unchecked(index);
+                    Utc.timestamp_millis_opt(millis).unwrap().into()
+                }
+                TimeUnit::Microsecond => {
+                    let micros = *value
+                        .as_primitive::<TimestampMicrosecondType>()
+                        .values()
+                        .get_unchecked(index);
+                    Utc.timestamp_micros(micros).unwrap().into()
+                }
+                TimeUnit::Nanosecond => {
+                    let nanos = *value
+                        .as_primitive::<TimestampNanosecondType>()
+                        .values()
+                        .get_unchecked(index);
+                    Utc.timestamp_nanos(nanos).into()
+                }
+            }),
+
+            d => todo!("{d} is not implemented"),
         }
     }
 }
