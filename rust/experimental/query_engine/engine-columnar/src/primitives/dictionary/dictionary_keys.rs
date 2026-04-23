@@ -11,7 +11,15 @@ pub enum DictionaryKeyArray<'a> {
     ArrayOwned(Arc<dyn Array>),
     BooleanRef(&'a BooleanArray),
     BooleanOwned(BooleanArray),
-    None { data_type: DataType, length: usize },
+    UniqueValues {
+        data_type: DataType,
+        length: usize,
+    },
+    SingleValue {
+        data_type: DataType,
+        length: usize,
+        value_index: Option<usize>,
+    },
 }
 
 impl DictionaryKeyArray<'_> {
@@ -21,9 +29,14 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayOwned(a) => a.len(),
             DictionaryKeyArray::BooleanRef(a) => a.len(),
             DictionaryKeyArray::BooleanOwned(a) => a.len(),
-            DictionaryKeyArray::None {
+            DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
+            } => *length,
+            DictionaryKeyArray::SingleValue {
+                data_type: _,
+                length,
+                value_index: _,
             } => *length,
         }
     }
@@ -34,9 +47,14 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayOwned(a) => a.is_empty(),
             DictionaryKeyArray::BooleanRef(a) => a.is_empty(),
             DictionaryKeyArray::BooleanOwned(a) => a.is_empty(),
-            DictionaryKeyArray::None {
+            DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
+            } => *length == 0,
+            DictionaryKeyArray::SingleValue {
+                data_type: _,
+                length,
+                value_index: _,
             } => *length == 0,
         }
     }
@@ -47,9 +65,14 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayOwned(a) => a.data_type().clone(),
             DictionaryKeyArray::BooleanRef(a) => a.data_type().clone(),
             DictionaryKeyArray::BooleanOwned(a) => a.data_type().clone(),
-            DictionaryKeyArray::None {
+            DictionaryKeyArray::UniqueValues {
                 data_type,
                 length: _,
+            } => data_type.clone(),
+            DictionaryKeyArray::SingleValue {
+                data_type,
+                length: _,
+                value_index: _,
             } => data_type.clone(),
         }
     }
@@ -60,9 +83,20 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::ArrayOwned(a) => DictionaryKeyArrayValues::Array(a.as_ref()),
             DictionaryKeyArray::BooleanRef(a) => DictionaryKeyArrayValues::Array(*a),
             DictionaryKeyArray::BooleanOwned(a) => DictionaryKeyArrayValues::Array(a),
-            DictionaryKeyArray::None { data_type, length } => DictionaryKeyArrayValues::None {
+            DictionaryKeyArray::UniqueValues { data_type, length } => {
+                DictionaryKeyArrayValues::UniqueValues {
+                    data_type: data_type.clone(),
+                    length: *length,
+                }
+            }
+            DictionaryKeyArray::SingleValue {
+                data_type,
+                length,
+                value_index,
+            } => DictionaryKeyArrayValues::SingleValue {
                 data_type: data_type.clone(),
                 length: *length,
+                value_index: *value_index,
             },
         }
     }
@@ -75,7 +109,7 @@ impl DictionaryKeyArray<'_> {
             DictionaryKeyArray::BooleanOwned(a) => {
                 get_bool_array_value_index_for_key_index(a, index)
             }
-            DictionaryKeyArray::None {
+            DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
             } => {
@@ -85,13 +119,32 @@ impl DictionaryKeyArray<'_> {
                     Some(index)
                 }
             }
+            DictionaryKeyArray::SingleValue {
+                data_type: _,
+                length,
+                value_index,
+            } => {
+                if index > *length {
+                    None
+                } else {
+                    *value_index
+                }
+            }
         }
     }
 }
 
 pub enum DictionaryKeyArrayValues<'a> {
     Array(&'a dyn Array),
-    None { data_type: DataType, length: usize },
+    UniqueValues {
+        data_type: DataType,
+        length: usize,
+    },
+    SingleValue {
+        data_type: DataType,
+        length: usize,
+        value_index: Option<usize>,
+    },
 }
 
 impl<T: ArrowDictionaryKeyType> From<PrimitiveArray<T>> for DictionaryKeyArray<'_> {

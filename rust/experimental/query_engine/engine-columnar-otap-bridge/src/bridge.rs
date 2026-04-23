@@ -110,7 +110,7 @@ pub fn parse_kql_logs_query_into_pipeline(
 ) -> Result<BridgePipeline, Vec<ParserError>> {
     let mut options = options.unwrap_or_default();
 
-    let parser_options = build_parser_options(&mut options).map_err(|e| vec![e])?;
+    let parser_options = build_parser_options_for_logs_query(&mut options).map_err(|e| vec![e])?;
     let attributes_schema = match parser_options
         .get_source_map_schema()
         .and_then(|s| s.get_schema_for_key("Attributes"))
@@ -169,7 +169,9 @@ pub fn process_otap_logs_using_pipeline<'a>(
     })
 }
 
-fn build_parser_options(options: &mut BridgeOptions) -> Result<ParserOptions, ParserError> {
+fn build_parser_options_for_logs_query(
+    options: &mut BridgeOptions,
+) -> Result<ParserOptions, ParserError> {
     let mut parser_options = ParserOptions::new().with_attached_data_names(&[
         "resource",
         "instrumentation_scope",

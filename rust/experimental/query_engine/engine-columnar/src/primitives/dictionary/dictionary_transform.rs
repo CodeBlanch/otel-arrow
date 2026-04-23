@@ -3,7 +3,11 @@
 
 use std::cell::OnceCell;
 
-use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
+use arrow::{
+    array::*,
+    buffer::{BooleanBuffer, MutableBuffer, NullBuffer},
+    datatypes::*,
+};
 use data_engine_expressions::*;
 
 use crate::*;
@@ -60,9 +64,9 @@ impl<'a> Dictionary<'a> {
                     transform,
                 ),
 
-                _ => panic!("Unexpected dictionary key type"),
+                d => panic!("Unexpected dictionary key type '{d}' encountered"),
             },
-            DictionaryKeyArrayValues::None {
+            DictionaryKeyArrayValues::UniqueValues {
                 data_type: _,
                 length,
             } => {
@@ -93,12 +97,40 @@ impl<'a> Dictionary<'a> {
                         .and_then(|v| NullBufferBuilder::new_from_buffer(v, length).finish()),
                 ))
             }
+            DictionaryKeyArrayValues::SingleValue {
+                data_type: _,
+                length,
+                value_index,
+            } => {
+                let (key_buffer, null_buffer) = match value_index {
+                    None => (
+                        BooleanBuffer::new_unset(length),
+                        Some(NullBuffer::new_null(length)),
+                    ),
+                    Some(value_index) => match transform(values.get_value_at(value_index))? {
+                        None => (
+                            BooleanBuffer::new_unset(length),
+                            Some(NullBuffer::new_null(length)),
+                        ),
+                        Some(v) => (
+                            if v {
+                                BooleanBuffer::new_set(length)
+                            } else {
+                                BooleanBuffer::new_unset(length)
+                            },
+                            None,
+                        ),
+                    },
+                };
+
+                Ok(BooleanArray::new(key_buffer, null_buffer))
+            }
         }
     }
 
     pub(crate) fn transform_into_any<FTransform>(
         self,
-        transform: FTransform,
+        mut transform: FTransform,
     ) -> Result<Dictionary<'a>, ExpressionError>
     where
         FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
@@ -133,9 +165,9 @@ impl<'a> Dictionary<'a> {
                     transform_any_typed(key_array.as_primitive::<UInt64Type>(), values, transform)
                 }
 
-                _ => panic!("Unexpected dictionary key type"),
+                d => panic!("Unexpected dictionary key type '{d}' encountered"),
             },
-            DictionaryKeyArrayValues::None { data_type, length } => match data_type {
+            DictionaryKeyArrayValues::UniqueValues { data_type, length } => match data_type {
                 DataType::Int8 => {
                     transform_any_typed_keyless::<Int8Type, _>(length, values, transform)
                 }
@@ -162,7 +194,18 @@ impl<'a> Dictionary<'a> {
                     transform_any_typed_keyless::<UInt64Type, _>(length, values, transform)
                 }
 
-                _ => panic!("Unexpected dictionary key type"),
+                d => panic!("Unexpected dictionary key type '{d}' encountered"),
+            },
+            DictionaryKeyArrayValues::SingleValue {
+                data_type,
+                length,
+                value_index,
+            } => match value_index {
+                None => Ok(Dictionary::new(keys, values)),
+                Some(value_index) => match transform(values.get_value_at(value_index))? {
+                    ValueOrRef::Null => Ok(Dictionary::new_null_with_data_type(length, data_type)),
+                    v => Ok(Dictionary::new_scalar_with_data_type(length, v, data_type)),
+                },
             },
         }
     }

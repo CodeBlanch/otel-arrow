@@ -3,11 +3,7 @@
 
 use std::fmt::{Display, Write};
 
-use arrow::{
-    array::*,
-    buffer::{MutableBuffer, NullBuffer},
-    datatypes::*,
-};
+use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
 
 use crate::*;
@@ -27,11 +23,31 @@ impl<'a> Dictionary<'a> {
         values: &'a PrimitiveArray<V>,
     ) -> Dictionary<'a> {
         Self {
-            keys: DictionaryKeyArray::None {
+            keys: DictionaryKeyArray::UniqueValues {
                 data_type: K::DATA_TYPE,
                 length: values.len(),
             },
             values: values.into(),
+        }
+    }
+
+    pub fn new_scalar_with_data_type(
+        count: usize,
+        value: ValueOrRef<'a>,
+        data_type: DataType,
+    ) -> Dictionary<'a> {
+        match data_type {
+            DataType::Int8 => Self::new_scalar::<Int8Type>(count, value),
+            DataType::Int16 => Self::new_scalar::<Int16Type>(count, value),
+            DataType::Int32 => Self::new_scalar::<Int32Type>(count, value),
+            DataType::Int64 => Self::new_scalar::<Int64Type>(count, value),
+
+            DataType::UInt8 => Self::new_scalar::<UInt8Type>(count, value),
+            DataType::UInt16 => Self::new_scalar::<UInt16Type>(count, value),
+            DataType::UInt32 => Self::new_scalar::<UInt32Type>(count, value),
+            DataType::UInt64 => Self::new_scalar::<UInt64Type>(count, value),
+
+            d => panic!("Unexpected dictionary key type '{d}' encountered"),
         }
     }
 
@@ -40,22 +56,38 @@ impl<'a> Dictionary<'a> {
         value: ValueOrRef<'a>,
     ) -> Dictionary<'a> {
         Dictionary::new(
-            PrimitiveArray::<K>::new(
-                MutableBuffer::from_len_zeroed(size_of::<K::Native>() * count).into(),
-                None,
-            )
-            .into(),
+            DictionaryKeyArray::SingleValue {
+                data_type: K::DATA_TYPE,
+                length: count,
+                value_index: Some(0),
+            },
             vec![value].into(),
         )
     }
 
+    pub fn new_null_with_data_type(count: usize, data_type: DataType) -> Dictionary<'a> {
+        match data_type {
+            DataType::Int8 => Self::new_null::<Int8Type>(count),
+            DataType::Int16 => Self::new_null::<Int16Type>(count),
+            DataType::Int32 => Self::new_null::<Int32Type>(count),
+            DataType::Int64 => Self::new_null::<Int64Type>(count),
+
+            DataType::UInt8 => Self::new_null::<UInt8Type>(count),
+            DataType::UInt16 => Self::new_null::<UInt16Type>(count),
+            DataType::UInt32 => Self::new_null::<UInt32Type>(count),
+            DataType::UInt64 => Self::new_null::<UInt64Type>(count),
+
+            d => panic!("Unexpected dictionary key type '{d}' encountered"),
+        }
+    }
+
     pub fn new_null<K: ArrowDictionaryKeyType>(count: usize) -> Dictionary<'a> {
         Dictionary::new(
-            PrimitiveArray::<K>::new(
-                MutableBuffer::from_len_zeroed(size_of::<K::Native>() * count).into(),
-                Some(NullBuffer::new_null(count)),
-            )
-            .into(),
+            DictionaryKeyArray::SingleValue {
+                data_type: K::DATA_TYPE,
+                length: count,
+                value_index: None,
+            },
             vec![].into(),
         )
     }
