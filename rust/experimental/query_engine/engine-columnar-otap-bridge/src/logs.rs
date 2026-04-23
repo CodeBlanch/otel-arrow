@@ -311,9 +311,8 @@ pub struct OtapAttributes<'record> {
     attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
     attribute_int_keys: Option<&'record PrimitiveArray<UInt16Type>>,
     attribute_int_values: Option<&'record PrimitiveArray<Int64Type>>,
-    attribute_doubles:
-        Option<TypedDictionaryArray<'record, UInt16Type, PrimitiveArray<Float64Type>>>,
-    attribute_bools: Option<TypedDictionaryArray<'record, UInt16Type, BooleanArray>>,
+    attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
+    attribute_bools: Option<&'record BooleanArray>,
 }
 
 impl<'record> OtapAttributes<'record> {
@@ -349,16 +348,12 @@ impl<'record> OtapAttributes<'record> {
             attribute_string_values: strings.values(),
             attribute_int_keys: ints.map(|v| v.keys()),
             attribute_int_values: ints.map(|v| v.values()),
-            attribute_doubles: attributes_batch.column_by_name("double").map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<PrimitiveArray<Float64Type>>()
-                    .expect("Attribute doubles were an unexpected type")
-            }),
-            attribute_bools: attributes_batch.column_by_name("bool").map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<BooleanArray>()
-                    .expect("Attribute bools were an unexpected type")
-            }),
+            attribute_doubles: attributes_batch
+                .column_by_name("double")
+                .map(|c| c.as_primitive::<Float64Type>()),
+            attribute_bools: attributes_batch
+                .column_by_name("bool")
+                .map(|c| c.as_boolean()),
         }
     }
 
@@ -388,7 +383,11 @@ impl<'record> OtapAttributes<'record> {
         })
     }
 
-    fn get_attribute_value_index(&self, attribute_index: usize, attribute_type: u8) -> Option<u16> {
+    fn get_attribute_value_or_index(
+        &self,
+        attribute_index: usize,
+        attribute_type: u8,
+    ) -> Option<AttributeValueOrIndex<'record>> {
         /*
         pub enum AttributeValueType {
             Empty = 0,
@@ -407,7 +406,7 @@ impl<'record> OtapAttributes<'record> {
                 let keys = self.attribute_string_keys;
                 if keys.is_valid(attribute_index) {
                     let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(value_index);
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
             2 => {
@@ -415,23 +414,23 @@ impl<'record> OtapAttributes<'record> {
                     && keys.is_valid(attribute_index)
                 {
                     let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(value_index);
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
             3 => {
                 if let Some(doubles) = self.attribute_doubles
                     && doubles.is_valid(attribute_index)
                 {
-                    let value_index = unsafe { doubles.keys().value_unchecked(attribute_index) };
-                    return Some(value_index);
+                    let value = unsafe { doubles.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Double(value)));
                 }
             }
             4 => {
                 if let Some(bools) = self.attribute_bools
                     && bools.is_valid(attribute_index)
                 {
-                    let value_index = unsafe { bools.keys().value_unchecked(attribute_index) };
-                    return Some(value_index);
+                    let value = unsafe { bools.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
                 }
             }
             d => todo!("Attribute type '{d}' is not supported"),
@@ -467,19 +466,7 @@ impl<'record> OtapAttributes<'record> {
                     .unwrap()
                     .value_unchecked(attribute_value_index as usize)
             }),
-            3 => ValueOrRef::Double(unsafe {
-                self.attribute_doubles
-                    .unwrap()
-                    .values()
-                    .value_unchecked(attribute_value_index as usize)
-            }),
-            4 => ValueOrRef::Boolean(unsafe {
-                self.attribute_bools
-                    .unwrap()
-                    .values()
-                    .value_unchecked(attribute_value_index as usize)
-            }),
-            d => unreachable!("Attribute type '{d}' is not expected"),
+            d => todo!("Attribute type '{d}' is not supported"),
         }
     }
 }
@@ -523,19 +510,29 @@ impl<'record> RecordTable for OtapAttributes<'record> {
             for attribute_index in 0..attribute_count {
                 if unsafe { *attribute_keys.add(attribute_index) } == value_index {
                     let attribute_type = unsafe { *attribute_types.add(attribute_index) };
-                    if let Some(attribute_value_index) =
-                        self.get_attribute_value_index(attribute_index, attribute_type)
+                    if let Some(attribute_value) =
+                        self.get_attribute_value_or_index(attribute_index, attribute_type)
                     {
-                        let lookup_key =
-                            ((attribute_type as usize) << 16) | attribute_value_index as usize;
-                        let index = match value_lookup.entry(lookup_key) {
-                            Entry::Occupied(occupied) => occupied.into_mut(),
-                            Entry::Vacant(vacant) => {
-                                let index = values.len();
-                                values.push(
-                                    self.get_attribute_value(attribute_type, attribute_value_index),
-                                );
-                                vacant.insert(index as u16)
+                        let index = match attribute_value {
+                            AttributeValueOrIndex::ValueIndex(attribute_value_index) => {
+                                let lookup_key = ((attribute_type as usize) << 16)
+                                    | attribute_value_index as usize;
+                                match value_lookup.entry(lookup_key) {
+                                    Entry::Occupied(occupied) => *occupied.get(),
+                                    Entry::Vacant(vacant) => {
+                                        let index = values.len();
+                                        values.push(self.get_attribute_value(
+                                            attribute_type,
+                                            attribute_value_index,
+                                        ));
+                                        *vacant.insert(index as u16)
+                                    }
+                                }
+                            }
+                            AttributeValueOrIndex::Value(attribute_value) => {
+                                let index = values.len() as u16;
+                                values.push(attribute_value);
+                                index
                             }
                         };
 
@@ -543,7 +540,7 @@ impl<'record> RecordTable for OtapAttributes<'record> {
                         let record_index =
                             unsafe { *id_to_record_index_map.add(parent_id as usize) };
 
-                        unsafe { *keys.add(record_index as usize) = *index };
+                        unsafe { *keys.add(record_index as usize) = index };
                         unsafe { arrow::util::bit_util::set_bit_raw(nulls, record_index as usize) };
                         null_count -= 1;
                     }
@@ -590,6 +587,11 @@ impl Display for OtapAttributes<'_> {
             self.attribute_parent_ids.len()
         )
     }
+}
+
+enum AttributeValueOrIndex<'a> {
+    ValueIndex(u16),
+    Value(ValueOrRef<'a>),
 }
 
 fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_length: usize) {
