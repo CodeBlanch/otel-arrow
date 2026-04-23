@@ -142,6 +142,7 @@ pub struct OtapLogRecordBatch<'record> {
     attributes: Option<OtapAttributes<'record>>,
     resource: Option<RecordBatch>,
     scope: Option<RecordBatch>,
+    body: OnceCell<Option<Dictionary<'record>>>,
 }
 
 impl<'record> OtapLogRecordBatch<'record> {
@@ -158,6 +159,7 @@ impl<'record> OtapLogRecordBatch<'record> {
             attributes,
             resource: None,
             scope: None,
+            body: OnceCell::new(),
         }
     }
 
@@ -169,6 +171,7 @@ impl<'record> OtapLogRecordBatch<'record> {
             attributes: None,
             resource: None,
             scope: None,
+            body: OnceCell::new(),
         }
     }
 }
@@ -241,7 +244,13 @@ impl<'record> RecordTable for OtapLogRecordBatch<'record> {
                         .expect("severity_text values were an unexpected type")
                         .into()
                 }
-                // todo: "body"
+                "body"
+                    if let Some(body) = self
+                        .body
+                        .get_or_init(|| build_logs_body_dictionary(logs, logs_schema)) =>
+                {
+                    body.clone()
+                }
                 "trace_id"
                     if let Some(trace_id_column) = logs_schema.column_with_name("trace_id") =>
                 {
@@ -425,7 +434,7 @@ impl<'record> OtapAttributes<'record> {
                     return Some(value_index);
                 }
             }
-            _ => todo!(),
+            d => todo!("Attribute type '{d}' is not supported"),
         }
 
         None
@@ -470,7 +479,7 @@ impl<'record> OtapAttributes<'record> {
                     .values()
                     .value_unchecked(attribute_value_index as usize)
             }),
-            _ => unreachable!(),
+            d => unreachable!("Attribute type '{d}' is not expected"),
         }
     }
 }
@@ -551,7 +560,7 @@ impl<'record> RecordTable for OtapAttributes<'record> {
                 PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
             };
 
-            Dictionary::new(keys, DictionaryValueArray::VecAnyOwned(values))
+            Dictionary::new(keys, DictionaryValueArray::VecAnyOwned(values.into()))
         } else {
             let key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
 
@@ -561,7 +570,7 @@ impl<'record> RecordTable for OtapAttributes<'record> {
                     Some(NullBuffer::new_null(record_count)),
                 )
                 .into(),
-                DictionaryValueArray::VecAnyOwned(vec![]),
+                DictionaryValueArray::VecAnyOwned(vec![].into()),
             )
         };
 
@@ -581,4 +590,190 @@ impl Display for OtapAttributes<'_> {
             self.attribute_parent_ids.len()
         )
     }
+}
+
+fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_length: usize) {
+    if let Some(buffer) = null_buffer {
+        let ptr = buffer.typed_data_mut::<u8>().as_mut_ptr();
+
+        let i = index / 8;
+        let b = 1 << (index % 8);
+
+        unsafe { *ptr.add(i) &= !b };
+    } else {
+        let mut buffer = MutableBuffer::new(key_bit_length).with_bitset(key_bit_length, true);
+
+        let ptr = buffer.typed_data_mut::<u8>().as_mut_ptr();
+
+        let i = index / 8;
+        let b = 1 << (index % 8);
+
+        unsafe { *ptr.add(i) &= !b };
+
+        *null_buffer = Some(buffer);
+    }
+}
+
+fn build_logs_body_dictionary<'a>(
+    logs: &'a RecordBatch,
+    logs_schema: &Schema,
+) -> Option<Dictionary<'a>> {
+    if let Some(body_column) = logs_schema.column_with_name("body") {
+        let body_struct = logs.column(body_column.0).as_struct();
+
+        if let Some(body_type) = body_struct.column_by_name("type") {
+            let body_types = body_type.as_primitive::<UInt8Type>();
+
+            let record_count = body_types.len();
+
+            let mut key_buffer = MutableBuffer::from_len_zeroed(2 * record_count);
+            let key_builder = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
+
+            let key_bit_length = arrow::util::bit_util::ceil(record_count, 8);
+            let mut null_buffer = None;
+
+            let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
+            let mut values = Vec::with_capacity(record_count);
+
+            let body_strings = OnceCell::new();
+            let body_ints = OnceCell::new();
+            let body_doubles = OnceCell::new();
+            let body_bools = OnceCell::new();
+            let body_bytes = OnceCell::new();
+
+            for (key_index, body_type) in body_types.values().iter().enumerate() {
+                match *body_type {
+                    /*
+                    pub enum AttributeValueType {
+                        Empty = 0,
+                        Str = 1,
+                        Int = 2,
+                        Double = 3,
+                        Bool = 4,
+                        Map = 5,
+                        Slice = 6,
+                        Bytes = 7,
+                    }
+                    */
+                    0 => {}
+                    1 => {
+                        if let Some(body_strings) = body_strings.get_or_init(|| {
+                            body_struct.column_by_name("str").map(|v| {
+                                v.as_dictionary::<UInt16Type>()
+                                    .downcast_dict::<StringArray>()
+                                    .expect("body string values were an unexpected type")
+                            })
+                        }) {
+                            let value_index = body_strings.keys().value(key_index) as usize;
+
+                            let lookup_key = (1 << 16) | value_index;
+                            let index = match value_lookup.entry(lookup_key) {
+                                Entry::Occupied(occupied) => occupied.into_mut(),
+                                Entry::Vacant(vacant) => {
+                                    let index = values.len();
+                                    values.push(ValueOrRef::String(StringValueOrRef::Ref(
+                                        body_strings.values().value(value_index),
+                                    )));
+                                    vacant.insert(index as u16)
+                                }
+                            };
+                            unsafe { *key_builder.add(key_index) = *index };
+                            continue;
+                        }
+                    }
+                    2 => {
+                        if let Some(body_ints) = body_ints.get_or_init(|| {
+                            body_struct.column_by_name("int").map(|v| {
+                                v.as_dictionary::<UInt16Type>()
+                                    .downcast_dict::<Int64Array>()
+                                    .expect("body int values were an unexpected type")
+                            })
+                        }) {
+                            let value_index = body_ints.keys().value(key_index) as usize;
+
+                            let lookup_key = (2 << 16) | value_index;
+                            let index = match value_lookup.entry(lookup_key) {
+                                Entry::Occupied(occupied) => occupied.into_mut(),
+                                Entry::Vacant(vacant) => {
+                                    let index = values.len();
+                                    values.push(ValueOrRef::Integer(
+                                        body_ints.values().value(value_index),
+                                    ));
+                                    vacant.insert(index as u16)
+                                }
+                            };
+                            unsafe { *key_builder.add(key_index) = *index };
+                            continue;
+                        }
+                    }
+                    3 => {
+                        if let Some(body_doubles) = body_doubles.get_or_init(|| {
+                            body_struct
+                                .column_by_name("double")
+                                .map(|v| v.as_primitive::<Float64Type>())
+                        }) {
+                            let index = values.len() as u16;
+                            values.push(ValueOrRef::Double(body_doubles.value(key_index)));
+
+                            unsafe { *key_builder.add(key_index) = index };
+                            continue;
+                        }
+                    }
+                    4 => {
+                        if let Some(body_bools) = body_bools.get_or_init(|| {
+                            body_struct.column_by_name("bool").map(|v| v.as_boolean())
+                        }) {
+                            let index = values.len() as u16;
+                            values.push(ValueOrRef::Boolean(body_bools.value(key_index)));
+
+                            unsafe { *key_builder.add(key_index) = index };
+                            continue;
+                        }
+                    }
+                    7 => {
+                        if let Some(body_bytes) = body_bytes.get_or_init(|| {
+                            body_struct.column_by_name("bytes").map(|v| {
+                                v.as_dictionary::<UInt16Type>()
+                                    .downcast_dict::<BinaryArray>()
+                                    .expect("body byte values were an unexpected type")
+                            })
+                        }) {
+                            let value_index = body_bytes.keys().value(key_index) as usize;
+
+                            let lookup_key = (7 << 16) | value_index;
+                            let index = match value_lookup.entry(lookup_key) {
+                                Entry::Occupied(occupied) => occupied.into_mut(),
+                                Entry::Vacant(vacant) => {
+                                    let index = values.len();
+                                    values.push(ValueOrRef::Array(ArrayValueOrRef::WrappedRef(
+                                        ArrayValueWrappedRef::new_u8(
+                                            body_bytes.values().value(value_index),
+                                        ),
+                                    )));
+                                    vacant.insert(index as u16)
+                                }
+                            };
+                            unsafe { *key_builder.add(key_index) = *index };
+                            continue;
+                        }
+                    }
+                    d => todo!("Body type '{d}' is not supported"),
+                }
+
+                push_null(&mut null_buffer, key_index, key_bit_length);
+            }
+
+            return Some(Dictionary::new(
+                PrimitiveArray::<UInt16Type>::new(
+                    key_buffer.into(),
+                    null_buffer
+                        .and_then(|v| NullBufferBuilder::new_from_buffer(v, record_count).finish()),
+                )
+                .into(),
+                values.into(),
+            ));
+        }
+    }
+
+    None
 }

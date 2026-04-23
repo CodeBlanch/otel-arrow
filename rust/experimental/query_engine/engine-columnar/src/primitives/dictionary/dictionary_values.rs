@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::hash::Hash;
+use std::{hash::Hash, sync::Arc};
 
 use ahash::{AHashMap, RandomState};
 use arrow::{array::*, datatypes::*};
@@ -16,8 +16,8 @@ pub type ValueOrRefSet<'a> = IndexSet<ValueOrRef<'a>, RandomState>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DictionaryValueArray<'a> {
     ArrayRef(&'a dyn Array),
-    VecAnyOwned(Vec<ValueOrRef<'a>>),
-    IndexAnyOwned(ValueOrRefSet<'a>),
+    VecAnyOwned(Arc<Vec<ValueOrRef<'a>>>),
+    IndexAnyOwned(Arc<ValueOrRefSet<'a>>),
     Boolean,
 }
 
@@ -60,14 +60,14 @@ impl<'a> DictionaryValueArray<'a> {
         match self {
             DictionaryValueArray::ArrayRef(a) => validate_array(*a, validate),
             DictionaryValueArray::VecAnyOwned(a) => {
-                for i in a {
+                for i in a.as_ref() {
                     validate(Some(i))?;
                 }
 
                 Ok(())
             }
             DictionaryValueArray::IndexAnyOwned(a) => {
-                for i in a {
+                for i in a.as_ref() {
                     validate(Some(i))?;
                 }
 
@@ -89,12 +89,16 @@ impl<'a> DictionaryValueArray<'a> {
     {
         match self {
             DictionaryValueArray::ArrayRef(a) => transform_array_into_set(transform, a),
-            DictionaryValueArray::VecAnyOwned(a) => {
-                transform_iter_into_set(transform, a.len(), a.into_iter().enumerate())
-            }
-            DictionaryValueArray::IndexAnyOwned(a) => {
-                transform_iter_into_set(transform, a.len(), a.into_iter().enumerate())
-            }
+            DictionaryValueArray::VecAnyOwned(a) => transform_iter_into_set(
+                transform,
+                a.len(),
+                Arc::unwrap_or_clone(a).into_iter().enumerate(),
+            ),
+            DictionaryValueArray::IndexAnyOwned(a) => transform_iter_into_set(
+                transform,
+                a.len(),
+                Arc::unwrap_or_clone(a).into_iter().enumerate(),
+            ),
             DictionaryValueArray::Boolean => todo!(),
         }
     }
@@ -108,11 +112,11 @@ impl<'a> DictionaryValueArray<'a> {
     {
         Ok(match self {
             DictionaryValueArray::ArrayRef(a) => transform_array_into_vec(transform, a)?,
-            DictionaryValueArray::VecAnyOwned(a) => a
+            DictionaryValueArray::VecAnyOwned(a) => Arc::unwrap_or_clone(a)
                 .into_iter()
                 .map(&mut transform)
                 .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
-            DictionaryValueArray::IndexAnyOwned(a) => a
+            DictionaryValueArray::IndexAnyOwned(a) => Arc::unwrap_or_clone(a)
                 .into_iter()
                 .map(&mut transform)
                 .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
@@ -134,13 +138,13 @@ impl<'a, T: Array + 'a> From<&'a T> for DictionaryValueArray<'a> {
 
 impl<'a> From<ValueOrRefSet<'a>> for DictionaryValueArray<'a> {
     fn from(value: ValueOrRefSet<'a>) -> DictionaryValueArray<'a> {
-        DictionaryValueArray::IndexAnyOwned(value)
+        DictionaryValueArray::IndexAnyOwned(value.into())
     }
 }
 
 impl<'a> From<Vec<ValueOrRef<'a>>> for DictionaryValueArray<'a> {
     fn from(value: Vec<ValueOrRef<'a>>) -> DictionaryValueArray<'a> {
-        DictionaryValueArray::VecAnyOwned(value)
+        DictionaryValueArray::VecAnyOwned(value.into())
     }
 }
 
