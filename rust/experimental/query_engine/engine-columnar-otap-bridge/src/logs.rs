@@ -313,6 +313,8 @@ pub struct OtapAttributes<'record> {
     attribute_int_values: Option<&'record PrimitiveArray<Int64Type>>,
     attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
     attribute_bools: Option<&'record BooleanArray>,
+    attribute_bytes_keys: Option<&'record PrimitiveArray<UInt16Type>>,
+    attribute_bytes_values: Option<&'record GenericBinaryArray<i32>>,
 }
 
 impl<'record> OtapAttributes<'record> {
@@ -330,6 +332,12 @@ impl<'record> OtapAttributes<'record> {
             c.as_dictionary::<UInt16Type>()
                 .downcast_dict::<PrimitiveArray<Int64Type>>()
                 .expect("Attribute ints were an unexpected type")
+        });
+
+        let bytes = attributes_batch.column_by_name("bytes").map(|c| {
+            c.as_dictionary::<UInt16Type>()
+                .downcast_dict::<BinaryArray>()
+                .expect("Attribute bytes were an unexpected type")
         });
 
         Self {
@@ -354,6 +362,8 @@ impl<'record> OtapAttributes<'record> {
             attribute_bools: attributes_batch
                 .column_by_name("bool")
                 .map(|c| c.as_boolean()),
+            attribute_bytes_keys: bytes.map(|v| v.keys()),
+            attribute_bytes_values: bytes.map(|v| v.values()),
         }
     }
 
@@ -433,6 +443,14 @@ impl<'record> OtapAttributes<'record> {
                     return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
                 }
             }
+            7 => {
+                if let Some(keys) = self.attribute_bytes_keys
+                    && keys.is_valid(attribute_index)
+                {
+                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
+                }
+            }
             d => todo!("Attribute type '{d}' is not supported"),
         }
 
@@ -466,6 +484,13 @@ impl<'record> OtapAttributes<'record> {
                     .unwrap()
                     .value_unchecked(attribute_value_index as usize)
             }),
+            7 => ValueOrRef::Array(ArrayValueOrRef::WrappedRef(ArrayValueWrappedRef::new_u8(
+                unsafe {
+                    self.attribute_bytes_values
+                        .unwrap()
+                        .value_unchecked(attribute_value_index as usize)
+                },
+            ))),
             d => todo!("Attribute type '{d}' is not supported"),
         }
     }
