@@ -109,6 +109,12 @@ impl<'a> OwnedArrayValue<'a> {
         Self { values: vec![] }
     }
 
+    pub fn with_capacity(capacity: usize) -> OwnedArrayValue<'a> {
+        Self {
+            values: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn get_values(&self) -> &[ValueOrRef<'a>] {
         &self.values
     }

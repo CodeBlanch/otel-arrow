@@ -6,6 +6,7 @@ pub(crate) mod bridge_error;
 pub(crate) mod bridge_options;
 pub(crate) mod filter;
 pub(crate) mod logs;
+pub(crate) mod serialization;
 
 pub use bridge::*;
 pub use bridge_error::*;

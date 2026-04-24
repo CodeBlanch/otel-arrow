@@ -88,6 +88,12 @@ impl<'a> OwnedMapValue<'a> {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> OwnedMapValue<'a> {
+        Self {
+            values: HashMap::with_capacity_and_hasher(capacity, RandomState::new()),
+        }
+    }
+
     pub fn get_values(&self) -> &HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
         &self.values
     }

@@ -315,6 +315,8 @@ pub struct OtapAttributes<'record> {
     attribute_bools: Option<&'record BooleanArray>,
     attribute_bytes_keys: Option<&'record PrimitiveArray<UInt16Type>>,
     attribute_bytes_values: Option<&'record GenericBinaryArray<i32>>,
+    attribute_ser_keys: Option<&'record PrimitiveArray<UInt16Type>>,
+    attribute_ser_values: Option<&'record GenericBinaryArray<i32>>,
 }
 
 impl<'record> OtapAttributes<'record> {
@@ -338,6 +340,12 @@ impl<'record> OtapAttributes<'record> {
             c.as_dictionary::<UInt16Type>()
                 .downcast_dict::<BinaryArray>()
                 .expect("Attribute bytes were an unexpected type")
+        });
+
+        let ser = attributes_batch.column_by_name("ser").map(|c| {
+            c.as_dictionary::<UInt16Type>()
+                .downcast_dict::<BinaryArray>()
+                .expect("Attribute ser was an unexpected type")
         });
 
         Self {
@@ -364,6 +372,8 @@ impl<'record> OtapAttributes<'record> {
                 .map(|c| c.as_boolean()),
             attribute_bytes_keys: bytes.map(|v| v.keys()),
             attribute_bytes_values: bytes.map(|v| v.values()),
+            attribute_ser_keys: ser.map(|v| v.keys()),
+            attribute_ser_values: ser.map(|v| v.values()),
         }
     }
 
@@ -443,6 +453,22 @@ impl<'record> OtapAttributes<'record> {
                     return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
                 }
             }
+            5 => {
+                if let Some(keys) = self.attribute_ser_keys
+                    && keys.is_valid(attribute_index)
+                {
+                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
+                }
+            }
+            6 => {
+                if let Some(keys) = self.attribute_ser_keys
+                    && keys.is_valid(attribute_index)
+                {
+                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
+                }
+            }
             7 => {
                 if let Some(keys) = self.attribute_bytes_keys
                     && keys.is_valid(attribute_index)
@@ -484,6 +510,26 @@ impl<'record> OtapAttributes<'record> {
                     .unwrap()
                     .value_unchecked(attribute_value_index as usize)
             }),
+            5 => {
+                let value = unsafe {
+                    self.attribute_ser_values
+                        .unwrap()
+                        .value_unchecked(attribute_value_index as usize)
+                };
+
+                // todo: Should we log deserialization failure somewhere?
+                crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
+            }
+            6 => {
+                let value = unsafe {
+                    self.attribute_ser_values
+                        .unwrap()
+                        .value_unchecked(attribute_value_index as usize)
+                };
+
+                // todo: Should we log deserialization failure somewhere?
+                crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
+            }
             7 => ValueOrRef::Array(ArrayValueOrRef::WrappedRef(ArrayValueWrappedRef::new_u8(
                 unsafe {
                     self.attribute_bytes_values
