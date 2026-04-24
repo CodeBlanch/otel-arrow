@@ -453,15 +453,7 @@ impl<'record> OtapAttributes<'record> {
                     return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
                 }
             }
-            5 => {
-                if let Some(keys) = self.attribute_ser_keys
-                    && keys.is_valid(attribute_index)
-                {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
-            }
-            6 => {
+            5 | 6 => {
                 if let Some(keys) = self.attribute_ser_keys
                     && keys.is_valid(attribute_index)
                 {
@@ -510,17 +502,7 @@ impl<'record> OtapAttributes<'record> {
                     .unwrap()
                     .value_unchecked(attribute_value_index as usize)
             }),
-            5 => {
-                let value = unsafe {
-                    self.attribute_ser_values
-                        .unwrap()
-                        .value_unchecked(attribute_value_index as usize)
-                };
-
-                // todo: Should we log deserialization failure somewhere?
-                crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
-            }
-            6 => {
+            5 | 6 => {
                 let value = unsafe {
                     self.attribute_ser_values
                         .unwrap()
@@ -713,6 +695,7 @@ fn build_logs_body_dictionary<'a>(
             let body_doubles = OnceCell::new();
             let body_bools = OnceCell::new();
             let body_bytes = OnceCell::new();
+            let body_ser = OnceCell::new();
 
             for (key_index, body_type) in body_types.values().iter().enumerate() {
                 match *body_type {
@@ -800,6 +783,62 @@ fn build_logs_body_dictionary<'a>(
                             values.push(ValueOrRef::Boolean(body_bools.value(key_index)));
 
                             unsafe { *key_builder.add(key_index) = index };
+                            continue;
+                        }
+                    }
+                    5 => {
+                        if let Some(body_ser) = body_ser.get_or_init(|| {
+                            body_struct.column_by_name("ser").map(|v| {
+                                v.as_dictionary::<UInt16Type>()
+                                    .downcast_dict::<BinaryArray>()
+                                    .expect("body ser values were an unexpected type")
+                            })
+                        }) {
+                            let value_index = body_ser.keys().value(key_index) as usize;
+
+                            let lookup_key = (5 << 16) | value_index;
+                            let index = match value_lookup.entry(lookup_key) {
+                                Entry::Occupied(occupied) => occupied.into_mut(),
+                                Entry::Vacant(vacant) => {
+                                    let index = values.len();
+                                    values.push(
+                                        crate::serialization::from_slice(
+                                            body_ser.values().value(value_index),
+                                        )
+                                        .unwrap_or(ValueOrRef::Null),
+                                    );
+                                    vacant.insert(index as u16)
+                                }
+                            };
+                            unsafe { *key_builder.add(key_index) = *index };
+                            continue;
+                        }
+                    }
+                    6 => {
+                        if let Some(body_ser) = body_ser.get_or_init(|| {
+                            body_struct.column_by_name("ser").map(|v| {
+                                v.as_dictionary::<UInt16Type>()
+                                    .downcast_dict::<BinaryArray>()
+                                    .expect("body ser values were an unexpected type")
+                            })
+                        }) {
+                            let value_index = body_ser.keys().value(key_index) as usize;
+
+                            let lookup_key = (6 << 16) | value_index;
+                            let index = match value_lookup.entry(lookup_key) {
+                                Entry::Occupied(occupied) => occupied.into_mut(),
+                                Entry::Vacant(vacant) => {
+                                    let index = values.len();
+                                    values.push(
+                                        crate::serialization::from_slice(
+                                            body_ser.values().value(value_index),
+                                        )
+                                        .unwrap_or(ValueOrRef::Null),
+                                    );
+                                    vacant.insert(index as u16)
+                                }
+                            };
+                            unsafe { *key_builder.add(key_index) = *index };
                             continue;
                         }
                     }
