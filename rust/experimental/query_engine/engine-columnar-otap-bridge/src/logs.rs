@@ -55,7 +55,58 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 None
             };
 
-            OtapLogRecordBatch::new(self.diagnostic_level, logs, logs_schema, attributes)
+            let resource = if let Some(resource_column) = logs_schema.column_with_name("resource")
+                && let Some(resource_struct) = logs.column(resource_column.0).as_struct_opt()
+            {
+                if let Some(resource_ids) = resource_struct.column_by_name("id")
+                    && let Some(resource_attributes_batch) = batches[0].as_ref()
+                {
+                    let ids = resource_ids.as_primitive::<UInt16Type>();
+
+                    Some(OtapResource {
+                        resource_struct,
+                        attributes: Some(OtapAttributes::new(ids, resource_attributes_batch)),
+                    })
+                } else {
+                    Some(OtapResource {
+                        resource_struct,
+                        attributes: None,
+                    })
+                }
+            } else {
+                None
+            };
+
+            let scope = if let Some(scope_column) = logs_schema.column_with_name("scope")
+                && let Some(scope_struct) = logs.column(scope_column.0).as_struct_opt()
+            {
+                if let Some(scope_ids) = scope_struct.column_by_name("id")
+                    && let Some(scope_attributes_batch) = batches[1].as_ref()
+                {
+                    let ids = scope_ids.as_primitive::<UInt16Type>();
+
+                    Some(OtapScope {
+                        scope_struct,
+                        attributes: Some(OtapAttributes::new(ids, scope_attributes_batch)),
+                    })
+                } else {
+                    Some(OtapScope {
+                        scope_struct,
+                        attributes: None,
+                    })
+                }
+            } else {
+                None
+            };
+
+            OtapLogRecordBatch::new(
+                self.diagnostic_level,
+                logs,
+                logs_schema,
+                attributes,
+                resource,
+                scope,
+            )
         } else {
             OtapLogRecordBatch::new_empty()
         }
@@ -74,31 +125,47 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             let number_of_logs_before_filter = logs.num_rows();
             if filter_true_count == number_of_logs_before_filter {
                 return [
-                    batch.resource.clone(),
-                    batch.scope.clone(),
+                    batch
+                        .resource
+                        .as_ref()
+                        .and_then(|r| r.attributes.as_ref())
+                        .map(|v| v.batch.clone()),
+                    batch
+                        .scope
+                        .as_ref()
+                        .and_then(|s| s.attributes.as_ref())
+                        .map(|v| v.batch.clone()),
                     Some(logs.clone()),
                     batch.attributes.as_ref().map(|a| a.batch.clone()),
                 ];
             }
 
-            let filtered_logs = filter::filter_record_batch(logs, filter).unwrap();
+            let filtered_logs_batch = filter::filter_record_batch(logs, filter).unwrap();
 
-            let number_of_logs_after_filter = filtered_logs.num_rows();
+            let number_of_logs_after_filter = filtered_logs_batch.num_rows();
             if number_of_logs_after_filter > 0 {
                 if number_of_logs_before_filter == number_of_logs_after_filter {
                     return [
-                        batch.resource.clone(),
-                        batch.scope.clone(),
-                        Some(filtered_logs),
+                        batch
+                            .resource
+                            .as_ref()
+                            .and_then(|r| r.attributes.as_ref())
+                            .map(|v| v.batch.clone()),
+                        batch
+                            .scope
+                            .as_ref()
+                            .and_then(|s| s.attributes.as_ref())
+                            .map(|v| v.batch.clone()),
+                        Some(filtered_logs_batch),
                         batch.attributes.as_ref().map(|a| a.batch.clone()),
                     ];
                 }
 
                 let mut ids = IdBitmap::new();
 
-                if let Some(id_column) = filtered_logs.schema_ref().column_with_name("id") {
+                if let Some(id_column) = filtered_logs_batch.schema_ref().column_with_name("id") {
                     ids.populate(
-                        filtered_logs
+                        filtered_logs_batch
                             .column(id_column.0)
                             .as_primitive::<UInt16Type>()
                             .iter()
@@ -108,25 +175,64 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 }
 
                 if ids.is_empty() {
-                    return [None, None, Some(filtered_logs), None];
+                    return [None, None, Some(filtered_logs_batch), None];
                 }
 
-                let resource = batch
-                    .resource
-                    .as_ref()
-                    .and_then(|v| filter_child_batch(&ids, v));
-
-                let scope = batch
-                    .scope
-                    .as_ref()
-                    .and_then(|v| filter_child_batch(&ids, v));
-
-                let attributes = batch
+                let attributes_batch = batch
                     .attributes
                     .as_ref()
                     .and_then(|v| filter_child_batch(&ids, v.batch));
 
-                return [resource, scope, Some(filtered_logs), attributes];
+                let resource_attributes_batch = if let Some(resource) = batch.resource.as_ref()
+                    && let Some(resource_attributes) = resource.attributes.as_ref()
+                    && let Some(resource_ids) = resource.resource_struct.column_by_name("id")
+                {
+                    ids.clear();
+                    ids.populate(
+                        resource_ids
+                            .as_primitive::<UInt16Type>()
+                            .iter()
+                            .flatten()
+                            .map(|i| i.into()),
+                    );
+
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        filter_child_batch(&ids, resource_attributes.batch)
+                    }
+                } else {
+                    None
+                };
+
+                let scope_attributes_batch = if let Some(scope) = batch.scope.as_ref()
+                    && let Some(scope_attributes) = scope.attributes.as_ref()
+                    && let Some(scope_ids) = scope.scope_struct.column_by_name("id")
+                {
+                    ids.clear();
+                    ids.populate(
+                        scope_ids
+                            .as_primitive::<UInt16Type>()
+                            .iter()
+                            .flatten()
+                            .map(|i| i.into()),
+                    );
+
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        filter_child_batch(&ids, scope_attributes.batch)
+                    }
+                } else {
+                    None
+                };
+
+                return [
+                    resource_attributes_batch,
+                    scope_attributes_batch,
+                    Some(filtered_logs_batch),
+                    attributes_batch,
+                ];
             }
         }
 
@@ -140,8 +246,8 @@ pub struct OtapLogRecordBatch<'record> {
     logs: Option<&'record RecordBatch>,
     logs_schema: Option<&'record SchemaRef>,
     attributes: Option<OtapAttributes<'record>>,
-    resource: Option<RecordBatch>,
-    scope: Option<RecordBatch>,
+    resource: Option<OtapResource<'record>>,
+    scope: Option<OtapScope<'record>>,
     body: OnceCell<Option<Dictionary<'record>>>,
 }
 
@@ -151,14 +257,16 @@ impl<'record> OtapLogRecordBatch<'record> {
         logs: &'record RecordBatch,
         logs_schema: &'record SchemaRef,
         attributes: Option<OtapAttributes<'record>>,
+        resource: Option<OtapResource<'record>>,
+        scope: Option<OtapScope<'record>>,
     ) -> OtapLogRecordBatch<'record> {
         Self {
             diagnostic_level,
             logs: Some(logs),
             logs_schema: Some(logs_schema),
             attributes,
-            resource: None,
-            scope: None,
+            resource,
+            scope,
             body: OnceCell::new(),
         }
     }
@@ -188,9 +296,21 @@ impl ColumnarRecords for OtapLogRecordBatch<'_> {
     fn len(&self) -> usize {
         self.logs.map_or(0, |v| v.num_rows())
     }
+
+    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable> {
+        match name {
+            "resource" | "Resource" => self.resource.as_ref().map(|v| v as &dyn RecordTable),
+            "scope"
+            | "Scope"
+            | "instrumentation_scope"
+            | "InstrumentationScope"
+            | "instrumentationScope" => self.scope.as_ref().map(|v| v as &dyn RecordTable),
+            _ => None,
+        }
+    }
 }
 
-impl<'record> RecordTable for OtapLogRecordBatch<'record> {
+impl RecordTable for OtapLogRecordBatch<'_> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
         let key = get_log_record_schema().normalize_key(key);
 
@@ -294,6 +414,78 @@ impl<'record> RecordTable for OtapLogRecordBatch<'record> {
 impl Display for OtapLogRecordBatch<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Logs(RecordCount={})", self.len())
+    }
+}
+
+#[derive(Debug)]
+pub struct OtapResource<'record> {
+    resource_struct: &'record StructArray,
+    attributes: Option<OtapAttributes<'record>>,
+}
+
+impl RecordTable for OtapResource<'_> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+        if key == "attributes" || key == "Attributes" {
+            if let Some(attributes) = &self.attributes {
+                return Some(RecordTableValue::Table(attributes));
+            } else {
+                return None;
+            }
+        }
+
+        None
+    }
+}
+
+impl Display for OtapResource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Resource(RecordCount={})", self.resource_struct.len())
+    }
+}
+
+#[derive(Debug)]
+pub struct OtapScope<'record> {
+    scope_struct: &'record StructArray,
+    attributes: Option<OtapAttributes<'record>>,
+}
+
+impl RecordTable for OtapScope<'_> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+        if key == "attributes" || key == "Attributes" {
+            if let Some(attributes) = &self.attributes {
+                return Some(RecordTableValue::Table(attributes));
+            } else {
+                return None;
+            }
+        }
+
+        let values = match key {
+            "name" | "Name" if let Some(name_column) = self.scope_struct.column_by_name("name") => {
+                name_column
+                    .as_dictionary::<UInt8Type>()
+                    .downcast_dict::<StringArray>()
+                    .expect("scope name values were an unexpected type")
+                    .into()
+            }
+            "version" | "Version"
+                if let Some(version_column) = self.scope_struct.column_by_name("version") =>
+            {
+                version_column
+                    .as_dictionary::<UInt8Type>()
+                    .downcast_dict::<StringArray>()
+                    .expect("scope version values were an unexpected type")
+                    .into()
+            }
+            _ => return None,
+        };
+
+        Some(RecordTableValue::Dictionary(values))
+    }
+}
+
+impl Display for OtapScope<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Scope(RecordCount={})", self.scope_struct.len())
     }
 }
 

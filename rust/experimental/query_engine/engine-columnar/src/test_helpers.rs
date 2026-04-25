@@ -76,6 +76,10 @@ impl<'a> ColumnarRecords for TestRecords<'a> {
     fn len(&self) -> usize {
         self.values.len()
     }
+
+    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable> {
+        todo!()
+    }
 }
 
 impl<'a> RecordTable for TestRecords<'a> {

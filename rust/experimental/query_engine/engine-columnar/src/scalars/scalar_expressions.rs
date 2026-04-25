@@ -7,6 +7,7 @@ use crate::{
     execution_context::ExecutionContext,
     resolved_value::*,
     scalars::{
+        attached_scalar_expression::execute_attached_scalar_expression,
         length_scalar_expression::execute_length_scalar_expression,
         slice_scalar_expression::execute_slice_scalar_expression,
         source_scalar_expression::execute_source_scalar_expression,
@@ -24,7 +25,7 @@ where
 {
     let value = match scalar_expression {
         ScalarExpression::Argument(_) => todo!(),
-        ScalarExpression::Attached(_) => todo!(),
+        ScalarExpression::Attached(a) => execute_attached_scalar_expression(execution_context, a)?,
         ScalarExpression::Case(_) => todo!(),
         ScalarExpression::Coalesce(_) => todo!(),
         ScalarExpression::Collection(_) => todo!(),

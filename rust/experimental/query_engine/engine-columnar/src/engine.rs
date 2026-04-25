@@ -308,6 +308,8 @@ where
     fn is_empty(&self) -> bool {
         self.len() > 0
     }
+
+    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable>;
 }
 
 pub trait RecordTable: Display + Debug {
