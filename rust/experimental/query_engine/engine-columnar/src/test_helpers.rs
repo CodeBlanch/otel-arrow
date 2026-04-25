@@ -56,11 +56,25 @@ pub(crate) fn build_indexset_dictionary<'a>(
 #[derive(Debug)]
 pub(crate) struct TestRecords<'a> {
     values: HashMap<Box<str>, Dictionary<'a>>,
+    attached_records: Option<HashMap<Box<str>, TestRecords<'a>>>,
 }
 
 impl<'a> TestRecords<'a> {
     pub fn new(values: HashMap<Box<str>, Dictionary<'a>>) -> TestRecords<'a> {
-        Self { values }
+        Self {
+            values,
+            attached_records: None,
+        }
+    }
+
+    pub fn with_attached_records(
+        values: HashMap<Box<str>, Dictionary<'a>>,
+        attached_records: HashMap<Box<str>, TestRecords<'a>>,
+    ) -> TestRecords<'a> {
+        Self {
+            values,
+            attached_records: Some(attached_records),
+        }
     }
 }
 
@@ -78,7 +92,9 @@ impl<'a> ColumnarRecords for TestRecords<'a> {
     }
 
     fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable> {
-        todo!()
+        self.attached_records
+            .as_ref()
+            .and_then(|a| a.get(name).map(|v| v as &dyn RecordTable))
     }
 }
 

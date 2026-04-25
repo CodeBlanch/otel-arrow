@@ -53,3 +53,84 @@ where
             .get_selectors(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::test_helpers::*;
+
+    use super::*;
+
+    #[test]
+    fn test_select_from_attached_table() {
+        let values_dictionary = build_indexset_dictionary(
+            vec![Some(0), Some(0)],
+            vec![ValueOrRef::String(StringValueOrRef::new_owned(
+                "hello world".into(),
+            ))],
+        );
+
+        let select_valid_attached_data = AttachedScalarExpression::new(
+            QueryLocation::new_fake(),
+            StringScalarExpression::new(QueryLocation::new_fake(), "data"),
+            ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                StaticScalarExpression::String(StringScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    "values",
+                )),
+            )]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::with_attached_records(
+                HashMap::new(),
+                HashMap::from([(
+                    "data".into(),
+                    TestRecords::new(HashMap::from([(
+                        "values".into(),
+                        values_dictionary.clone(),
+                    )])),
+                )]),
+            ),
+            ScalarExpression::Attached(select_valid_attached_data),
+            |r| match r.unwrap() {
+                ResolvedScalarValue::Dictionary(actual) => assert_eq!(values_dictionary, actual),
+                _ => panic!("test failure"),
+            },
+        );
+
+        let select_invalid_attached_data = AttachedScalarExpression::new(
+            QueryLocation::new_fake(),
+            StringScalarExpression::new(QueryLocation::new_fake(), "invalid"),
+            ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                StaticScalarExpression::String(StringScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    "unknown",
+                )),
+            )]),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Attached(select_invalid_attached_data),
+            |r| {
+                matches!(r, Ok(ResolvedScalarValue::Single(ValueOrRef::Null)));
+            },
+        );
+
+        let select_root = AttachedScalarExpression::new(
+            QueryLocation::new_fake(),
+            StringScalarExpression::new(QueryLocation::new_fake(), "data"),
+            ValueAccessor::new(),
+        );
+
+        run_scalar_expression_test(
+            TestRecords::new(HashMap::new()),
+            ScalarExpression::Attached(select_root),
+            |r| {
+                matches!(r, Ok(ResolvedScalarValue::Table(_)));
+            },
+        );
+    }
+}
