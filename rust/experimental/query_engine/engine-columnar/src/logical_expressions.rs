@@ -46,18 +46,22 @@ where
                         ResolvedLogicalValue::DictionaryOwned(
                             Dictionary::new(keys, values).transform_into_boolean(
                                 |v| {
-                                    let value = v.to_value();
-
-                                    if let Some(b) = value.convert_to_bool() {
-                                        Ok(Some(b))
-                                    } else {
-                                        Err(ExpressionError::TypeMismatch(
-                                            s.get_query_location().clone(),
-                                            format!(
-                                                "Value of '{}' type returned by scalar expression could not be converted to bool",
-                                                value.get_value_type()
-                                            ),
-                                        ))
+                                    match v.to_value() {
+                                        Value::Null => Ok(None),
+                                        Value::Boolean(b) => Ok(Some(b.get_value())),
+                                        v => {
+                                            if let Some(b) = v.convert_to_bool() {
+                                                Ok(Some(b))
+                                            } else {
+                                                Err(ExpressionError::TypeMismatch(
+                                                    s.get_query_location().clone(),
+                                                    format!(
+                                                        "Value of '{}' type returned by scalar expression could not be converted to bool",
+                                                        v.get_value_type()
+                                                    ),
+                                                ))
+                                            }
+                                        }
                                     }
                                 },
                             )?,
