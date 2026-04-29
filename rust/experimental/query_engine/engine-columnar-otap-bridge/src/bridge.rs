@@ -523,7 +523,7 @@ mod tests {
         );
 
         let pipeline = parse_kql_logs_query_into_pipeline(
-            "source | where Attributes['attr1'] == 'value1'",
+            "source | where Attributes['attr1'] >= 18 or Attributes['attr1'] == 'value1'",
             None,
         )
         .unwrap();
@@ -541,13 +541,19 @@ mod tests {
 
         println!("{results}");
 
-        assert_eq!(3, results.dropped_record_count);
-        assert_eq!(2, results.included_record_count);
+        assert_eq!(2, results.dropped_record_count);
+        assert_eq!(3, results.included_record_count);
 
         let final_logs = &results.included_records;
 
         assert_eq!(
-            2,
+            3,
+            final_logs
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            3,
             final_logs
                 .get(ArrowPayloadType::LogAttrs)
                 .map_or(0, |v| v.num_rows())

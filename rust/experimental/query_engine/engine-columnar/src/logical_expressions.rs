@@ -101,7 +101,17 @@ where
                 Ok(match (l, r) {
                     (Value::Null, _) => false,
                     (_, Value::Null) => false,
-                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? > 0,
+                    (l, r) => match Value::compare_values(g.get_query_location(), l, r) {
+                        Ok(v) => v > 0,
+                        Err(err) => {
+                            execution_context.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                g,
+                                || err.into_parts().1,
+                            );
+                            false
+                        }
+                    },
                 })
             },
         )?,
@@ -114,7 +124,17 @@ where
                     (Value::Null, Value::Null) => true,
                     (Value::Null, _) => false,
                     (_, Value::Null) => false,
-                    (l, r) => Value::compare_values(g.get_query_location(), l, r)? >= 0,
+                    (l, r) => match Value::compare_values(g.get_query_location(), l, r) {
+                        Ok(v) => v >= 0,
+                        Err(err) => {
+                            execution_context.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                g,
+                                || err.into_parts().1,
+                            );
+                            false
+                        }
+                    },
                 })
             },
         )?,
