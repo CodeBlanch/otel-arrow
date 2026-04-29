@@ -66,12 +66,24 @@ impl BridgePipeline {
     }
 }
 
+impl Display for BridgePipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.engine.get_pipeline().fmt(f)
+    }
+}
+
 #[derive(Debug)]
 pub struct BridgeResponse<'a, T> {
     pub included_records: T,
     pub included_record_count: usize,
     pub dropped_record_count: usize,
     pub diagnostics: BridgeDiagnostics<'a>,
+}
+
+impl<T> Display for BridgeResponse<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.diagnostics.fmt(f)
+    }
 }
 
 #[derive(Debug)]
@@ -256,148 +268,592 @@ fn build_log_record_schema(
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use data_engine_kql_parser::{KqlParser, Parser};
+    use otap_df_pdata::proto::OtlpProtoMessage;
+    use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
+    use otap_df_pdata::proto::opentelemetry::common::v1::{
+        AnyValue, InstrumentationScope, KeyValue, any_value::Value,
+    };
+    use otap_df_pdata::proto::opentelemetry::logs::v1::{
+        LogRecord, LogsData, ResourceLogs, ScopeLogs,
+    };
+    use otap_df_pdata::proto::opentelemetry::resource::v1::Resource;
+    use otap_df_pdata::testing::round_trip::{otlp_to_otap, to_otap_logs};
     use otap_df_pdata::{otap::OtapBatchStore, *};
 
     use super::*;
 
     #[test]
     fn test_engine_filter_all() {
-        let pdata: OtapPayload = OtlpProtoBytes::ExportLogsRequest(Bytes::from_static(&[
-            10, 100, 10, 0, 18, 96, 18, 25, 26, 4, 73, 110, 102, 111, 50, 17, 10, 5, 97, 116, 116,
-            114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 49, 18, 19, 50, 17, 10, 5, 97, 116, 116,
-            114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 50, 18, 6, 26, 4, 87, 97, 114, 110, 18,
-            38, 26, 4, 87, 97, 114, 110, 50, 17, 10, 5, 97, 116, 116, 114, 49, 18, 8, 10, 6, 118,
-            97, 108, 117, 101, 49, 50, 11, 10, 5, 97, 116, 116, 114, 50, 18, 2, 24, 18,
-        ]))
-        .into();
+        let log_records = vec![
+            LogRecord::build().finish(),
+            LogRecord::build().finish(),
+            LogRecord::build().finish(),
+            LogRecord::build().finish(),
+        ];
 
-        let otap_batch: OtapArrowRecords = pdata.try_into().unwrap();
+        let otap_batch = to_otap_logs(log_records);
 
         let logs = match otap_batch {
             OtapArrowRecords::Logs(l) => l,
             _ => panic!(),
         };
 
-        let batches = logs.into_batches();
-
-        let pipeline = KqlParser::parse("source | where false").unwrap().pipeline;
-
-        let engine = ColumnarEngine::new_with_options(
-            pipeline,
-            ColumnarEngineOptions::new()
-                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
+        assert_eq!(
+            4,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
         );
 
-        let mut batch = engine.begin_batch().unwrap();
+        let pipeline = parse_kql_logs_query_into_pipeline("source | where false", None).unwrap();
 
-        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
+        println!("{pipeline}");
 
-        let results = batch.flush();
-
-        assert_eq!(4, results.dropped_record_count);
-        assert!(results.included_batches.is_empty());
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
 
         println!("{results}");
+
+        assert_eq!(4, results.dropped_record_count);
+        assert_eq!(0, results.included_record_count);
     }
 
     #[test]
     fn test_engine_filter_severity_text_info() {
-        let pdata: OtapPayload = OtlpProtoBytes::ExportLogsRequest(Bytes::from_static(&[
-            10, 100, 10, 0, 18, 96, 18, 25, 26, 4, 73, 110, 102, 111, 50, 17, 10, 5, 97, 116, 116,
-            114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 49, 18, 19, 50, 17, 10, 5, 97, 116, 116,
-            114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 50, 18, 6, 26, 4, 87, 97, 114, 110, 18,
-            38, 26, 4, 87, 97, 114, 110, 50, 17, 10, 5, 97, 116, 116, 114, 49, 18, 8, 10, 6, 118,
-            97, 108, 117, 101, 49, 50, 11, 10, 5, 97, 116, 116, 114, 50, 18, 2, 24, 18,
-        ]))
-        .into();
+        let logs = LogsData {
+            resource_logs: vec![
+                ResourceLogs {
+                    resource: Some(Resource {
+                        attributes: vec![KeyValue {
+                            key: "resource1_attr1".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("value1".into())),
+                            }),
+                        }],
+                        ..Default::default()
+                    }),
+                    scope_logs: vec![ScopeLogs {
+                        log_records: vec![LogRecord::build().severity_text("Info").finish()],
+                        scope: Some(InstrumentationScope {
+                            attributes: vec![KeyValue {
+                                key: "scope1_attr1".into(),
+                                value: Some(AnyValue {
+                                    value: Some(Value::StringValue("value1".into())),
+                                }),
+                            }],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ResourceLogs {
+                    resource: Some(Resource {
+                        attributes: vec![KeyValue {
+                            key: "resource2_attr1".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("value1".into())),
+                            }),
+                        }],
+                        ..Default::default()
+                    }),
+                    scope_logs: vec![
+                        ScopeLogs {
+                            log_records: vec![
+                                LogRecord::build().severity_text("Warn").finish(),
+                                LogRecord::build().severity_text("Error").finish(),
+                            ],
+                            scope: Some(InstrumentationScope {
+                                attributes: vec![KeyValue {
+                                    key: "scope2_attr1".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("value1".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        ScopeLogs {
+                            log_records: vec![LogRecord::build().finish()],
+                            scope: Some(InstrumentationScope {
+                                attributes: vec![KeyValue {
+                                    key: "scope3_attr1".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("value2".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+        };
 
-        let otap_batch: OtapArrowRecords = pdata.try_into().unwrap();
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
 
         let logs = match otap_batch {
             OtapArrowRecords::Logs(l) => l,
             _ => panic!(),
         };
 
-        let batches = logs.into_batches();
-
-        assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
-
-        let pipeline = KqlParser::parse("source | where severity_text == 'Info'")
-            .unwrap()
-            .pipeline;
-
-        let engine = ColumnarEngine::new_with_options(
-            pipeline,
-            ColumnarEngineOptions::new()
-                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
-        );
-
-        let mut batch = engine.begin_batch().unwrap();
-
-        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
-
-        let results = batch.flush();
-
-        assert_eq!(3, results.dropped_record_count);
-        assert_eq!(1, results.included_batches.len());
         assert_eq!(
-            1,
-            results.included_batches[0][2]
-                .as_ref()
+            2,
+            logs.get(ArrowPayloadType::ResourceAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            3,
+            logs.get(ArrowPayloadType::ScopeAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            4,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            logs.get(ArrowPayloadType::LogAttrs)
                 .map_or(0, |v| v.num_rows())
         );
 
+        let pipeline =
+            parse_kql_logs_query_into_pipeline("source | where severity_text == 'Info'", None)
+                .unwrap();
+
+        println!("{pipeline}");
+
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
+
         println!("{results}");
+
+        assert_eq!(3, results.dropped_record_count);
+        assert_eq!(1, results.included_record_count);
+
+        let final_batch = &results.included_records;
+
+        assert_eq!(
+            1,
+            final_batch
+                .get(ArrowPayloadType::ResourceAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            1,
+            final_batch
+                .get(ArrowPayloadType::ScopeAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            1,
+            final_batch
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            final_batch
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
     }
 
     #[test]
     fn test_engine_filter_attribute() {
-        let pdata: OtapPayload = OtlpProtoBytes::ExportLogsRequest(Bytes::from_static(&[
-            10, 100, 10, 0, 18, 96, 18, 25, 26, 4, 73, 110, 102, 111, 50, 17, 10, 5, 97, 116, 116,
-            114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 49, 18, 19, 50, 17, 10, 5, 97, 116, 116,
-            114, 49, 18, 8, 10, 6, 118, 97, 108, 117, 101, 50, 18, 6, 26, 4, 87, 97, 114, 110, 18,
-            38, 26, 4, 87, 97, 114, 110, 50, 17, 10, 5, 97, 116, 116, 114, 49, 18, 8, 10, 6, 118,
-            97, 108, 117, 101, 49, 50, 11, 10, 5, 97, 116, 116, 114, 50, 18, 2, 24, 18,
-        ]))
-        .into();
+        let log_records = vec![
+            LogRecord::build()
+                .attributes(vec![KeyValue {
+                    key: "attr1".into(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("value1".into())),
+                    }),
+                }])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![KeyValue {
+                    key: "attr1".into(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("value1".into())),
+                    }),
+                }])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![KeyValue {
+                    key: "attr1".into(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("value2".into())),
+                    }),
+                }])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![KeyValue {
+                    key: "attr1".into(),
+                    value: Some(AnyValue {
+                        value: Some(Value::IntValue(18)),
+                    }),
+                }])
+                .finish(),
+            LogRecord::build().finish(),
+        ];
 
-        let otap_batch: OtapArrowRecords = pdata.try_into().unwrap();
+        let otap_batch = to_otap_logs(log_records);
 
         let logs = match otap_batch {
             OtapArrowRecords::Logs(l) => l,
             _ => panic!(),
         };
 
-        let batches = logs.into_batches();
-
-        assert_eq!(4, batches[2].as_ref().map_or(0, |v| v.num_rows()));
-
-        let pipeline = KqlParser::parse("source | where Attributes['attr1'] == 'value1'")
-            .unwrap()
-            .pipeline;
-
-        let engine = ColumnarEngine::new_with_options(
-            pipeline,
-            ColumnarEngineOptions::new().with_diagnostic_level(ColumnarEngineDiagnosticLevel::Warn),
+        assert_eq!(
+            5,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
         );
 
-        let mut batch = engine.begin_batch().unwrap();
+        let pipeline = parse_kql_logs_query_into_pipeline(
+            "source | where Attributes['attr1'] == 'value1'",
+            None,
+        )
+        .unwrap();
 
-        batch.push_records(&OtapLogRecordBatchFactory::new(), batches);
+        println!("{pipeline}");
 
-        let results = batch.flush();
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
 
-        assert_eq!(2, results.dropped_record_count);
-        assert_eq!(1, results.included_batches.len());
+        println!("{results}");
+
+        assert_eq!(3, results.dropped_record_count);
+        assert_eq!(2, results.included_record_count);
+
+        let final_logs = &results.included_records;
+
         assert_eq!(
             2,
-            results.included_batches[0][2]
-                .as_ref()
+            final_logs
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+    }
+
+    #[test]
+    fn test_engine_filter_resource() {
+        let logs = LogsData {
+            resource_logs: vec![
+                ResourceLogs {
+                    resource: Some(Resource {
+                        attributes: vec![KeyValue {
+                            key: "resource_attr1".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("value1".into())),
+                            }),
+                        }],
+                        ..Default::default()
+                    }),
+                    scope_logs: vec![ScopeLogs {
+                        log_records: vec![LogRecord::build().severity_text("Info").finish()],
+                        scope: Some(InstrumentationScope {
+                            attributes: vec![KeyValue {
+                                key: "scope_attr1".into(),
+                                value: Some(AnyValue {
+                                    value: Some(Value::StringValue("value1".into())),
+                                }),
+                            }],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ResourceLogs {
+                    resource: Some(Resource {
+                        attributes: vec![KeyValue {
+                            key: "resource_attr1".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("value2".into())),
+                            }),
+                        }],
+                        ..Default::default()
+                    }),
+                    scope_logs: vec![
+                        ScopeLogs {
+                            log_records: vec![
+                                LogRecord::build().severity_text("Warn").finish(),
+                                LogRecord::build().severity_text("Error").finish(),
+                            ],
+                            scope: Some(InstrumentationScope {
+                                attributes: vec![KeyValue {
+                                    key: "scope_attr1".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("value1".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        ScopeLogs {
+                            log_records: vec![LogRecord::build().finish()],
+                            scope: Some(InstrumentationScope {
+                                attributes: vec![KeyValue {
+                                    key: "scope_attr1".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("value2".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
+
+        let logs = match otap_batch {
+            OtapArrowRecords::Logs(l) => l,
+            _ => panic!(),
+        };
+
+        assert_eq!(
+            2,
+            logs.get(ArrowPayloadType::ResourceAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            3,
+            logs.get(ArrowPayloadType::ScopeAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            4,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            logs.get(ArrowPayloadType::LogAttrs)
                 .map_or(0, |v| v.num_rows())
         );
 
+        let pipeline = parse_kql_logs_query_into_pipeline(
+            "source | where resource.attributes['resource_attr1'] == 'value1'",
+            None,
+        )
+        .unwrap();
+
+        println!("{pipeline}");
+
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
+
         println!("{results}");
+
+        assert_eq!(3, results.dropped_record_count);
+        assert_eq!(1, results.included_record_count);
+
+        let final_logs = &results.included_records;
+
+        assert_eq!(
+            1,
+            final_logs
+                .get(ArrowPayloadType::ResourceAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            1,
+            final_logs
+                .get(ArrowPayloadType::ScopeAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            1,
+            final_logs
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            final_logs
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+    }
+
+    #[test]
+    fn test_engine_filter_scope() {
+        let logs = LogsData {
+            resource_logs: vec![
+                ResourceLogs {
+                    resource: Some(Resource {
+                        attributes: vec![KeyValue {
+                            key: "resource_attr1".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("value1".into())),
+                            }),
+                        }],
+                        ..Default::default()
+                    }),
+                    scope_logs: vec![ScopeLogs {
+                        log_records: vec![LogRecord::build().severity_text("Info").finish()],
+                        scope: Some(InstrumentationScope {
+                            attributes: vec![KeyValue {
+                                key: "scope_attr1".into(),
+                                value: Some(AnyValue {
+                                    value: Some(Value::StringValue("value1".into())),
+                                }),
+                            }],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ResourceLogs {
+                    resource: Some(Resource {
+                        attributes: vec![KeyValue {
+                            key: "resource_attr1".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("value2".into())),
+                            }),
+                        }],
+                        ..Default::default()
+                    }),
+                    scope_logs: vec![
+                        ScopeLogs {
+                            log_records: vec![
+                                LogRecord::build().severity_text("Warn").finish(),
+                                LogRecord::build().severity_text("Error").finish(),
+                            ],
+                            scope: Some(InstrumentationScope {
+                                version: "version2".into(),
+                                attributes: vec![KeyValue {
+                                    key: "scope_attr1".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("value1".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        ScopeLogs {
+                            log_records: vec![LogRecord::build().finish()],
+                            scope: Some(InstrumentationScope {
+                                name: "scope3".into(),
+                                attributes: vec![KeyValue {
+                                    key: "scope_attr1".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("value2".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
+
+        let logs = match otap_batch {
+            OtapArrowRecords::Logs(l) => l,
+            _ => panic!(),
+        };
+
+        assert_eq!(
+            2,
+            logs.get(ArrowPayloadType::ResourceAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            3,
+            logs.get(ArrowPayloadType::ScopeAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            4,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            logs.get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+
+        let pipeline = parse_kql_logs_query_into_pipeline("source | where scope.name == 'invalid' or scope.version == 'invalid' or scope.attributes['scope_attr1'] == 'value1'", None)
+            .unwrap();
+
+        println!("{pipeline}");
+
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
+
+        println!("{results}");
+
+        assert_eq!(2, results.dropped_record_count);
+        assert_eq!(2, results.included_record_count);
+
+        let final_logs = &results.included_records;
+
+        assert_eq!(
+            2,
+            final_logs
+                .get(ArrowPayloadType::ResourceAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            2,
+            final_logs
+                .get(ArrowPayloadType::ScopeAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            2,
+            final_logs
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            final_logs
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
     }
 }

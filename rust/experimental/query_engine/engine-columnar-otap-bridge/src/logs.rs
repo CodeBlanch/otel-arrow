@@ -174,27 +174,36 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     );
                 }
 
-                if ids.is_empty() {
-                    return [None, None, Some(filtered_logs_batch), None];
-                }
-
-                let attributes_batch = batch
-                    .attributes
-                    .as_ref()
-                    .and_then(|v| filter_child_batch(&ids, v.batch));
+                let attributes_batch = if ids.is_empty() {
+                    None
+                } else {
+                    batch
+                        .attributes
+                        .as_ref()
+                        .and_then(|v| filter_child_batch(&ids, v.batch))
+                };
 
                 let resource_attributes_batch = if let Some(resource) = batch.resource.as_ref()
                     && let Some(resource_attributes) = resource.attributes.as_ref()
-                    && let Some(resource_ids) = resource.resource_struct.column_by_name("id")
                 {
                     ids.clear();
-                    ids.populate(
-                        resource_ids
-                            .as_primitive::<UInt16Type>()
-                            .iter()
-                            .flatten()
-                            .map(|i| i.into()),
-                    );
+
+                    if let Some(resource_column) = filtered_logs_batch
+                        .schema_ref()
+                        .column_with_name("resource")
+                        && let Some(resource_struct) = filtered_logs_batch
+                            .column(resource_column.0)
+                            .as_struct_opt()
+                        && let Some(resource_ids) = resource_struct.column_by_name("id")
+                    {
+                        ids.populate(
+                            resource_ids
+                                .as_primitive::<UInt16Type>()
+                                .iter()
+                                .flatten()
+                                .map(|i| i.into()),
+                        );
+                    }
 
                     if ids.is_empty() {
                         None
@@ -207,16 +216,23 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
                 let scope_attributes_batch = if let Some(scope) = batch.scope.as_ref()
                     && let Some(scope_attributes) = scope.attributes.as_ref()
-                    && let Some(scope_ids) = scope.scope_struct.column_by_name("id")
                 {
                     ids.clear();
-                    ids.populate(
-                        scope_ids
-                            .as_primitive::<UInt16Type>()
-                            .iter()
-                            .flatten()
-                            .map(|i| i.into()),
-                    );
+
+                    if let Some(scope_column) =
+                        filtered_logs_batch.schema_ref().column_with_name("scope")
+                        && let Some(scope_struct) =
+                            filtered_logs_batch.column(scope_column.0).as_struct_opt()
+                        && let Some(scope_ids) = scope_struct.column_by_name("id")
+                    {
+                        ids.populate(
+                            scope_ids
+                                .as_primitive::<UInt16Type>()
+                                .iter()
+                                .flatten()
+                                .map(|i| i.into()),
+                        );
+                    }
 
                     if ids.is_empty() {
                         None

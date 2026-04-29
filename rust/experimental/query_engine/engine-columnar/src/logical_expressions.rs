@@ -76,7 +76,22 @@ where
             e.get_query_location(),
             execute_scalar_expression(execution_context, e.get_left())?,
             execute_scalar_expression(execution_context, e.get_right())?,
-            |l, r| Value::are_values_equal(e.get_query_location(), l, r, e.get_case_insensitive()),
+            |l, r| match Value::are_values_equal(
+                e.get_query_location(),
+                l,
+                r,
+                e.get_case_insensitive(),
+            ) {
+                Ok(v) => Ok(v),
+                Err(err) => {
+                    execution_context.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Warn,
+                        e,
+                        || err.into_parts().1,
+                    );
+                    Ok(false)
+                }
+            },
         )?,
         LogicalExpression::GreaterThan(g) => compare(
             g.get_query_location(),
