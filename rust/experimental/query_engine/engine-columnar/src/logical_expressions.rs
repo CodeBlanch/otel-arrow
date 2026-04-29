@@ -39,11 +39,11 @@ where
                 |dictionary| {
                     let (keys, values) = dictionary.into_parts();
                     Ok(if let DictionaryKeyArray::BooleanRef(a) = keys {
-                        ResolvedLogicalValue::DictionaryRef(a)
+                        ResolvedLogicalValue::ArrayRef(a)
                     } else if let DictionaryKeyArray::BooleanOwned(a) = keys {
-                        ResolvedLogicalValue::DictionaryOwned(a)
+                        ResolvedLogicalValue::ArrayOwned(a)
                     } else {
-                        ResolvedLogicalValue::DictionaryOwned(
+                        ResolvedLogicalValue::ArrayOwned(
                             Dictionary::new(keys, values).transform_into_boolean(
                                 |v| {
                                     match v.to_value() {
@@ -145,11 +145,11 @@ where
         LogicalExpression::Not(n) => {
             match execute_logical_expression(execution_context, n.get_inner_expression())? {
                 ResolvedLogicalValue::Single(s) => ResolvedLogicalValue::Single(!s),
-                ResolvedLogicalValue::DictionaryRef(t) => {
-                    ResolvedLogicalValue::DictionaryOwned(arrow::compute::not(t).unwrap())
+                ResolvedLogicalValue::ArrayRef(t) => {
+                    ResolvedLogicalValue::ArrayOwned(arrow::compute::not(t).unwrap())
                 }
-                ResolvedLogicalValue::DictionaryOwned(t) => {
-                    ResolvedLogicalValue::DictionaryOwned(arrow::compute::not(&t).unwrap())
+                ResolvedLogicalValue::ArrayOwned(t) => {
+                    ResolvedLogicalValue::ArrayOwned(arrow::compute::not(&t).unwrap())
                 }
             }
         }
@@ -175,7 +175,7 @@ where
                             left
                         }
                     } else if let Some(right) = right.as_array() {
-                        ResolvedLogicalValue::DictionaryOwned(
+                        ResolvedLogicalValue::ArrayOwned(
                             arrow::compute::and(left_array, right).expect("and operation failed"),
                         )
                     } else {
@@ -208,7 +208,7 @@ where
                             left
                         }
                     } else if let Some(right) = right.as_array() {
-                        ResolvedLogicalValue::DictionaryOwned(
+                        ResolvedLogicalValue::ArrayOwned(
                             arrow::compute::or(left_array, right).expect("or operation failed"),
                         )
                     } else {
@@ -267,20 +267,20 @@ where
         if let Some(right) = right_single {
             ResolvedLogicalValue::Single(compare(&left.to_value(), &right.to_value())?)
         } else {
-            ResolvedLogicalValue::DictionaryOwned(compare_single_to_dictionary(
+            ResolvedLogicalValue::ArrayOwned(compare_single_to_dictionary(
                 &left,
                 right_dictionary.expect("right is dictionary"),
                 compare,
             )?)
         }
     } else if let Some(right) = right_single {
-        ResolvedLogicalValue::DictionaryOwned(compare_dictionary_to_single(
+        ResolvedLogicalValue::ArrayOwned(compare_dictionary_to_single(
             left_dictionary.expect("left is dictionary"),
             &right,
             compare,
         )?)
     } else {
-        ResolvedLogicalValue::DictionaryOwned(compare_dictionary_to_dictionary(
+        ResolvedLogicalValue::ArrayOwned(compare_dictionary_to_dictionary(
             query_location,
             left_dictionary.expect("left is dictionary"),
             right_dictionary.expect("right is dictionary"),

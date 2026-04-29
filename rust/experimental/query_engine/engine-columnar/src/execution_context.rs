@@ -21,7 +21,6 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
         pipeline: &'pipeline PipelineExpression,
         //global_variables: &'b RefCell<MapValueStorage<OwnedValue>>,
         //summaries: &'b Summaries<'a>,
-        //attached_records: Option<&'b dyn AttachedRecords>,
         records: Option<TRecords>,
         //arguments: Option<&'b dyn ExecutionContextArguments>,
     ) -> ExecutionContext<'a, 'pipeline, TRecords> {
@@ -29,7 +28,6 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
             diagnostic_level,
             diagnostics,
             pipeline,
-            //attached_records,
             records,
             //variables: ExecutionContextVariables::new(global_variables),
             //summaries,

@@ -142,8 +142,8 @@ impl Display for ResolvedScalarValue<'_> {
 #[derive(Debug)]
 pub(crate) enum ResolvedLogicalValue<'a> {
     Single(bool),
-    DictionaryRef(&'a BooleanArray),
-    DictionaryOwned(BooleanArray),
+    ArrayRef(&'a BooleanArray),
+    ArrayOwned(BooleanArray),
 }
 
 impl<'a> ResolvedLogicalValue<'a> {
@@ -156,8 +156,8 @@ impl<'a> ResolvedLogicalValue<'a> {
 
     pub fn as_array(&self) -> Option<&BooleanArray> {
         match self {
-            ResolvedLogicalValue::DictionaryRef(a) => Some(a),
-            ResolvedLogicalValue::DictionaryOwned(a) => Some(a),
+            ResolvedLogicalValue::ArrayRef(a) => Some(a),
+            ResolvedLogicalValue::ArrayOwned(a) => Some(a),
             _ => None,
         }
     }
@@ -191,8 +191,8 @@ impl<'a> From<ResolvedLogicalValue<'a>> for ResolvedScalarValue<'a> {
     fn from(value: ResolvedLogicalValue<'a>) -> Self {
         match value {
             ResolvedLogicalValue::Single(s) => ResolvedScalarValue::Single(ValueOrRef::Boolean(s)),
-            ResolvedLogicalValue::DictionaryRef(a) => ResolvedScalarValue::Dictionary(a.into()),
-            ResolvedLogicalValue::DictionaryOwned(a) => ResolvedScalarValue::Dictionary(a.into()),
+            ResolvedLogicalValue::ArrayRef(a) => ResolvedScalarValue::Dictionary(a.into()),
+            ResolvedLogicalValue::ArrayOwned(a) => ResolvedScalarValue::Dictionary(a.into()),
         }
     }
 }

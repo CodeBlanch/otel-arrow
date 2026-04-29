@@ -161,7 +161,6 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
             pipeline,
             //&self.global_variables,
             //&self.summaries,
-            //attached_records,
             Some(records),
             //None,
         );
@@ -201,7 +200,6 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                         pipeline,
                                         //&self.global_variables,
                                         //&self.summaries,
-                                        //attached_records,
                                         Some(new_records),
                                         //None,
                                     );
