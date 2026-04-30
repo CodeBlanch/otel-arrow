@@ -13,7 +13,7 @@ use crate::{
 pub fn execute_logical_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     logical_expression: &'pipeline LogicalExpression,
-) -> Result<ResolvedLogicalValue<'c>, ExpressionError>
+) -> ResolvedLogicalValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -24,7 +24,7 @@ where
 
             inner_value.map_into(
                 |single| {
-                    Ok(match single.to_value() {
+                    match single.to_value() {
                         Value::Boolean(b) => ResolvedLogicalValue::Single(b.get_value()),
                         v => {
                             if let Some(b) = v.convert_to_bool() {
@@ -42,11 +42,11 @@ where
                                 ResolvedLogicalValue::Single(false)
                             }
                         }
-                    })
+                    }
                 },
                 |dictionary| {
                     let (keys, values) = dictionary.into_parts();
-                    Ok(if let DictionaryKeyArray::BooleanRef(a) = keys {
+                    if let DictionaryKeyArray::BooleanRef(a) = keys {
                         ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a))
                     } else if let DictionaryKeyArray::BooleanOwned(a) = keys {
                         ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a))
@@ -78,15 +78,17 @@ where
                             ),
                         ))
                     }
-                    )
                 },
                 |_| {
-                    Err(ExpressionError::TypeMismatch(
-                        s.get_query_location().clone(),
-                        "Table type returned by scalar expression could not be converted to bool".into(),
-                    ))
+                    execution_context.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Warn,
+                        s,
+                        ||
+                            "Table type returned by scalar expression could not be converted to bool".into(),
+                        );
+                    ResolvedLogicalValue::Single(false)
                 }
-            )?
+            )
         }
         LogicalExpression::EqualTo(e) => compare(
             execute_scalar_expression(execution_context, e.get_left()),
@@ -148,7 +150,7 @@ where
             },
         ),
         LogicalExpression::Not(n) => {
-            match execute_logical_expression(execution_context, n.get_inner_expression())? {
+            match execute_logical_expression(execution_context, n.get_inner_expression()) {
                 ResolvedLogicalValue::Single(s) => ResolvedLogicalValue::Single(!s),
                 ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a)) => {
                     ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
@@ -162,82 +164,82 @@ where
                 }
             }
         }
-        LogicalExpression::And(a) => execute_logical_expression(execution_context, a.get_left())?
-            .map_into(
-            |left_single| {
-                Ok(if !left_single {
-                    ResolvedLogicalValue::Single(false)
-                } else {
-                    execute_logical_expression(execution_context, a.get_right())?
-                })
-            },
-            |left_array| {
-                let left_as_array = left_array.as_array();
-
-                Ok(if left_as_array.false_count() == left_as_array.len() {
-                    ResolvedLogicalValue::Single(false)
-                } else {
-                    execute_logical_expression(execution_context, a.get_right())?
-                        .map_into_with_state(
-                            left_array,
-                            |left_array, right_single| {
-                                Ok(if !right_single {
-                                    ResolvedLogicalValue::Single(false)
-                                } else {
-                                    ResolvedLogicalValue::Array(left_array)
-                                })
-                            },
-                            |left_array, right_array| {
-                                Ok(ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
-                                    arrow::compute::and(
-                                        left_array.as_array(),
-                                        right_array.as_array(),
-                                    )
-                                    .expect("and operation failed"),
-                                )))
-                            },
-                        )?
-                })
-            },
-        )?,
-        LogicalExpression::Or(o) => execute_logical_expression(execution_context, o.get_left())?
+        LogicalExpression::And(a) => execute_logical_expression(execution_context, a.get_left())
             .map_into(
                 |left_single| {
-                    Ok(if left_single {
-                        ResolvedLogicalValue::Single(true)
+                    if !left_single {
+                        ResolvedLogicalValue::Single(false)
                     } else {
-                        execute_logical_expression(execution_context, o.get_right())?
-                    })
+                        execute_logical_expression(execution_context, a.get_right())
+                    }
                 },
                 |left_array| {
                     let left_as_array = left_array.as_array();
 
-                    Ok(if left_as_array.true_count() == left_as_array.len() {
-                        ResolvedLogicalValue::Single(true)
+                    if left_as_array.false_count() == left_as_array.len() {
+                        ResolvedLogicalValue::Single(false)
                     } else {
-                        execute_logical_expression(execution_context, o.get_right())?
+                        execute_logical_expression(execution_context, a.get_right())
                             .map_into_with_state(
                                 left_array,
                                 |left_array, right_single| {
-                                    Ok(if right_single {
+                                    if !right_single {
+                                        ResolvedLogicalValue::Single(false)
+                                    } else {
+                                        ResolvedLogicalValue::Array(left_array)
+                                    }
+                                },
+                                |left_array, right_array| {
+                                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                                        arrow::compute::and(
+                                            left_array.as_array(),
+                                            right_array.as_array(),
+                                        )
+                                        .expect("and operation failed"),
+                                    ))
+                                },
+                            )
+                    }
+                },
+            ),
+        LogicalExpression::Or(o) => execute_logical_expression(execution_context, o.get_left())
+            .map_into(
+                |left_single| {
+                    if left_single {
+                        ResolvedLogicalValue::Single(true)
+                    } else {
+                        execute_logical_expression(execution_context, o.get_right())
+                    }
+                },
+                |left_array| {
+                    let left_as_array = left_array.as_array();
+
+                    if left_as_array.true_count() == left_as_array.len() {
+                        ResolvedLogicalValue::Single(true)
+                    } else {
+                        execute_logical_expression(execution_context, o.get_right())
+                            .map_into_with_state(
+                                left_array,
+                                |left_array, right_single| {
+                                    if right_single {
                                         ResolvedLogicalValue::Single(true)
                                     } else {
                                         ResolvedLogicalValue::Array(left_array)
-                                    })
+                                    }
                                 },
                                 |left_array, right_array| {
-                                    Ok(ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
                                         arrow::compute::or(
                                             left_array.as_array(),
                                             right_array.as_array(),
                                         )
                                         .expect("or operation failed"),
-                                    )))
+                                    ))
                                 },
-                            )?
-                    })
+                            )
+                    }
                 },
-            )?,
+            ),
         LogicalExpression::Contains(c) => compare(
             execute_scalar_expression(execution_context, c.get_haystack()),
             execute_scalar_expression(execution_context, c.get_needle()),
@@ -276,7 +278,7 @@ where
         || format!("Evaluated as: {value}"),
     );
 
-    Ok(value)
+    value
 }
 
 fn compare<'record, FCompare>(
