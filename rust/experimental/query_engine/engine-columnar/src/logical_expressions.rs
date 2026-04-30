@@ -299,7 +299,7 @@ where
         _ => unreachable!(),
     };
 
-    let value = if let Some(left) = left_single {
+    if let Some(left) = left_single {
         if let Some(right) = right_single {
             ResolvedLogicalValue::Single(compare(&left.to_value(), &right.to_value()))
         } else {
@@ -323,9 +323,7 @@ where
                 compare,
             ),
         ))
-    };
-
-    value
+    }
 }
 
 fn compare_dictionary_to_single<FCompare>(
