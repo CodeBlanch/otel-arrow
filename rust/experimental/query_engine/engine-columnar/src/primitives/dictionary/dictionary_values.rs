@@ -6,7 +6,6 @@ use std::{hash::Hash, sync::Arc};
 use ahash::{AHashMap, RandomState};
 use arrow::{array::*, datatypes::*};
 use chrono::{TimeZone, Utc};
-use data_engine_expressions::*;
 use indexmap::IndexSet;
 
 use crate::*;
@@ -50,33 +49,6 @@ impl<'a> DictionaryValueArray<'a> {
                 a.get_index(index).cloned().unwrap_or(ValueOrRef::Null)
             }
             DictionaryValueArray::Boolean => ValueOrRef::Boolean(index != 0),
-        }
-    }
-
-    pub(crate) fn validate<FValidate>(&self, mut validate: FValidate) -> Result<(), ExpressionError>
-    where
-        FValidate: FnMut(Option<&ValueOrRef<'a>>) -> Result<(), ExpressionError>,
-    {
-        match self {
-            DictionaryValueArray::ArrayRef(a) => validate_array(*a, validate),
-            DictionaryValueArray::VecAnyOwned(a) => {
-                for i in a.as_ref() {
-                    validate(Some(i))?;
-                }
-
-                Ok(())
-            }
-            DictionaryValueArray::IndexAnyOwned(a) => {
-                for i in a.as_ref() {
-                    validate(Some(i))?;
-                }
-
-                Ok(())
-            }
-            DictionaryValueArray::Boolean => {
-                validate(Some(&ValueOrRef::Boolean(false)))?;
-                validate(Some(&ValueOrRef::Boolean(true)))
-            }
         }
     }
 
@@ -581,118 +553,5 @@ pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> ValueOrRe
 
             d => todo!("{d} is not implemented"),
         }
-    }
-}
-
-fn validate_array<'a, FValidate>(
-    value: &'a dyn Array,
-    mut validate: FValidate,
-) -> Result<(), ExpressionError>
-where
-    FValidate: FnMut(Option<&ValueOrRef<'a>>) -> Result<(), ExpressionError>,
-{
-    match value.data_type() {
-        DataType::Int8 => {
-            for v in value.as_primitive::<Int8Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::Int16 => {
-            for v in value.as_primitive::<Int16Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::Int32 => {
-            for v in value.as_primitive::<Int32Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::Int64 => {
-            for v in value.as_primitive::<Int64Type>().into_iter() {
-                validate(v.map(ValueOrRef::Integer).as_ref())?;
-            }
-
-            Ok(())
-        }
-
-        DataType::UInt8 => {
-            for v in value.as_primitive::<UInt8Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::UInt16 => {
-            for v in value.as_primitive::<UInt16Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::UInt32 => {
-            for v in value.as_primitive::<UInt32Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::UInt64 => {
-            for v in value.as_primitive::<UInt64Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Integer(v as i64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-
-        DataType::Float16 => {
-            for v in value.as_primitive::<Float16Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Double(v.into())).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::Float32 => {
-            for v in value.as_primitive::<Float32Type>().into_iter() {
-                validate(v.map(|v| ValueOrRef::Double(v as f64)).as_ref())?;
-            }
-
-            Ok(())
-        }
-        DataType::Float64 => {
-            for v in value.as_primitive::<Float64Type>().into_iter() {
-                validate(v.map(ValueOrRef::Double).as_ref())?;
-            }
-
-            Ok(())
-        }
-
-        DataType::Utf8 => {
-            for v in value.as_string::<i32>().into_iter() {
-                validate(
-                    v.map(|v| ValueOrRef::String(StringValueOrRef::Ref(v)))
-                        .as_ref(),
-                )?;
-            }
-
-            Ok(())
-        }
-        DataType::LargeUtf8 => {
-            for v in value.as_string::<i64>().into_iter() {
-                validate(
-                    v.map(|v| ValueOrRef::String(StringValueOrRef::Ref(v)))
-                        .as_ref(),
-                )?;
-            }
-
-            Ok(())
-        }
-
-        d => todo!("{d} is not implemented"),
     }
 }
