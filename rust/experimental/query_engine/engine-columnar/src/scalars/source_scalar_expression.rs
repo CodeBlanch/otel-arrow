@@ -10,7 +10,7 @@ use crate::{
 pub fn execute_source_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     source_scalar_expression: &'pipeline SourceScalarExpression,
-) -> Result<ResolvedScalarValue<'c>, ExpressionError>
+) -> ResolvedScalarValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -23,7 +23,7 @@ where
                 source_scalar_expression,
                 || "Source could not be found".into(),
             );
-            return Ok(ResolvedScalarValue::new_null());
+            return ResolvedScalarValue::new_null();
         }
     };
 
@@ -79,7 +79,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Source(select_valid_key),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => assert_eq!(values_dictionary, actual),
                 _ => panic!("test failure"),
             },
@@ -99,7 +99,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Source(select_invalid_key),
             |r| {
-                matches!(r, Ok(ResolvedScalarValue::Single(ValueOrRef::Null)));
+                matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
             },
         );
 
@@ -110,7 +110,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Source(select_root),
             |r| {
-                matches!(r, Ok(ResolvedScalarValue::Table(_)));
+                matches!(r, ResolvedScalarValue::Table(_));
             },
         );
 
@@ -132,7 +132,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Source(select_sub_key),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -164,7 +164,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Source(select_sub_key_invalid),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(vec![None, None, None, None, None, None], vec![]),
@@ -208,7 +208,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Source(select_sub_index),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -240,7 +240,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Source(select_sub_index_negative),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -272,7 +272,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Source(select_sub_index_invalid),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(vec![None, None, None, None], vec![]),
@@ -377,7 +377,7 @@ mod tests {
                 ("keys".into(), keys_dictionary.clone()),
             ])),
             ScalarExpression::Source(select_sub_key),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -428,7 +428,7 @@ mod tests {
                 ("indicies".into(), indicies_dictionary.clone()),
             ])),
             ScalarExpression::Source(select_sub_element),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(

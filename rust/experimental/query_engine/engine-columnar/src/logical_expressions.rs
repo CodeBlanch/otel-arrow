@@ -20,7 +20,7 @@ where
 {
     let value = match logical_expression {
         LogicalExpression::Scalar(s) => {
-            let inner_value = execute_scalar_expression(execution_context, s)?;
+            let inner_value = execute_scalar_expression(execution_context, s);
 
             inner_value.map_into(
                 |single| {
@@ -89,8 +89,8 @@ where
             )?
         }
         LogicalExpression::EqualTo(e) => compare(
-            execute_scalar_expression(execution_context, e.get_left())?,
-            execute_scalar_expression(execution_context, e.get_right())?,
+            execute_scalar_expression(execution_context, e.get_left()),
+            execute_scalar_expression(execution_context, e.get_right()),
             |l, r| match Value::are_values_equal(
                 e.get_query_location(),
                 l,
@@ -109,8 +109,8 @@ where
             },
         ),
         LogicalExpression::GreaterThan(g) => compare(
-            execute_scalar_expression(execution_context, g.get_left())?,
-            execute_scalar_expression(execution_context, g.get_right())?,
+            execute_scalar_expression(execution_context, g.get_left()),
+            execute_scalar_expression(execution_context, g.get_right()),
             |l, r| match (l, r) {
                 (Value::Null, _) => false,
                 (_, Value::Null) => false,
@@ -128,8 +128,8 @@ where
             },
         ),
         LogicalExpression::GreaterThanOrEqualTo(g) => compare(
-            execute_scalar_expression(execution_context, g.get_left())?,
-            execute_scalar_expression(execution_context, g.get_right())?,
+            execute_scalar_expression(execution_context, g.get_left()),
+            execute_scalar_expression(execution_context, g.get_right()),
             |l, r| match (l, r) {
                 (Value::Null, Value::Null) => true,
                 (Value::Null, _) => false,
@@ -239,8 +239,8 @@ where
                 },
             )?,
         LogicalExpression::Contains(c) => compare(
-            execute_scalar_expression(execution_context, c.get_haystack())?,
-            execute_scalar_expression(execution_context, c.get_needle())?,
+            execute_scalar_expression(execution_context, c.get_haystack()),
+            execute_scalar_expression(execution_context, c.get_needle()),
             |l, r| match Value::contains(c.get_query_location(), l, r, c.get_case_insensitive()) {
                 Ok(v) => v,
                 Err(err) => {
@@ -254,8 +254,8 @@ where
             },
         ),
         LogicalExpression::Matches(m) => compare(
-            execute_scalar_expression(execution_context, m.get_haystack())?,
-            execute_scalar_expression(execution_context, m.get_pattern())?,
+            execute_scalar_expression(execution_context, m.get_haystack()),
+            execute_scalar_expression(execution_context, m.get_pattern()),
             |l, r| match Value::matches(m.get_query_location(), l, r) {
                 Ok(v) => v,
                 Err(err) => {

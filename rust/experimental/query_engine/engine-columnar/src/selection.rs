@@ -17,7 +17,7 @@ pub(crate) fn select_from_record_table<'a, 'pipeline, 'c, TRecords: ColumnarReco
     key_data_type: DataType,
     root: &'a dyn RecordTable,
     selectors: &'pipeline [ScalarExpression],
-) -> Result<ResolvedScalarValue<'c>, ExpressionError>
+) -> ResolvedScalarValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -25,13 +25,13 @@ where
     let mut current = ResolvedScalarValue::Table(root);
 
     for selector in selectors {
-        let next = execute_scalar_expression(execution_context, selector)?.map_into_with_state(
+        let next = execute_scalar_expression(execution_context, selector).map_into_with_state(
             current,
             |current, s| match s {
                 ValueOrRef::String(key) => match current {
-                    ResolvedScalarValue::Table(t) => Ok(t.get_values(key.get_value())),
+                    ResolvedScalarValue::Table(t) => t.get_values(key.get_value()),
                     ResolvedScalarValue::Dictionary(d) => {
-                        Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
+                        Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Map(m) = v {
                                 match m {
                                     MapValueOrRef::Ref(m) => m.get(key.get_value()).map_or(ValueOrRef::Null, |v| v.to_value().into()),
@@ -45,13 +45,13 @@ where
                                 );
                                 ValueOrRef::Null
                             }
-                        }))))
+                        })))
                     }
                     ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                 },
                 ValueOrRef::Integer(index) => match current {
                     ResolvedScalarValue::Dictionary(d) => {
-                        Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
+                        Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Array(a) = v {
                                 let len = a.len();
                                 let mut index = index.get_value();
@@ -76,7 +76,7 @@ where
                                 );
                                 ValueOrRef::Null
                             }
-                        }))))
+                        })))
                     }
                     ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                     ResolvedScalarValue::Table(_) => {
@@ -85,7 +85,7 @@ where
                             expression,
                             || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", index.get_value()),
                         );
-                        Ok(None)
+                        None
                     }
                 }
                 v => {
@@ -94,11 +94,11 @@ where
                         expression,
                         || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
                     );
-                    Ok(None)
+                    None
                 }
             },
             |current, dictionary| {
-                Ok(Some(match key_data_type {
+                Some(match key_data_type {
                     DataType::UInt8 => select_using_dictionary::<UInt8Type, TRecords>(execution_context, expression, &current, dictionary),
                     DataType::UInt16 => select_using_dictionary::<UInt16Type, TRecords>(execution_context, expression, &current, dictionary),
                     DataType::UInt32 => select_using_dictionary::<UInt32Type, TRecords>(execution_context, expression, &current, dictionary),
@@ -110,7 +110,7 @@ where
                     DataType::Int64 => select_using_dictionary::<Int64Type, TRecords>(execution_context, expression, &current, dictionary),
 
                     _ => panic!("Key type is not supported"),
-                }))
+                })
             },
             |_, _| {
                 execution_context.add_diagnostic_if_enabled(
@@ -118,9 +118,9 @@ where
                     expression,
                     || "Unexpected scalar expression with Map value type encountered in accessor expression".into(),
                 );
-                Ok(None)
+                None
             }
-        )?;
+        );
 
         match next {
             None => {
@@ -134,7 +134,7 @@ where
         }
     }
 
-    Ok(current)
+    current
 }
 
 fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: ColumnarRecords>(

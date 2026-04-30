@@ -18,14 +18,14 @@ use crate::{
 pub fn execute_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     scalar_expression: &'pipeline ScalarExpression,
-) -> Result<ResolvedScalarValue<'c>, ExpressionError>
+) -> ResolvedScalarValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
 {
     let value = match scalar_expression {
         ScalarExpression::Argument(_) => todo!(),
-        ScalarExpression::Attached(a) => execute_attached_scalar_expression(execution_context, a)?,
+        ScalarExpression::Attached(a) => execute_attached_scalar_expression(execution_context, a),
         ScalarExpression::Case(_) => todo!(),
         ScalarExpression::Coalesce(_) => todo!(),
         ScalarExpression::Collection(_) => todo!(),
@@ -34,13 +34,13 @@ where
         ScalarExpression::Convert(_) => todo!(),
         ScalarExpression::GetType(_) => todo!(),
         ScalarExpression::InvokeFunction(_) => todo!(),
-        ScalarExpression::Length(l) => execute_length_scalar_expression(execution_context, l)?,
+        ScalarExpression::Length(l) => execute_length_scalar_expression(execution_context, l),
         ScalarExpression::Logical(_) => todo!(),
         ScalarExpression::Math(_) => todo!(),
         ScalarExpression::Parse(_) => todo!(),
         ScalarExpression::Select(_) => todo!(),
-        ScalarExpression::Slice(s) => execute_slice_scalar_expression(execution_context, s)?,
-        ScalarExpression::Source(s) => execute_source_scalar_expression(execution_context, s)?,
+        ScalarExpression::Slice(s) => execute_slice_scalar_expression(execution_context, s),
+        ScalarExpression::Source(s) => execute_source_scalar_expression(execution_context, s),
         ScalarExpression::Static(s) => ResolvedScalarValue::new_from_value(s.to_value()),
         ScalarExpression::Temporal(_) => todo!(),
         ScalarExpression::Text(_) => todo!(),
@@ -53,5 +53,5 @@ where
         || format!("Evaluated as: {value}"),
     );
 
-    Ok(value)
+    value
 }

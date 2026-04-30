@@ -12,7 +12,7 @@ use crate::{
 pub fn execute_length_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     length_scalar_expression: &'pipeline LengthScalarExpression,
-) -> Result<ResolvedScalarValue<'c>, ExpressionError>
+) -> ResolvedScalarValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -20,16 +20,32 @@ where
     let inner_value = execute_scalar_expression(
         execution_context,
         length_scalar_expression.get_inner_expression(),
-    )?;
+    );
 
     inner_value.map_into(
-        |single| {
-            Ok(match single {
-                ValueOrRef::String(s) => ResolvedScalarValue::new_int(s.char_len() as i64),
-                ValueOrRef::Array(a) => {
-                    ResolvedScalarValue::new_int(a.as_array_value().len() as i64)
-                }
-                ValueOrRef::Map(m) => ResolvedScalarValue::new_int(m.as_map_value().len() as i64),
+        |single| match single {
+            ValueOrRef::String(s) => ResolvedScalarValue::new_int(s.char_len() as i64),
+            ValueOrRef::Array(a) => ResolvedScalarValue::new_int(a.as_array_value().len() as i64),
+            ValueOrRef::Map(m) => ResolvedScalarValue::new_int(m.as_map_value().len() as i64),
+            v => {
+                execution_context.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    length_scalar_expression,
+                    || {
+                        format!(
+                            "Cannot calculate the length of '{}' input",
+                            v.get_value_type()
+                        )
+                    },
+                );
+                ResolvedScalarValue::new_null()
+            }
+        },
+        |dictionary| {
+            ResolvedScalarValue::Dictionary(dictionary.transform_into_any(|v| match v {
+                ValueOrRef::String(s) => ValueOrRef::Integer(s.char_len() as i64),
+                ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
+                ValueOrRef::Array(a) => ValueOrRef::Integer(a.as_array_value().len() as i64),
                 v => {
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
@@ -41,31 +57,9 @@ where
                             )
                         },
                     );
-                    ResolvedScalarValue::new_null()
+                    ValueOrRef::Null
                 }
-            })
-        },
-        |dictionary| {
-            Ok(ResolvedScalarValue::Dictionary(
-                dictionary.transform_into_any(|v| match v {
-                    ValueOrRef::String(s) => ValueOrRef::Integer(s.char_len() as i64),
-                    ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
-                    ValueOrRef::Array(a) => ValueOrRef::Integer(a.as_array_value().len() as i64),
-                    v => {
-                        execution_context.add_diagnostic_if_enabled(
-                            ColumnarEngineDiagnosticLevel::Warn,
-                            length_scalar_expression,
-                            || {
-                                format!(
-                                    "Cannot calculate the length of '{}' input",
-                                    v.get_value_type()
-                                )
-                            },
-                        );
-                        ValueOrRef::Null
-                    }
-                }),
-            ))
+            }))
         },
         |_| {
             // what is length of table? a dictionary where each record points to a count of key\values?
@@ -96,7 +90,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Length(length_string),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::Integer(&11), actual.to_value());
                 }
@@ -115,7 +109,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Length(length_array),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::Integer(&0), actual.to_value());
                 }
@@ -134,7 +128,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Length(length_map),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::Integer(&0), actual.to_value());
                 }
@@ -177,7 +171,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Length(length),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(

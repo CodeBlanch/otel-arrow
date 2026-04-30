@@ -15,7 +15,7 @@ pub(crate) fn run_scalar_expression_test<FValidate>(
     expression: ScalarExpression,
     validate: FValidate,
 ) where
-    for<'a> FValidate: FnOnce(Result<ResolvedScalarValue<'a>, ExpressionError>),
+    for<'a> FValidate: FnOnce(ResolvedScalarValue<'a>),
 {
     let d = RefCell::new(vec![]);
 

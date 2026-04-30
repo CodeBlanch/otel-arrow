@@ -10,27 +10,27 @@ use crate::{
 pub fn execute_slice_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     slice_scalar_expression: &'pipeline SliceScalarExpression,
-) -> Result<ResolvedScalarValue<'c>, ExpressionError>
+) -> ResolvedScalarValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
 {
     let inner_value =
-        execute_scalar_expression(execution_context, slice_scalar_expression.get_source())?;
+        execute_scalar_expression(execution_context, slice_scalar_expression.get_source());
 
     let range_start_inclusive_expression = slice_scalar_expression.get_range_start();
     let range_start_inclusive = match range_start_inclusive_expression {
-        Some(start) => execute_scalar_expression(execution_context, start)?,
+        Some(start) => execute_scalar_expression(execution_context, start),
         None => ResolvedScalarValue::new_int(0),
     };
 
     let range_length_expression = slice_scalar_expression.get_range_length();
     let range_length = match range_length_expression {
-        Some(length) => execute_scalar_expression(execution_context, length)?,
+        Some(length) => execute_scalar_expression(execution_context, length),
         None => ResolvedScalarValue::new_null(),
     };
 
-    Ok(match (range_start_inclusive, range_length) {
+    match (range_start_inclusive, range_length) {
         (
             ResolvedScalarValue::Single(range_start_inclusive_single),
             ResolvedScalarValue::Single(range_length_single),
@@ -74,8 +74,73 @@ where
             };
 
             inner_value.map_into(
-                |single| {
-                    Ok(match single {
+                |single| match single {
+                    ValueOrRef::String(string_value) => {
+                        match SliceScalarExpression::validate_slice_range(
+                            slice_scalar_expression.get_query_location(),
+                            "String",
+                            string_value.char_len(),
+                            range_start_inclusive,
+                            range_length,
+                        ) {
+                            Ok(range_end_exclusive) => StringValueOrRef::new_slice(
+                                string_value,
+                                range_start_inclusive,
+                                range_end_exclusive,
+                            )
+                            .into(),
+                            Err(e) => {
+                                execution_context.add_diagnostic(ColumnarEngineDiagnostic::new(
+                                    ColumnarEngineDiagnosticLevel::Error,
+                                    slice_scalar_expression,
+                                    e.into_parts().1,
+                                ));
+                                ResolvedScalarValue::new_null()
+                            }
+                        }
+                    }
+                    ValueOrRef::Array(array_value) => {
+                        match SliceScalarExpression::validate_slice_range(
+                            slice_scalar_expression.get_query_location(),
+                            "Array",
+                            array_value.len(),
+                            range_start_inclusive,
+                            range_length,
+                        ) {
+                            Ok(range_end_exclusive) => {
+                                ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
+                                    array_value,
+                                    range_start_inclusive,
+                                    range_end_exclusive,
+                                ))
+                                .into()
+                            }
+                            Err(e) => {
+                                execution_context.add_diagnostic(ColumnarEngineDiagnostic::new(
+                                    ColumnarEngineDiagnosticLevel::Error,
+                                    slice_scalar_expression,
+                                    e.into_parts().1,
+                                ));
+                                ResolvedScalarValue::new_null()
+                            }
+                        }
+                    }
+                    single => {
+                        execution_context.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Warn,
+                            slice_scalar_expression,
+                            || {
+                                format!(
+                                    "Cannot take a slice of '{}' input",
+                                    single.get_value_type()
+                                )
+                            },
+                        );
+                        ResolvedScalarValue::new_null()
+                    }
+                },
+                |dictionary| {
+                    ResolvedScalarValue::Dictionary(dictionary.transform_into_any(|v| match v {
                         ValueOrRef::String(string_value) => {
                             match SliceScalarExpression::validate_slice_range(
                                 slice_scalar_expression.get_query_location(),
@@ -84,12 +149,13 @@ where
                                 range_start_inclusive,
                                 range_length,
                             ) {
-                                Ok(range_end_exclusive) => StringValueOrRef::new_slice(
-                                    string_value,
-                                    range_start_inclusive,
-                                    range_end_exclusive,
-                                )
-                                .into(),
+                                Ok(range_end_exclusive) => {
+                                    ValueOrRef::String(StringValueOrRef::new_slice(
+                                        string_value,
+                                        range_start_inclusive,
+                                        range_end_exclusive,
+                                    ))
+                                }
                                 Err(e) => {
                                     execution_context.add_diagnostic(
                                         ColumnarEngineDiagnostic::new(
@@ -98,7 +164,7 @@ where
                                             e.into_parts().1,
                                         ),
                                     );
-                                    ResolvedScalarValue::new_null()
+                                    ValueOrRef::Null
                                 }
                             }
                         }
@@ -110,14 +176,13 @@ where
                                 range_start_inclusive,
                                 range_length,
                             ) {
-                                Ok(range_end_exclusive) => {
+                                Ok(range_end_exclusive) => ValueOrRef::Array(
                                     ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
                                         array_value,
                                         range_start_inclusive,
                                         range_end_exclusive,
-                                    ))
-                                    .into()
-                                }
+                                    )),
+                                ),
                                 Err(e) => {
                                     execution_context.add_diagnostic(
                                         ColumnarEngineDiagnostic::new(
@@ -126,97 +191,19 @@ where
                                             e.into_parts().1,
                                         ),
                                     );
-                                    ResolvedScalarValue::new_null()
+                                    ValueOrRef::Null
                                 }
                             }
                         }
-                        single => {
+                        v => {
                             execution_context.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
                                 slice_scalar_expression,
-                                || {
-                                    format!(
-                                        "Cannot take a slice of '{}' input",
-                                        single.get_value_type()
-                                    )
-                                },
+                                || format!("Cannot take a slice of '{}' input", v.get_value_type()),
                             );
-                            ResolvedScalarValue::new_null()
+                            ValueOrRef::Null
                         }
-                    })
-                },
-                |dictionary| {
-                    Ok(ResolvedScalarValue::Dictionary(
-                        dictionary.transform_into_any(|v| match v {
-                            ValueOrRef::String(string_value) => {
-                                match SliceScalarExpression::validate_slice_range(
-                                    slice_scalar_expression.get_query_location(),
-                                    "String",
-                                    string_value.char_len(),
-                                    range_start_inclusive,
-                                    range_length,
-                                ) {
-                                    Ok(range_end_exclusive) => {
-                                        ValueOrRef::String(StringValueOrRef::new_slice(
-                                            string_value,
-                                            range_start_inclusive,
-                                            range_end_exclusive,
-                                        ))
-                                    }
-                                    Err(e) => {
-                                        execution_context.add_diagnostic(
-                                            ColumnarEngineDiagnostic::new(
-                                                ColumnarEngineDiagnosticLevel::Error,
-                                                slice_scalar_expression,
-                                                e.into_parts().1,
-                                            ),
-                                        );
-                                        ValueOrRef::Null
-                                    }
-                                }
-                            }
-                            ValueOrRef::Array(array_value) => {
-                                match SliceScalarExpression::validate_slice_range(
-                                    slice_scalar_expression.get_query_location(),
-                                    "Array",
-                                    array_value.len(),
-                                    range_start_inclusive,
-                                    range_length,
-                                ) {
-                                    Ok(range_end_exclusive) => ValueOrRef::Array(
-                                        ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
-                                            array_value,
-                                            range_start_inclusive,
-                                            range_end_exclusive,
-                                        )),
-                                    ),
-                                    Err(e) => {
-                                        execution_context.add_diagnostic(
-                                            ColumnarEngineDiagnostic::new(
-                                                ColumnarEngineDiagnosticLevel::Error,
-                                                slice_scalar_expression,
-                                                e.into_parts().1,
-                                            ),
-                                        );
-                                        ValueOrRef::Null
-                                    }
-                                }
-                            }
-                            v => {
-                                execution_context.add_diagnostic_if_enabled(
-                                    ColumnarEngineDiagnosticLevel::Warn,
-                                    slice_scalar_expression,
-                                    || {
-                                        format!(
-                                            "Cannot take a slice of '{}' input",
-                                            v.get_value_type()
-                                        )
-                                    },
-                                );
-                                ValueOrRef::Null
-                            }
-                        }),
-                    ))
+                    }))
                 },
                 |_| {
                     execution_context.add_diagnostic_if_enabled(
@@ -224,9 +211,9 @@ where
                         slice_scalar_expression,
                         || "Cannot take a slice of Map input".into(),
                     );
-                    Ok(ResolvedScalarValue::new_null())
+                    ResolvedScalarValue::new_null()
                 },
-            )?
+            )
         }
         (range_start_inclusive, range_length) => {
             // Note: What we know here is that range_start_inclusive and\or range_end_exclusive is a dictionary.
@@ -242,7 +229,7 @@ where
                         slice_scalar_expression,
                         || "Cannot take a slice of Map input".into(),
                     );
-                    return Ok(ResolvedScalarValue::new_null());
+                    return ResolvedScalarValue::new_null();
                 }
             };
 
@@ -254,7 +241,7 @@ where
                         slice_scalar_expression.get_source(),
                         || "Cannot take a slice of Map input".into(),
                     );
-                    return Ok(ResolvedScalarValue::new_null());
+                    return ResolvedScalarValue::new_null();
                 }
             };
 
@@ -270,7 +257,7 @@ where
                             .unwrap_or(slice_scalar_expression),
                         || "Range start for a slice expression should be an integer type".into(),
                     );
-                    return Ok(ResolvedScalarValue::new_null());
+                    return ResolvedScalarValue::new_null();
                 }
             };
 
@@ -284,7 +271,7 @@ where
                             .unwrap_or(slice_scalar_expression),
                         || "Range end for a slice expression should be an integer type".into(),
                     );
-                    return Ok(ResolvedScalarValue::new_null());
+                    return ResolvedScalarValue::new_null();
                 }
             };
 
@@ -411,7 +398,7 @@ where
                 },
             ))
         }
-    })
+    }
 }
 
 #[cfg(test)]
@@ -437,7 +424,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_no_ranges),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::String(&"hello world"), actual.to_value());
                 }
@@ -460,7 +447,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_full_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::String(&"hello world"), actual.to_value());
                 }
@@ -485,7 +472,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(Value::String(&"lo"), actual.to_value());
                 }
@@ -509,7 +496,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_invalid_range),
             |r| {
-                matches!(r, Ok(ResolvedScalarValue::Single(ValueOrRef::Null)));
+                matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
             },
         );
     }
@@ -548,7 +535,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_no_ranges),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(
                         Value::Array(&ArrayScalarExpression::new(
@@ -577,7 +564,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_full_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(
                         Value::Array(&ArrayScalarExpression::new(
@@ -608,7 +595,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(actual) => {
                     assert_eq!(
                         Value::Array(&ArrayScalarExpression::new(
@@ -647,7 +634,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_invalid_range),
             |r| {
-                matches!(r, Ok(ResolvedScalarValue::Single(ValueOrRef::Null)));
+                matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
             },
         );
     }
@@ -743,7 +730,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Slice(slice_ranges),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -785,7 +772,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Slice(slice_ranges_long),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -823,7 +810,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::new()),
             ScalarExpression::Slice(slice_null),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Single(ValueOrRef::Null) => {}
                 _ => panic!("test failure"),
             },
@@ -961,7 +948,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::from([("values".into(), values_dictionary)])),
             ScalarExpression::Slice(slice_invalid_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(vec![None, None, None, None, None, None], vec![]),
@@ -1071,7 +1058,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Slice(slice_ranges),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -1112,7 +1099,7 @@ mod tests {
                 values_dictionary.clone(),
             )])),
             ScalarExpression::Slice(slice_ranges_long),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -1153,7 +1140,7 @@ mod tests {
         run_scalar_expression_test(
             TestRecords::new(HashMap::from([("values".into(), values_dictionary)])),
             ScalarExpression::Slice(slice_invalid_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(vec![None, None, None, None], vec![]),
@@ -1234,7 +1221,7 @@ mod tests {
                 ("range_length_values".into(), range_length_values.clone()),
             ])),
             ScalarExpression::Slice(slice_all_dictionary),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -1292,7 +1279,7 @@ mod tests {
                 range_invalid.clone(),
             )])),
             ScalarExpression::Slice(slice_invalid_start),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -1332,7 +1319,7 @@ mod tests {
                 range_invalid,
             )])),
             ScalarExpression::Slice(slice_invalid_length),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -1376,7 +1363,7 @@ mod tests {
                 range_length_empty,
             )])),
             ScalarExpression::Slice(slice_invalid_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(build_indexset_dictionary(vec![None], vec![]), actual);
                 }
@@ -1451,7 +1438,7 @@ mod tests {
                 ("range_length_values".into(), range_length_values.clone()),
             ])),
             ScalarExpression::Slice(slice_all_dictionary),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
                         build_indexset_dictionary(
@@ -1507,7 +1494,7 @@ mod tests {
                 range_length_empty,
             )])),
             ScalarExpression::Slice(slice_invalid_range),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(build_indexset_dictionary(vec![None], vec![]), actual);
                 }
@@ -1516,8 +1503,8 @@ mod tests {
         );
     }
 
-    fn valid_full_string_range_result(result: Result<ResolvedScalarValue<'_>, ExpressionError>) {
-        match result.unwrap() {
+    fn valid_full_string_range_result(result: ResolvedScalarValue<'_>) {
+        match result {
             ResolvedScalarValue::Dictionary(actual) => {
                 assert_eq!(
                     build_indexset_dictionary(
@@ -1535,8 +1522,8 @@ mod tests {
         }
     }
 
-    fn valid_full_array_range_result(result: Result<ResolvedScalarValue<'_>, ExpressionError>) {
-        match result.unwrap() {
+    fn valid_full_array_range_result(result: ResolvedScalarValue<'_>) {
+        match result {
             ResolvedScalarValue::Dictionary(actual) => {
                 assert_eq!(
                     build_indexset_dictionary(

@@ -10,7 +10,7 @@ use crate::{
 pub fn execute_attached_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     attached_scalar_expression: &'pipeline AttachedScalarExpression,
-) -> Result<ResolvedScalarValue<'c>, ExpressionError>
+) -> ResolvedScalarValue<'c>
 where
     'a: 'c,
     'pipeline: 'c,
@@ -23,7 +23,7 @@ where
                 attached_scalar_expression,
                 || "Attached data could not be found".into(),
             );
-            return Ok(ResolvedScalarValue::new_null());
+            return ResolvedScalarValue::new_null();
         }
     };
 
@@ -37,7 +37,7 @@ where
                 attached_scalar_expression,
                 || format!("Attached record matching name '{name}' could not be found"),
             );
-            return Ok(ResolvedScalarValue::new_null());
+            return ResolvedScalarValue::new_null();
         }
     };
 
@@ -94,7 +94,7 @@ mod tests {
                 )]),
             ),
             ScalarExpression::Attached(select_valid_attached_data),
-            |r| match r.unwrap() {
+            |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => assert_eq!(values_dictionary, actual),
                 _ => panic!("test failure"),
             },
@@ -115,7 +115,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Attached(select_invalid_attached_data),
             |r| {
-                matches!(r, Ok(ResolvedScalarValue::Single(ValueOrRef::Null)));
+                matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
             },
         );
 
@@ -129,7 +129,7 @@ mod tests {
             TestRecords::new(HashMap::new()),
             ScalarExpression::Attached(select_root),
             |r| {
-                matches!(r, Ok(ResolvedScalarValue::Table(_)));
+                matches!(r, ResolvedScalarValue::Table(_));
             },
         );
     }
