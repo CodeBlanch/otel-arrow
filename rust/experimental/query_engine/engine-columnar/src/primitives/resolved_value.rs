@@ -44,11 +44,11 @@ impl<'a> ResolvedScalarValue<'a> {
         when_single: FSingle,
         when_dictionary: FDictionary,
         when_table: FTable,
-    ) -> Result<FRet, ExpressionError>
+    ) -> FRet
     where
-        FSingle: FnOnce(ValueOrRef<'a>) -> Result<FRet, ExpressionError>,
-        FDictionary: FnOnce(Dictionary<'a>) -> Result<FRet, ExpressionError>,
-        FTable: FnOnce(&'a dyn RecordTable) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(ValueOrRef<'a>) -> FRet,
+        FDictionary: FnOnce(Dictionary<'a>) -> FRet,
+        FTable: FnOnce(&'a dyn RecordTable) -> FRet,
     {
         match self {
             ResolvedScalarValue::Single(single) => when_single(single),
@@ -63,11 +63,11 @@ impl<'a> ResolvedScalarValue<'a> {
         when_single: FSingle,
         when_dictionary: FDictionary,
         when_table: FTable,
-    ) -> Result<FRet, ExpressionError>
+    ) -> FRet
     where
-        FSingle: FnOnce(TState, ValueOrRef<'a>) -> Result<FRet, ExpressionError>,
-        FDictionary: FnOnce(TState, Dictionary<'a>) -> Result<FRet, ExpressionError>,
-        FTable: FnOnce(TState, &'a dyn RecordTable) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(TState, ValueOrRef<'a>) -> FRet,
+        FDictionary: FnOnce(TState, Dictionary<'a>) -> FRet,
+        FTable: FnOnce(TState, &'a dyn RecordTable) -> FRet,
     {
         match self {
             ResolvedScalarValue::Single(single) => when_single(state, single),
@@ -146,14 +146,10 @@ pub(crate) enum ResolvedLogicalValue<'a> {
 }
 
 impl<'a> ResolvedLogicalValue<'a> {
-    pub fn map_into<FSingle, FArray, FRet>(
-        self,
-        when_single: FSingle,
-        when_array: FArray,
-    ) -> Result<FRet, ExpressionError>
+    pub fn map_into<FSingle, FArray, FRet>(self, when_single: FSingle, when_array: FArray) -> FRet
     where
-        FSingle: FnOnce(bool) -> Result<FRet, ExpressionError>,
-        FArray: FnOnce(ResolvedBooleanArray<'a>) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(bool) -> FRet,
+        FArray: FnOnce(ResolvedBooleanArray<'a>) -> FRet,
     {
         match self {
             ResolvedLogicalValue::Single(single) => when_single(single),
@@ -166,10 +162,10 @@ impl<'a> ResolvedLogicalValue<'a> {
         state: TState,
         when_single: FSingle,
         when_array: FArray,
-    ) -> Result<FRet, ExpressionError>
+    ) -> FRet
     where
-        FSingle: FnOnce(TState, bool) -> Result<FRet, ExpressionError>,
-        FArray: FnOnce(TState, ResolvedBooleanArray<'a>) -> Result<FRet, ExpressionError>,
+        FSingle: FnOnce(TState, bool) -> FRet,
+        FArray: FnOnce(TState, ResolvedBooleanArray<'a>) -> FRet,
     {
         match self {
             ResolvedLogicalValue::Single(single) => when_single(state, single),
