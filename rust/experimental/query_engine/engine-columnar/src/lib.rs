@@ -10,6 +10,7 @@ pub(crate) mod scalars;
 pub(crate) mod selection;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+pub(crate) mod transform;
 
 pub use engine::*;
 pub use engine_diagnostic::*;

@@ -15,6 +15,7 @@ use crate::{
     execution_context::ExecutionContext,
     logical_expressions::execute_logical_expression,
     resolved_value::*,
+    transform::set_transform_expression::execute_set_transform_expression,
     *,
 };
 
@@ -244,7 +245,25 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                     return;
                 }
                 DataExpression::Summary(_) => todo!(),
-                DataExpression::Transform(_) => todo!(),
+                DataExpression::Transform(t) => {
+                    if let Err(e) = match t {
+                        TransformExpression::Move(_) => todo!(),
+                        TransformExpression::ReduceMap(_) => todo!(),
+                        TransformExpression::Remove(_) => todo!(),
+                        TransformExpression::RemoveMapKeys(_) => todo!(),
+                        TransformExpression::RenameMapKeys(_) => todo!(),
+                        TransformExpression::Set(s) => {
+                            execute_set_transform_expression(&execution_context, s)
+                        }
+                    } {
+                        execution_context.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Error,
+                            t,
+                            || e.into_parts().1,
+                        );
+                        break;
+                    }
+                }
                 DataExpression::Conditional(_) => todo!(),
                 DataExpression::Output(_) => todo!(),
             }
