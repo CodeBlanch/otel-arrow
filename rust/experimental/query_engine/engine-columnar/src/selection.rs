@@ -34,8 +34,8 @@ where
                         Ok(Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Map(m) = v {
                                 match m {
-                                    MapValueOrRef::Ref(m) => Ok(m.get(key.get_value()).map_or(ValueOrRef::Null, |v| v.to_value().into())),
-                                    MapValueOrRef::Owned(m) => Ok(m.get_values().get(key.get_value()).map_or(ValueOrRef::Null, |v| v.clone()))
+                                    MapValueOrRef::Ref(m) => m.get(key.get_value()).map_or(ValueOrRef::Null, |v| v.to_value().into()),
+                                    MapValueOrRef::Owned(m) => m.get_values().get(key.get_value()).map_or(ValueOrRef::Null, |v| v.clone())
                                 }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
@@ -43,9 +43,9 @@ where
                                     expression,
                                     || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), v.get_value_type()),
                                 );
-                                Ok(ValueOrRef::Null)
+                                ValueOrRef::Null
                             }
-                        })?)))
+                        }))))
                     }
                     ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                 },
@@ -64,9 +64,9 @@ where
                                         expression,
                                         || format!("Array index '{index}' specified in accessor expression is invalid"),
                                     );
-                                    Ok(ValueOrRef::Null)
+                                    ValueOrRef::Null
                                 } else {
-                                    Ok(a.get(index as usize))
+                                    a.get(index as usize)
                                 }
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
@@ -74,9 +74,9 @@ where
                                     expression,
                                     || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", index.get_value(), v.get_value_type()),
                                 );
-                                Ok(ValueOrRef::Null)
+                                ValueOrRef::Null
                             }
-                        })?)))
+                        }))))
                     }
                     ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
                     ResolvedScalarValue::Table(_) => {

@@ -146,79 +146,77 @@ where
                     })
                 },
                 |dictionary| {
-                    dictionary
-                        .transform_into_any(|v| {
-                            Ok(match v {
-                                ValueOrRef::String(string_value) => {
-                                    match SliceScalarExpression::validate_slice_range(
-                                        slice_scalar_expression.get_query_location(),
-                                        "String",
-                                        string_value.char_len(),
-                                        range_start_inclusive,
-                                        range_length,
-                                    ) {
-                                        Ok(range_end_exclusive) => {
-                                            ValueOrRef::String(StringValueOrRef::new_slice(
-                                                string_value,
-                                                range_start_inclusive,
-                                                range_end_exclusive,
-                                            ))
-                                        }
-                                        Err(e) => {
-                                            execution_context.add_diagnostic(
-                                                ColumnarEngineDiagnostic::new(
-                                                    ColumnarEngineDiagnosticLevel::Error,
-                                                    slice_scalar_expression,
-                                                    e.into_parts().1,
-                                                ),
-                                            );
-                                            ValueOrRef::Null
-                                        }
+                    Ok(ResolvedScalarValue::Dictionary(
+                        dictionary.transform_into_any(|v| match v {
+                            ValueOrRef::String(string_value) => {
+                                match SliceScalarExpression::validate_slice_range(
+                                    slice_scalar_expression.get_query_location(),
+                                    "String",
+                                    string_value.char_len(),
+                                    range_start_inclusive,
+                                    range_length,
+                                ) {
+                                    Ok(range_end_exclusive) => {
+                                        ValueOrRef::String(StringValueOrRef::new_slice(
+                                            string_value,
+                                            range_start_inclusive,
+                                            range_end_exclusive,
+                                        ))
+                                    }
+                                    Err(e) => {
+                                        execution_context.add_diagnostic(
+                                            ColumnarEngineDiagnostic::new(
+                                                ColumnarEngineDiagnosticLevel::Error,
+                                                slice_scalar_expression,
+                                                e.into_parts().1,
+                                            ),
+                                        );
+                                        ValueOrRef::Null
                                     }
                                 }
-                                ValueOrRef::Array(array_value) => {
-                                    match SliceScalarExpression::validate_slice_range(
-                                        slice_scalar_expression.get_query_location(),
-                                        "Array",
-                                        array_value.len(),
-                                        range_start_inclusive,
-                                        range_length,
-                                    ) {
-                                        Ok(range_end_exclusive) => ValueOrRef::Array(
-                                            ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
-                                                array_value,
-                                                range_start_inclusive,
-                                                range_end_exclusive,
-                                            )),
-                                        ),
-                                        Err(e) => {
-                                            execution_context.add_diagnostic(
-                                                ColumnarEngineDiagnostic::new(
-                                                    ColumnarEngineDiagnosticLevel::Error,
-                                                    slice_scalar_expression,
-                                                    e.into_parts().1,
-                                                ),
-                                            );
-                                            ValueOrRef::Null
-                                        }
+                            }
+                            ValueOrRef::Array(array_value) => {
+                                match SliceScalarExpression::validate_slice_range(
+                                    slice_scalar_expression.get_query_location(),
+                                    "Array",
+                                    array_value.len(),
+                                    range_start_inclusive,
+                                    range_length,
+                                ) {
+                                    Ok(range_end_exclusive) => ValueOrRef::Array(
+                                        ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
+                                            array_value,
+                                            range_start_inclusive,
+                                            range_end_exclusive,
+                                        )),
+                                    ),
+                                    Err(e) => {
+                                        execution_context.add_diagnostic(
+                                            ColumnarEngineDiagnostic::new(
+                                                ColumnarEngineDiagnosticLevel::Error,
+                                                slice_scalar_expression,
+                                                e.into_parts().1,
+                                            ),
+                                        );
+                                        ValueOrRef::Null
                                     }
                                 }
-                                v => {
-                                    execution_context.add_diagnostic_if_enabled(
-                                        ColumnarEngineDiagnosticLevel::Warn,
-                                        slice_scalar_expression,
-                                        || {
-                                            format!(
-                                                "Cannot take a slice of '{}' input",
-                                                v.get_value_type()
-                                            )
-                                        },
-                                    );
-                                    ValueOrRef::Null
-                                }
-                            })
-                        })
-                        .map(ResolvedScalarValue::Dictionary)
+                            }
+                            v => {
+                                execution_context.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    slice_scalar_expression,
+                                    || {
+                                        format!(
+                                            "Cannot take a slice of '{}' input",
+                                            v.get_value_type()
+                                        )
+                                    },
+                                );
+                                ValueOrRef::Null
+                            }
+                        }),
+                    ))
                 },
                 |_| {
                     execution_context.add_diagnostic_if_enabled(
@@ -290,12 +288,12 @@ where
                 }
             };
 
-            range_start_inclusive = range_start_inclusive.transform_into_any(|v| {
-                let expression = range_start_inclusive_expression
-                    .map(|v| v as &dyn Expression)
-                    .unwrap_or(slice_scalar_expression);
-                Ok(ValueOrRef::Integer(
-                    match SliceScalarExpression::validate_resolved_range_value(
+            range_start_inclusive =
+                range_start_inclusive.transform_into_any(|v| {
+                    let expression = range_start_inclusive_expression
+                        .map(|v| v as &dyn Expression)
+                        .unwrap_or(slice_scalar_expression);
+                    ValueOrRef::Integer(match SliceScalarExpression::validate_resolved_range_value(
                         expression.get_query_location(),
                         "start",
                         v.to_value(),
@@ -309,32 +307,29 @@ where
                             ));
                             0
                         }
-                    },
-                ))
-            })?;
+                    })
+                });
 
             range_length = range_length.transform_into_any(|v| {
                 let expression = range_length_expression
                     .map(|v| v as &dyn Expression)
                     .unwrap_or(slice_scalar_expression);
-                Ok(
-                    match SliceScalarExpression::validate_resolved_range_value(
-                        expression.get_query_location(),
-                        "length",
-                        v.to_value(),
-                    ) {
-                        Ok(v) => ValueOrRef::Integer(v as i64),
-                        Err(e) => {
-                            execution_context.add_diagnostic(ColumnarEngineDiagnostic::new(
-                                ColumnarEngineDiagnosticLevel::Error,
-                                expression,
-                                e.into_parts().1,
-                            ));
-                            ValueOrRef::Null
-                        }
-                    },
-                )
-            })?;
+                match SliceScalarExpression::validate_resolved_range_value(
+                    expression.get_query_location(),
+                    "length",
+                    v.to_value(),
+                ) {
+                    Ok(v) => ValueOrRef::Integer(v as i64),
+                    Err(e) => {
+                        execution_context.add_diagnostic(ColumnarEngineDiagnostic::new(
+                            ColumnarEngineDiagnosticLevel::Error,
+                            expression,
+                            e.into_parts().1,
+                        ));
+                        ValueOrRef::Null
+                    }
+                }
+            });
 
             ResolvedScalarValue::Dictionary(dictionary_merge::merge(
                 [inner_value, range_start_inclusive, range_length],

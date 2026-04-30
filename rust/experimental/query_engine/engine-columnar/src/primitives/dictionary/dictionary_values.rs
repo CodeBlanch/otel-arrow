@@ -83,9 +83,9 @@ impl<'a> DictionaryValueArray<'a> {
     pub(crate) fn transform_into_set<T: Hash + Eq, FTransform>(
         self,
         transform: &mut FTransform,
-    ) -> Result<(IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>), ExpressionError>
+    ) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
     where
-        FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
     {
         match self {
             DictionaryValueArray::ArrayRef(a) => transform_array_into_set(transform, a),
@@ -289,9 +289,9 @@ where
 fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(
     transform: &mut FTransform,
     value: &'a dyn Array,
-) -> Result<(IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>), ExpressionError>
+) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
 {
     match value.data_type() {
         DataType::Int8 => {
@@ -438,16 +438,16 @@ fn transform_iter_into_set<'a, T: Hash + Eq, FTransform, I>(
     transform: &mut FTransform,
     max_length: usize,
     iter: I,
-) -> Result<(IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>), ExpressionError>
+) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
     I: Iterator<Item = (usize, ValueOrRef<'a>)>,
 {
     let mut value_index_lookup = AHashMap::with_capacity(max_length);
     let mut transformed_values = IndexSet::with_capacity_and_hasher(max_length, RandomState::new());
 
     for (index, value) in iter {
-        if let Some(transformed_value) = transform(value)? {
+        if let Some(transformed_value) = transform(value) {
             let (transformed_index, _) = transformed_values.insert_full(transformed_value);
             value_index_lookup.insert(index, Some(transformed_index));
         } else {
@@ -455,7 +455,7 @@ where
         }
     }
 
-    Ok((transformed_values, value_index_lookup))
+    (transformed_values, value_index_lookup)
 }
 
 pub(crate) fn get_value_from_array(value: &dyn Array, index: usize) -> ValueOrRef<'_> {

@@ -47,28 +47,24 @@ where
         },
         |dictionary| {
             Ok(ResolvedScalarValue::Dictionary(
-                dictionary.transform_into_any(|v| {
-                    Ok(match v {
-                        ValueOrRef::String(s) => ValueOrRef::Integer(s.char_len() as i64),
-                        ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
-                        ValueOrRef::Array(a) => {
-                            ValueOrRef::Integer(a.as_array_value().len() as i64)
-                        }
-                        v => {
-                            execution_context.add_diagnostic_if_enabled(
-                                ColumnarEngineDiagnosticLevel::Warn,
-                                length_scalar_expression,
-                                || {
-                                    format!(
-                                        "Cannot calculate the length of '{}' input",
-                                        v.get_value_type()
-                                    )
-                                },
-                            );
-                            ValueOrRef::Null
-                        }
-                    })
-                })?,
+                dictionary.transform_into_any(|v| match v {
+                    ValueOrRef::String(s) => ValueOrRef::Integer(s.char_len() as i64),
+                    ValueOrRef::Map(m) => ValueOrRef::Integer(m.as_map_value().len() as i64),
+                    ValueOrRef::Array(a) => ValueOrRef::Integer(a.as_array_value().len() as i64),
+                    v => {
+                        execution_context.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Warn,
+                            length_scalar_expression,
+                            || {
+                                format!(
+                                    "Cannot calculate the length of '{}' input",
+                                    v.get_value_type()
+                                )
+                            },
+                        );
+                        ValueOrRef::Null
+                    }
+                }),
             ))
         },
         |_| {

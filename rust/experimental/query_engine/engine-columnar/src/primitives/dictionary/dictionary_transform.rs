@@ -8,7 +8,6 @@ use arrow::{
     buffer::{BooleanBuffer, MutableBuffer, NullBuffer},
     datatypes::*,
 };
-use data_engine_expressions::*;
 
 use crate::*;
 
@@ -128,12 +127,9 @@ impl<'a> Dictionary<'a> {
         }
     }
 
-    pub(crate) fn transform_into_any<FTransform>(
-        self,
-        mut transform: FTransform,
-    ) -> Result<Dictionary<'a>, ExpressionError>
+    pub(crate) fn transform_into_any<FTransform>(self, mut transform: FTransform) -> Dictionary<'a>
     where
-        FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
     {
         let (keys, values) = self.into_parts();
 
@@ -201,10 +197,10 @@ impl<'a> Dictionary<'a> {
                 length,
                 value_index,
             } => match value_index {
-                None => Ok(Dictionary::new(keys, values)),
-                Some(value_index) => match transform(values.get_value_at(value_index))? {
-                    ValueOrRef::Null => Ok(Dictionary::new_null_with_data_type(length, data_type)),
-                    v => Ok(Dictionary::new_scalar_with_data_type(length, v, data_type)),
+                None => Dictionary::new(keys, values),
+                Some(value_index) => match transform(values.get_value_at(value_index)) {
+                    ValueOrRef::Null => Dictionary::new_null_with_data_type(length, data_type),
+                    v => Dictionary::new_scalar_with_data_type(length, v, data_type),
                 },
             },
         }
@@ -231,7 +227,7 @@ where
     let transformered_values = values.transform_into_vec(&mut transform);
 
     if keys.is_nullable() {
-        let mut null_value = OnceCell::new();
+        let null_value = OnceCell::new();
         for (key_index, value_index) in keys.iter().enumerate() {
             let v = if let Some(value_index) = value_index {
                 transformered_values
@@ -303,9 +299,9 @@ fn transform_any_typed<'a, K: ArrowDictionaryKeyType, FTransform>(
     keys: &PrimitiveArray<K>,
     values: DictionaryValueArray<'a>,
     mut transform: FTransform,
-) -> Result<Dictionary<'a>, ExpressionError>
+) -> Dictionary<'a>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     let key_length = keys.len();
     let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
@@ -314,12 +310,11 @@ where
     let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
     let mut null_buffer = None;
 
-    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut |v| {
-        Ok(match transform(v)? {
+    let (mut transformed_values, value_index_lookup) =
+        values.transform_into_set(&mut |v| match transform(v) {
             ValueOrRef::Null => None,
             v => Some(v),
-        })
-    })?;
+        });
 
     let mut null_index = None;
 
@@ -337,7 +332,7 @@ where
         let (has_value_index, value_index) = match null_index {
             Some(v) => v,
             None => {
-                let v = match transform(ValueOrRef::Null)? {
+                let v = match transform(ValueOrRef::Null) {
                     ValueOrRef::Null => (
                         false,
                         <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),
@@ -363,23 +358,23 @@ where
         push_null(&mut null_buffer, key_index, key_bit_length);
     }
 
-    Ok(Dictionary::new(
+    Dictionary::new(
         PrimitiveArray::<K>::new(
             key_buffer.into(),
             null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
         )
         .into(),
         transformed_values.into(),
-    ))
+    )
 }
 
 fn transform_any_typed_keyless<'a, K: ArrowDictionaryKeyType, FTransform>(
     key_length: usize,
     values: DictionaryValueArray<'a>,
     mut transform: FTransform,
-) -> Result<Dictionary<'a>, ExpressionError>
+) -> Dictionary<'a>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Result<ValueOrRef<'a>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
 
@@ -387,12 +382,11 @@ where
     let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
     let mut null_buffer = None;
 
-    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut |v| {
-        Ok(match transform(v)? {
+    let (mut transformed_values, value_index_lookup) =
+        values.transform_into_set(&mut |v| match transform(v) {
             ValueOrRef::Null => None,
             v => Some(v),
-        })
-    })?;
+        });
 
     let mut null_index = None;
 
@@ -408,7 +402,7 @@ where
         let (has_value_index, value_index) = match null_index {
             Some(v) => v,
             None => {
-                let v = match transform(ValueOrRef::Null)? {
+                let v = match transform(ValueOrRef::Null) {
                     ValueOrRef::Null => (
                         false,
                         <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),
@@ -434,12 +428,12 @@ where
         push_null(&mut null_buffer, key_index, key_bit_length);
     }
 
-    Ok(Dictionary::new(
+    Dictionary::new(
         PrimitiveArray::<K>::new(
             key_buffer.into(),
             null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
         )
         .into(),
         transformed_values.into(),
-    ))
+    )
 }
