@@ -14,6 +14,7 @@ use crate::{
     engine_diagnostic::{ColumnarEngineDiagnostic, ColumnarEngineDiagnosticLevel},
     execution_context::ExecutionContext,
     logical_expressions::execute_logical_expression,
+    resolved_value::*,
     *,
 };
 
@@ -171,51 +172,54 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                     if let Some(predicate) = d.get_predicate() {
                         match execute_logical_expression(&execution_context, predicate) {
                             Ok(logical_result) => {
-                                if let Some(s) = logical_result.as_single() {
-                                    if s {
-                                        execution_context.add_diagnostic_if_enabled(
-                                            ColumnarEngineDiagnosticLevel::Verbose,
-                                            d,
-                                            || "All records included".into(),
+                                match logical_result {
+                                    ResolvedLogicalValue::Single(single) => {
+                                        if single {
+                                            execution_context.add_diagnostic_if_enabled(
+                                                ColumnarEngineDiagnosticLevel::Verbose,
+                                                d,
+                                                || "All records included".into(),
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    ResolvedLogicalValue::Array(array) => {
+                                        let new_batches = factory.filter(
+                                            execution_context.get_records().unwrap(),
+                                            array.as_array(),
                                         );
+
+                                        std::mem::drop(execution_context);
+
+                                        batches = new_batches;
+
+                                        let new_records = factory.create(&batches);
+
+                                        let dropped_count =
+                                            current_batch_record_count - new_records.len();
+
+                                        execution_context = ExecutionContext::new(
+                                            diagnostic_level,
+                                            //&self.engine.external_function_implementations,
+                                            &self.diagnostics,
+                                            pipeline,
+                                            //&self.global_variables,
+                                            //&self.summaries,
+                                            Some(new_records),
+                                            //None,
+                                        );
+
+                                        current_batch_record_count -= dropped_count;
+                                        self.dropped_record_count += dropped_count;
+
+                                        execution_context.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Info,
+                                            d,
+                                            || format!("Dropped {dropped_count} record(s)"),
+                                        );
+
                                         continue;
                                     }
-                                } else if let Some(a) = logical_result.as_array() {
-                                    let new_batches =
-                                        factory.filter(execution_context.get_records().unwrap(), a);
-
-                                    std::mem::drop(execution_context);
-
-                                    batches = new_batches;
-
-                                    let new_records = factory.create(&batches);
-
-                                    let dropped_count =
-                                        current_batch_record_count - new_records.len();
-
-                                    execution_context = ExecutionContext::new(
-                                        diagnostic_level,
-                                        //&self.engine.external_function_implementations,
-                                        &self.diagnostics,
-                                        pipeline,
-                                        //&self.global_variables,
-                                        //&self.summaries,
-                                        Some(new_records),
-                                        //None,
-                                    );
-
-                                    current_batch_record_count -= dropped_count;
-                                    self.dropped_record_count += dropped_count;
-
-                                    execution_context.add_diagnostic_if_enabled(
-                                        ColumnarEngineDiagnosticLevel::Info,
-                                        d,
-                                        || format!("Dropped {dropped_count} record(s)"),
-                                    );
-
-                                    continue;
-                                } else {
-                                    todo!()
                                 }
                             }
                             Err(e) => {

@@ -39,11 +39,11 @@ where
                 |dictionary| {
                     let (keys, values) = dictionary.into_parts();
                     Ok(if let DictionaryKeyArray::BooleanRef(a) = keys {
-                        ResolvedLogicalValue::ArrayRef(a)
+                        ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a))
                     } else if let DictionaryKeyArray::BooleanOwned(a) = keys {
-                        ResolvedLogicalValue::ArrayOwned(a)
+                        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a))
                     } else {
-                        ResolvedLogicalValue::ArrayOwned(
+                        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
                             Dictionary::new(keys, values).transform_into_boolean(
                                 |v| {
                                     match v.to_value() {
@@ -65,7 +65,7 @@ where
                                     }
                                 },
                             )?,
-                        )
+                        ))
                     })
                 },
                 |_| {
@@ -145,80 +145,94 @@ where
         LogicalExpression::Not(n) => {
             match execute_logical_expression(execution_context, n.get_inner_expression())? {
                 ResolvedLogicalValue::Single(s) => ResolvedLogicalValue::Single(!s),
-                ResolvedLogicalValue::ArrayRef(t) => {
-                    ResolvedLogicalValue::ArrayOwned(arrow::compute::not(t).unwrap())
+                ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a)) => {
+                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                        arrow::compute::not(a).unwrap(),
+                    ))
                 }
-                ResolvedLogicalValue::ArrayOwned(t) => {
-                    ResolvedLogicalValue::ArrayOwned(arrow::compute::not(&t).unwrap())
+                ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a)) => {
+                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                        arrow::compute::not(&a).unwrap(),
+                    ))
                 }
             }
         }
-        LogicalExpression::And(a) => {
-            let left = execute_logical_expression(execution_context, a.get_left())?;
-
-            if let Some(left) = left.as_single() {
-                if !left {
+        LogicalExpression::And(a) => execute_logical_expression(execution_context, a.get_left())?
+            .map_into(
+            |left_single| {
+                Ok(if !left_single {
                     ResolvedLogicalValue::Single(false)
                 } else {
                     execute_logical_expression(execution_context, a.get_right())?
-                }
-            } else if let Some(left_array) = left.as_array() {
-                if left_array.false_count() == left_array.len() {
+                })
+            },
+            |left_array| {
+                let left_as_array = left_array.as_array();
+
+                Ok(if left_as_array.false_count() == left_as_array.len() {
                     ResolvedLogicalValue::Single(false)
                 } else {
-                    let right = execute_logical_expression(execution_context, a.get_right())?;
-
-                    if let Some(right) = right.as_single() {
-                        if !right {
-                            ResolvedLogicalValue::Single(false)
-                        } else {
-                            left
-                        }
-                    } else if let Some(right) = right.as_array() {
-                        ResolvedLogicalValue::ArrayOwned(
-                            arrow::compute::and(left_array, right).expect("and operation failed"),
-                        )
+                    execute_logical_expression(execution_context, a.get_right())?
+                        .map_into_with_state(
+                            left_array,
+                            |left_array, right_single| {
+                                Ok(if !right_single {
+                                    ResolvedLogicalValue::Single(false)
+                                } else {
+                                    ResolvedLogicalValue::Array(left_array)
+                                })
+                            },
+                            |left_array, right_array| {
+                                Ok(ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                                    arrow::compute::and(
+                                        left_array.as_array(),
+                                        right_array.as_array(),
+                                    )
+                                    .expect("and operation failed"),
+                                )))
+                            },
+                        )?
+                })
+            },
+        )?,
+        LogicalExpression::Or(o) => execute_logical_expression(execution_context, o.get_left())?
+            .map_into(
+                |left_single| {
+                    Ok(if left_single {
+                        ResolvedLogicalValue::Single(true)
                     } else {
-                        unreachable!("right wasn't a single or an array")
-                    }
-                }
-            } else {
-                unreachable!("left wasn't a single or an array")
-            }
-        }
-        LogicalExpression::Or(o) => {
-            let left = execute_logical_expression(execution_context, o.get_left())?;
+                        execute_logical_expression(execution_context, o.get_right())?
+                    })
+                },
+                |left_array| {
+                    let left_as_array = left_array.as_array();
 
-            if let Some(left) = left.as_single() {
-                if left {
-                    ResolvedLogicalValue::Single(true)
-                } else {
-                    execute_logical_expression(execution_context, o.get_right())?
-                }
-            } else if let Some(left_array) = left.as_array() {
-                if left_array.true_count() == left_array.len() {
-                    ResolvedLogicalValue::Single(true)
-                } else {
-                    let right = execute_logical_expression(execution_context, o.get_right())?;
-
-                    if let Some(right) = right.as_single() {
-                        if right {
-                            ResolvedLogicalValue::Single(true)
-                        } else {
-                            left
-                        }
-                    } else if let Some(right) = right.as_array() {
-                        ResolvedLogicalValue::ArrayOwned(
-                            arrow::compute::or(left_array, right).expect("or operation failed"),
-                        )
+                    Ok(if left_as_array.true_count() == left_as_array.len() {
+                        ResolvedLogicalValue::Single(true)
                     } else {
-                        unreachable!("right wasn't a single or an array")
-                    }
-                }
-            } else {
-                unreachable!("left wasn't a single or an array")
-            }
-        }
+                        execute_logical_expression(execution_context, o.get_right())?
+                            .map_into_with_state(
+                                left_array,
+                                |left_array, right_single| {
+                                    Ok(if right_single {
+                                        ResolvedLogicalValue::Single(true)
+                                    } else {
+                                        ResolvedLogicalValue::Array(left_array)
+                                    })
+                                },
+                                |left_array, right_array| {
+                                    Ok(ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                                        arrow::compute::or(
+                                            left_array.as_array(),
+                                            right_array.as_array(),
+                                        )
+                                        .expect("or operation failed"),
+                                    )))
+                                },
+                            )?
+                    })
+                },
+            )?,
         LogicalExpression::Contains(c) => compare(
             c.get_query_location(),
             execute_scalar_expression(execution_context, c.get_haystack())?,
@@ -267,25 +281,27 @@ where
         if let Some(right) = right_single {
             ResolvedLogicalValue::Single(compare(&left.to_value(), &right.to_value())?)
         } else {
-            ResolvedLogicalValue::ArrayOwned(compare_single_to_dictionary(
+            ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(compare_single_to_dictionary(
                 &left,
                 right_dictionary.expect("right is dictionary"),
                 compare,
-            )?)
+            )?))
         }
     } else if let Some(right) = right_single {
-        ResolvedLogicalValue::ArrayOwned(compare_dictionary_to_single(
+        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(compare_dictionary_to_single(
             left_dictionary.expect("left is dictionary"),
             &right,
             compare,
-        )?)
+        )?))
     } else {
-        ResolvedLogicalValue::ArrayOwned(compare_dictionary_to_dictionary(
-            query_location,
-            left_dictionary.expect("left is dictionary"),
-            right_dictionary.expect("right is dictionary"),
-            compare,
-        )?)
+        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+            compare_dictionary_to_dictionary(
+                query_location,
+                left_dictionary.expect("left is dictionary"),
+                right_dictionary.expect("right is dictionary"),
+                compare,
+            )?,
+        ))
     };
 
     Ok(value)

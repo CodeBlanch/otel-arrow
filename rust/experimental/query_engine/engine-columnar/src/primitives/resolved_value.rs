@@ -142,47 +142,47 @@ impl Display for ResolvedScalarValue<'_> {
 #[derive(Debug)]
 pub(crate) enum ResolvedLogicalValue<'a> {
     Single(bool),
-    ArrayRef(&'a BooleanArray),
-    ArrayOwned(BooleanArray),
+    Array(ResolvedBooleanArray<'a>),
 }
 
 impl<'a> ResolvedLogicalValue<'a> {
-    pub fn as_single(&self) -> Option<bool> {
+    pub fn map_into<FSingle, FArray, FRet>(
+        self,
+        when_single: FSingle,
+        when_array: FArray,
+    ) -> Result<FRet, ExpressionError>
+    where
+        FSingle: FnOnce(bool) -> Result<FRet, ExpressionError>,
+        FArray: FnOnce(ResolvedBooleanArray<'a>) -> Result<FRet, ExpressionError>,
+    {
         match self {
-            ResolvedLogicalValue::Single(s) => Some(*s),
-            _ => None,
+            ResolvedLogicalValue::Single(single) => when_single(single),
+            ResolvedLogicalValue::Array(array) => when_array(array),
         }
     }
 
-    pub fn as_array(&self) -> Option<&BooleanArray> {
+    pub fn map_into_with_state<TState, FSingle, FArray, FRet>(
+        self,
+        state: TState,
+        when_single: FSingle,
+        when_array: FArray,
+    ) -> Result<FRet, ExpressionError>
+    where
+        FSingle: FnOnce(TState, bool) -> Result<FRet, ExpressionError>,
+        FArray: FnOnce(TState, ResolvedBooleanArray<'a>) -> Result<FRet, ExpressionError>,
+    {
         match self {
-            ResolvedLogicalValue::ArrayRef(a) => Some(a),
-            ResolvedLogicalValue::ArrayOwned(a) => Some(a),
-            _ => None,
+            ResolvedLogicalValue::Single(single) => when_single(state, single),
+            ResolvedLogicalValue::Array(array) => when_array(state, array),
         }
     }
 }
 
 impl Display for ResolvedLogicalValue<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(s) = self.as_single() {
-            write!(f, "[Boolean({s})]")
-        } else if let Some(a) = self.as_array() {
-            f.write_char('{')?;
-            for key in 0..a.len() {
-                if key > 0 {
-                    f.write_char(',')?;
-                }
-                if a.is_null(key) {
-                    write!(f, "{key}:Null")?;
-                } else {
-                    let value = unsafe { a.value_unchecked(key) };
-                    write!(f, "{key}:Boolean({value})")?;
-                }
-            }
-            f.write_char('}')
-        } else {
-            unreachable!()
+        match self {
+            ResolvedLogicalValue::Single(s) => write!(f, "[Boolean({s})]"),
+            ResolvedLogicalValue::Array(a) => a.fmt(f),
         }
     }
 }
@@ -191,8 +191,47 @@ impl<'a> From<ResolvedLogicalValue<'a>> for ResolvedScalarValue<'a> {
     fn from(value: ResolvedLogicalValue<'a>) -> Self {
         match value {
             ResolvedLogicalValue::Single(s) => ResolvedScalarValue::Single(ValueOrRef::Boolean(s)),
-            ResolvedLogicalValue::ArrayRef(a) => ResolvedScalarValue::Dictionary(a.into()),
-            ResolvedLogicalValue::ArrayOwned(a) => ResolvedScalarValue::Dictionary(a.into()),
+            ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a)) => {
+                ResolvedScalarValue::Dictionary(a.into())
+            }
+            ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a)) => {
+                ResolvedScalarValue::Dictionary(a.into())
+            }
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ResolvedBooleanArray<'a> {
+    Ref(&'a BooleanArray),
+    Owned(BooleanArray),
+}
+
+impl ResolvedBooleanArray<'_> {
+    pub fn as_array(&self) -> &BooleanArray {
+        match self {
+            ResolvedBooleanArray::Ref(a) => a,
+            ResolvedBooleanArray::Owned(a) => a,
+        }
+    }
+}
+
+impl Display for ResolvedBooleanArray<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let a = self.as_array();
+
+        f.write_char('{')?;
+        for key in 0..a.len() {
+            if key > 0 {
+                f.write_char(',')?;
+            }
+            if a.is_null(key) {
+                write!(f, "{key}:Null")?;
+            } else {
+                let value = unsafe { a.value_unchecked(key) };
+                write!(f, "{key}:Boolean({value})")?;
+            }
+        }
+        f.write_char('}')
     }
 }
