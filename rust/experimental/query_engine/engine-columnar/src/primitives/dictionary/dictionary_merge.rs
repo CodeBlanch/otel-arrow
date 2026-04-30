@@ -5,7 +5,6 @@ use std::collections::hash_map::Entry;
 
 use ahash::{AHashMap, RandomState};
 use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
-use data_engine_expressions::*;
 use indexmap::IndexSet;
 
 use crate::{dictionary_transform::push_null, *};
@@ -13,9 +12,9 @@ use crate::{dictionary_transform::push_null, *};
 pub(crate) fn merge<'a, FMerge, const COUNT: usize>(
     values: [Dictionary<'a>; COUNT],
     merge: FMerge,
-) -> Result<Dictionary<'a>, ExpressionError>
+) -> Dictionary<'a>
 where
-    FMerge: FnMut([ValueOrRef<'a>; COUNT]) -> Result<ValueOrRef<'a>, ExpressionError>,
+    FMerge: FnMut([ValueOrRef<'a>; COUNT]) -> ValueOrRef<'a>,
 {
     assert!(COUNT > 0);
 
@@ -37,9 +36,9 @@ where
 fn merge_typed<'a, K: ArrowDictionaryKeyType, FMerge, const COUNT: usize>(
     values: [Dictionary<'a>; COUNT],
     mut merge: FMerge,
-) -> Result<Dictionary<'a>, ExpressionError>
+) -> Dictionary<'a>
 where
-    FMerge: FnMut([ValueOrRef<'a>; COUNT]) -> Result<ValueOrRef<'a>, ExpressionError>,
+    FMerge: FnMut([ValueOrRef<'a>; COUNT]) -> ValueOrRef<'a>,
 {
     debug_assert!(COUNT > 0);
 
@@ -79,7 +78,7 @@ where
                     values_to_merge[i] =
                         value_index.map_or(ValueOrRef::Null, |v| values[i].values().get_value_at(v))
                 }
-                match merge(values_to_merge)? {
+                match merge(values_to_merge) {
                     ValueOrRef::Null => {
                         vacant.insert(None);
                         push_null(&mut null_buffer, key_index, key_bit_length);
@@ -97,18 +96,20 @@ where
         }
     }
 
-    Ok(Dictionary::new(
+    Dictionary::new(
         PrimitiveArray::<K>::new(
             key_buffer.into(),
             null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_count).finish()),
         )
         .into(),
         merged_values.into(),
-    ))
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use data_engine_expressions::*;
+
     use super::*;
 
     #[test]
@@ -150,7 +151,7 @@ mod tests {
                 _ => None,
             };
 
-            Ok(match &values[2] {
+            match &values[2] {
                 ValueOrRef::String(string_value) => {
                     let v = string_value.get_value();
                     let end = end.unwrap_or(v.len());
@@ -161,9 +162,8 @@ mod tests {
                     ))
                 }
                 _ => ValueOrRef::Null,
-            })
-        })
-        .unwrap();
+            }
+        });
 
         let mut expected_keys = PrimitiveBuilder::<UInt16Type>::new();
         expected_keys.append_value(0);

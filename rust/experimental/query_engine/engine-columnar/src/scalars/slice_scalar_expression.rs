@@ -349,7 +349,7 @@ where
                         _ => unreachable!(),
                     };
 
-                    Ok(match std::mem::replace(&mut v[0], ValueOrRef::Null) {
+                    match std::mem::replace(&mut v[0], ValueOrRef::Null) {
                         ValueOrRef::String(string_value) => {
                             match SliceScalarExpression::validate_slice_range(
                                 slice_scalar_expression.get_query_location(),
@@ -412,9 +412,9 @@ where
                             );
                             ValueOrRef::Null
                         }
-                    })
+                    }
                 },
-            )?)
+            ))
         }
     })
 }
