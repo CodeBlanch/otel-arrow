@@ -106,27 +106,27 @@ impl<'a> DictionaryValueArray<'a> {
     pub(crate) fn transform_into_vec<T, FTransform>(
         self,
         mut transform: &mut FTransform,
-    ) -> Result<Vec<Option<T>>, ExpressionError>
+    ) -> Vec<Option<T>>
     where
-        FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
     {
-        Ok(match self {
-            DictionaryValueArray::ArrayRef(a) => transform_array_into_vec(transform, a)?,
+        match self {
+            DictionaryValueArray::ArrayRef(a) => transform_array_into_vec(transform, a),
             DictionaryValueArray::VecAnyOwned(a) => Arc::unwrap_or_clone(a)
                 .into_iter()
                 .map(&mut transform)
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+                .collect(),
             DictionaryValueArray::IndexAnyOwned(a) => Arc::unwrap_or_clone(a)
                 .into_iter()
                 .map(&mut transform)
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+                .collect(),
             DictionaryValueArray::Boolean => {
                 vec![
-                    transform(ValueOrRef::Boolean(false))?,
-                    transform(ValueOrRef::Boolean(true))?,
+                    transform(ValueOrRef::Boolean(false)),
+                    transform(ValueOrRef::Boolean(true)),
                 ]
             }
-        })
+        }
     }
 }
 
@@ -151,68 +151,68 @@ impl<'a> From<Vec<ValueOrRef<'a>>> for DictionaryValueArray<'a> {
 fn transform_array_into_vec<'a, T, FTransform>(
     mut transform: FTransform,
     value: &'a dyn Array,
-) -> Result<Vec<Option<T>>, ExpressionError>
+) -> Vec<Option<T>>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Result<Option<T>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
 {
-    Ok(match value.data_type() {
+    match value.data_type() {
         DataType::Int8 => value
             .as_primitive::<Int8Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::Int16 => value
             .as_primitive::<Int16Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::Int32 => value
             .as_primitive::<Int32Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::Int64 => value
             .as_primitive::<Int64Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, ValueOrRef::Integer)))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
 
         DataType::UInt8 => value
             .as_primitive::<UInt8Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::UInt16 => value
             .as_primitive::<UInt16Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::UInt32 => value
             .as_primitive::<UInt32Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::UInt64 => value
             .as_primitive::<UInt64Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
 
         DataType::Float16 => value
             .as_primitive::<Float16Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::Float32 => value
             .as_primitive::<Float32Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::Float64 => value
             .as_primitive::<Float64Type>()
             .into_iter()
             .map(|v| transform(v.map_or(ValueOrRef::Null, ValueOrRef::Double)))
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
 
         DataType::Utf8 => value
             .as_string::<i32>()
@@ -222,7 +222,7 @@ where
                     ValueOrRef::String(StringValueOrRef::Ref(v))
                 }))
             })
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
         DataType::LargeUtf8 => value
             .as_string::<i64>()
             .into_iter()
@@ -231,7 +231,7 @@ where
                     ValueOrRef::String(StringValueOrRef::Ref(v))
                 }))
             })
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
 
         DataType::Timestamp(time_unit, _) => match time_unit {
             TimeUnit::Second => value
@@ -242,7 +242,7 @@ where
                         ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
                     }))
                 })
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+                .collect(),
             TimeUnit::Millisecond => value
                 .as_primitive::<TimestampMillisecondType>()
                 .into_iter()
@@ -251,7 +251,7 @@ where
                         ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
                     }))
                 })
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+                .collect(),
             TimeUnit::Microsecond => value
                 .as_primitive::<TimestampMicrosecondType>()
                 .into_iter()
@@ -260,7 +260,7 @@ where
                         ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
                     }))
                 })
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+                .collect(),
             TimeUnit::Nanosecond => value
                 .as_primitive::<TimestampNanosecondType>()
                 .into_iter()
@@ -269,7 +269,7 @@ where
                         ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
                     }))
                 })
-                .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+                .collect(),
         },
 
         DataType::FixedSizeBinary(_) => value
@@ -280,10 +280,10 @@ where
                     ValueOrRef::Array(ArrayValueOrRef::WrappedRef(ArrayValueWrappedRef::new_u8(v)))
                 }))
             })
-            .collect::<Result<Vec<Option<T>>, ExpressionError>>()?,
+            .collect(),
 
         d => todo!("{d} is not implemented"),
-    })
+    }
 }
 
 fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(

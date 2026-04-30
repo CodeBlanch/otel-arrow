@@ -16,9 +16,9 @@ impl<'a> Dictionary<'a> {
     pub(crate) fn transform_into_boolean<FTransform>(
         self,
         mut transform: FTransform,
-    ) -> Result<BooleanArray, ExpressionError>
+    ) -> BooleanArray
     where
-        FTransform: FnMut(ValueOrRef<'_>) -> Result<Option<bool>, ExpressionError>,
+        FTransform: FnMut(ValueOrRef<'_>) -> Option<bool>,
     {
         let (keys, values) = self.into_parts();
 
@@ -77,7 +77,7 @@ impl<'a> Dictionary<'a> {
 
                 let mut null_buffer = None;
 
-                let transformered_values = values.transform_into_vec(&mut transform)?;
+                let transformered_values = values.transform_into_vec(&mut transform);
 
                 assert!(transformered_values.len() == length);
 
@@ -91,11 +91,11 @@ impl<'a> Dictionary<'a> {
                     }
                 }
 
-                Ok(BooleanArray::new(
+                BooleanArray::new(
                     BooleanBufferBuilder::new_from_buffer(key_buffer, length).finish(),
                     null_buffer
                         .and_then(|v| NullBufferBuilder::new_from_buffer(v, length).finish()),
-                ))
+                )
             }
             DictionaryKeyArrayValues::SingleValue {
                 data_type: _,
@@ -107,7 +107,7 @@ impl<'a> Dictionary<'a> {
                         BooleanBuffer::new_unset(length),
                         Some(NullBuffer::new_null(length)),
                     ),
-                    Some(value_index) => match transform(values.get_value_at(value_index))? {
+                    Some(value_index) => match transform(values.get_value_at(value_index)) {
                         None => (
                             BooleanBuffer::new_unset(length),
                             Some(NullBuffer::new_null(length)),
@@ -123,7 +123,7 @@ impl<'a> Dictionary<'a> {
                     },
                 };
 
-                Ok(BooleanArray::new(key_buffer, null_buffer))
+                BooleanArray::new(key_buffer, null_buffer)
             }
         }
     }
@@ -215,9 +215,9 @@ fn transform_boolean_typed<K: ArrowDictionaryKeyType, FTransform>(
     keys: &PrimitiveArray<K>,
     values: DictionaryValueArray<'_>,
     mut transform: FTransform,
-) -> Result<BooleanArray, ExpressionError>
+) -> BooleanArray
 where
-    FTransform: FnMut(ValueOrRef<'_>) -> Result<Option<bool>, ExpressionError>,
+    FTransform: FnMut(ValueOrRef<'_>) -> Option<bool>,
 {
     let key_length = keys.len();
 
@@ -228,7 +228,7 @@ where
 
     let mut null_buffer = None;
 
-    let transformered_values = values.transform_into_vec(&mut transform)?;
+    let transformered_values = values.transform_into_vec(&mut transform);
 
     if keys.is_nullable() {
         let mut null_value = OnceCell::new();
@@ -238,10 +238,7 @@ where
                     .get(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
                     .unwrap_or(&None)
             } else {
-                match null_value.get_or_init(|| transform(ValueOrRef::Null)) {
-                    Err(_) => return Err(null_value.take().unwrap().unwrap_err()),
-                    Ok(v) => v,
-                }
+                null_value.get_or_init(|| transform(ValueOrRef::Null))
             };
 
             if let Some(v) = v {
@@ -270,10 +267,10 @@ where
         }
     }
 
-    Ok(BooleanArray::new(
+    BooleanArray::new(
         BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
         null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
-    ))
+    )
 }
 
 pub(crate) fn push_null(

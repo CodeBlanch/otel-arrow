@@ -44,6 +44,19 @@ where
 
     let key_count = values[0].keys().len();
 
+    // Note: All the values should be the same length but it isn't a panic type
+    // of issue if they aren't.
+    debug_assert!({
+        let mut all_valid = true;
+        for v in &values[1..] {
+            if v.len() != key_count {
+                all_valid = false;
+                break;
+            }
+        }
+        all_valid
+    });
+
     let mut visited_values: AHashMap<
         [Option<usize>; COUNT],
         Option<<K as ArrowPrimitiveType>::Native>,
