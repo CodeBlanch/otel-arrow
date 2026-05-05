@@ -15,14 +15,10 @@ use crate::{
     *,
 };
 
-pub fn execute_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
+pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     scalar_expression: &'pipeline ScalarExpression,
-) -> ResolvedScalarValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let value = match scalar_expression {
         ScalarExpression::Argument(_) => todo!(),
         ScalarExpression::Attached(a) => execute_attached_scalar_expression(execution_context, a),

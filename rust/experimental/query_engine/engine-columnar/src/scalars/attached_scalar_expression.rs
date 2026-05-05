@@ -7,14 +7,10 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, selection::select_from_record_table, *,
 };
 
-pub fn execute_attached_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
+pub fn execute_attached_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     attached_scalar_expression: &'pipeline AttachedScalarExpression,
-) -> ResolvedScalarValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let record = match execution_context.get_records() {
         Some(r) => r,
         None => {
@@ -45,7 +41,6 @@ where
 
     select_from_record_table(
         execution_context,
-        attached_scalar_expression,
         key_data_type,
         attached_record,
         attached_scalar_expression
@@ -64,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_select_from_attached_table() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(0)],
             vec![ValueOrRef::String(StringValueOrRef::new_owned(
                 "hello world".into(),
@@ -95,7 +90,9 @@ mod tests {
             ),
             ScalarExpression::Attached(select_valid_attached_data),
             |r| match r {
-                ResolvedScalarValue::Dictionary(actual) => assert_eq!(values_dictionary, actual),
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(values_dictionary.as_dictionary(), actual)
+                }
                 _ => panic!("test failure"),
             },
         );

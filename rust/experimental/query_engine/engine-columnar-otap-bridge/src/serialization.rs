@@ -7,13 +7,13 @@ use serde::{
     de::{Error, MapAccess, SeqAccess, Visitor},
 };
 
-pub(crate) fn from_slice<'a>(value: &'a [u8]) -> Result<ValueOrRef<'a>, serde_cbor::Error> {
+pub(crate) fn from_slice(value: &[u8]) -> Result<ValueOrRef<'static>, serde_cbor::Error> {
     serde_cbor::from_slice(value).map(|v: ValueOrRefSerializationWrapper| v.0)
 }
 
-struct ValueOrRefSerializationWrapper<'a>(pub ValueOrRef<'a>);
+struct ValueOrRefSerializationWrapper(pub ValueOrRef<'static>);
 
-impl<'a> serde::Deserialize<'a> for ValueOrRefSerializationWrapper<'a> {
+impl<'a> serde::Deserialize<'a> for ValueOrRefSerializationWrapper {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'a>,
@@ -27,7 +27,7 @@ impl<'a> serde::Deserialize<'a> for ValueOrRefSerializationWrapper<'a> {
 struct ValueOrRefVisitor;
 
 impl<'a> Visitor<'a> for ValueOrRefVisitor {
-    type Value = ValueOrRef<'a>;
+    type Value = ValueOrRef<'static>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("a string, boolean, number, map, or array")
@@ -65,11 +65,13 @@ impl<'a> Visitor<'a> for ValueOrRefVisitor {
         Ok(ValueOrRef::Double(value))
     }
 
-    fn visit_borrowed_str<E>(self, value: &'a str) -> Result<Self::Value, E>
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Ok(ValueOrRef::String(StringValueOrRef::new_ref(value)))
+        Ok(ValueOrRef::String(StringValueOrRef::new_owned(
+            value.into(),
+        )))
     }
 
     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>

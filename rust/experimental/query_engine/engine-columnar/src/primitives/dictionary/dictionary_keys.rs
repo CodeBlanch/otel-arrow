@@ -6,11 +6,12 @@ use std::sync::Arc;
 use arrow::{array::*, datatypes::*};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum DictionaryKeyArray<'a> {
-    ArrayRef(&'a dyn Array),
-    ArrayOwned(Arc<dyn Array>),
-    BooleanRef(&'a BooleanArray),
-    BooleanOwned(BooleanArray),
+pub enum DictionaryKeyArray {
+    KeyArray(Arc<dyn Array>),
+    BooleanArray {
+        data_type: DataType,
+        values: Arc<dyn Array>,
+    },
     UniqueValues {
         data_type: DataType,
         length: usize,
@@ -22,13 +23,14 @@ pub enum DictionaryKeyArray<'a> {
     },
 }
 
-impl DictionaryKeyArray<'_> {
+impl DictionaryKeyArray {
     pub fn len(&self) -> usize {
         match self {
-            DictionaryKeyArray::ArrayRef(a) => a.len(),
-            DictionaryKeyArray::ArrayOwned(a) => a.len(),
-            DictionaryKeyArray::BooleanRef(a) => a.len(),
-            DictionaryKeyArray::BooleanOwned(a) => a.len(),
+            DictionaryKeyArray::KeyArray(a) => a.len(),
+            DictionaryKeyArray::BooleanArray {
+                data_type: _,
+                values,
+            } => values.len(),
             DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
@@ -43,10 +45,11 @@ impl DictionaryKeyArray<'_> {
 
     pub fn is_empty(&self) -> bool {
         match self {
-            DictionaryKeyArray::ArrayRef(a) => a.is_empty(),
-            DictionaryKeyArray::ArrayOwned(a) => a.is_empty(),
-            DictionaryKeyArray::BooleanRef(a) => a.is_empty(),
-            DictionaryKeyArray::BooleanOwned(a) => a.is_empty(),
+            DictionaryKeyArray::KeyArray(a) => a.is_empty(),
+            DictionaryKeyArray::BooleanArray {
+                data_type: _,
+                values,
+            } => values.is_empty(),
             DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
@@ -61,10 +64,11 @@ impl DictionaryKeyArray<'_> {
 
     pub fn data_type(&self) -> DataType {
         match self {
-            DictionaryKeyArray::ArrayRef(a) => a.data_type().clone(),
-            DictionaryKeyArray::ArrayOwned(a) => a.data_type().clone(),
-            DictionaryKeyArray::BooleanRef(a) => a.data_type().clone(),
-            DictionaryKeyArray::BooleanOwned(a) => a.data_type().clone(),
+            DictionaryKeyArray::KeyArray(a) => a.data_type().clone(),
+            DictionaryKeyArray::BooleanArray {
+                data_type,
+                values: _,
+            } => data_type.clone(),
             DictionaryKeyArray::UniqueValues {
                 data_type,
                 length: _,
@@ -77,38 +81,13 @@ impl DictionaryKeyArray<'_> {
         }
     }
 
-    pub fn values(&self) -> DictionaryKeyArrayValues<'_> {
-        match self {
-            DictionaryKeyArray::ArrayRef(a) => DictionaryKeyArrayValues::Array(*a),
-            DictionaryKeyArray::ArrayOwned(a) => DictionaryKeyArrayValues::Array(a.as_ref()),
-            DictionaryKeyArray::BooleanRef(a) => DictionaryKeyArrayValues::Array(*a),
-            DictionaryKeyArray::BooleanOwned(a) => DictionaryKeyArrayValues::Array(a),
-            DictionaryKeyArray::UniqueValues { data_type, length } => {
-                DictionaryKeyArrayValues::UniqueValues {
-                    data_type: data_type.clone(),
-                    length: *length,
-                }
-            }
-            DictionaryKeyArray::SingleValue {
-                data_type,
-                length,
-                value_index,
-            } => DictionaryKeyArrayValues::SingleValue {
-                data_type: data_type.clone(),
-                length: *length,
-                value_index: *value_index,
-            },
-        }
-    }
-
     pub fn get_value_index_for_key_index(&self, index: usize) -> Option<usize> {
         match self {
-            DictionaryKeyArray::ArrayRef(a) => get_key_array_value_index_for_key_index(*a, index),
-            DictionaryKeyArray::ArrayOwned(a) => get_key_array_value_index_for_key_index(a, index),
-            DictionaryKeyArray::BooleanRef(a) => get_bool_array_value_index_for_key_index(a, index),
-            DictionaryKeyArray::BooleanOwned(a) => {
-                get_bool_array_value_index_for_key_index(a, index)
-            }
+            DictionaryKeyArray::KeyArray(a) => get_key_array_value_index_for_key_index(a, index),
+            DictionaryKeyArray::BooleanArray {
+                data_type: _,
+                values,
+            } => get_bool_array_value_index_for_key_index(values.as_boolean(), index),
             DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
@@ -134,28 +113,21 @@ impl DictionaryKeyArray<'_> {
     }
 }
 
-pub enum DictionaryKeyArrayValues<'a> {
-    Array(&'a dyn Array),
-    UniqueValues {
-        data_type: DataType,
-        length: usize,
-    },
-    SingleValue {
-        data_type: DataType,
-        length: usize,
-        value_index: Option<usize>,
-    },
-}
-
-impl<T: ArrowDictionaryKeyType> From<PrimitiveArray<T>> for DictionaryKeyArray<'_> {
-    fn from(value: PrimitiveArray<T>) -> DictionaryKeyArray<'static> {
-        DictionaryKeyArray::ArrayOwned(Arc::new(value))
+impl<T: ArrowDictionaryKeyType> From<PrimitiveArray<T>> for DictionaryKeyArray {
+    fn from(value: PrimitiveArray<T>) -> DictionaryKeyArray {
+        DictionaryKeyArray::KeyArray(Arc::new(value))
     }
 }
 
-impl<'a, T: ArrowDictionaryKeyType> From<&'a PrimitiveArray<T>> for DictionaryKeyArray<'a> {
-    fn from(value: &'a PrimitiveArray<T>) -> DictionaryKeyArray<'a> {
-        DictionaryKeyArray::ArrayRef(value)
+impl From<&dyn Array> for DictionaryKeyArray {
+    fn from(value: &dyn Array) -> DictionaryKeyArray {
+        DictionaryKeyArray::KeyArray(value.slice(0, value.len()))
+    }
+}
+
+impl<'a, T: ArrowPrimitiveType> From<&'a PrimitiveArray<T>> for DictionaryKeyArray {
+    fn from(value: &'a PrimitiveArray<T>) -> DictionaryKeyArray {
+        DictionaryKeyArray::KeyArray((value as &dyn Array).slice(0, value.len()))
     }
 }
 

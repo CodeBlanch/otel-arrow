@@ -7,7 +7,7 @@ use std::{
     fmt::{Debug, Display, Write},
 };
 
-use arrow::{array::*, datatypes::*};
+use arrow::array::*;
 use data_engine_expressions::*;
 
 use crate::{
@@ -182,10 +182,13 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                     continue;
                                 }
                             }
-                            ResolvedLogicalValue::Array(array) => {
+                            ResolvedLogicalValue::Array {
+                                data_type: _,
+                                values,
+                            } => {
                                 let new_batches = factory.filter(
                                     execution_context.get_records().unwrap(),
-                                    array.as_array(),
+                                    values.as_boolean(),
                                 );
 
                                 std::mem::drop(execution_context);
@@ -232,25 +235,16 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                     return;
                 }
                 DataExpression::Summary(_) => todo!(),
-                DataExpression::Transform(t) => {
-                    if let Err(e) = match t {
-                        TransformExpression::Move(_) => todo!(),
-                        TransformExpression::ReduceMap(_) => todo!(),
-                        TransformExpression::Remove(_) => todo!(),
-                        TransformExpression::RemoveMapKeys(_) => todo!(),
-                        TransformExpression::RenameMapKeys(_) => todo!(),
-                        TransformExpression::Set(s) => {
-                            execute_set_transform_expression(&execution_context, s)
-                        }
-                    } {
-                        execution_context.add_diagnostic_if_enabled(
-                            ColumnarEngineDiagnosticLevel::Error,
-                            t,
-                            || e.into_parts().1,
-                        );
-                        break;
+                DataExpression::Transform(t) => match t {
+                    TransformExpression::Move(_) => todo!(),
+                    TransformExpression::ReduceMap(_) => todo!(),
+                    TransformExpression::Remove(_) => todo!(),
+                    TransformExpression::RemoveMapKeys(_) => todo!(),
+                    TransformExpression::RenameMapKeys(_) => todo!(),
+                    TransformExpression::Set(s) => {
+                        execute_set_transform_expression(&mut execution_context, s)
                     }
-                }
+                },
                 DataExpression::Conditional(_) => todo!(),
                 DataExpression::Output(_) => todo!(),
             }
@@ -287,49 +281,6 @@ impl<const BATCH_SIZE: usize> Display for ColumnarEngineResults<'_, BATCH_SIZE> 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         format_diagnostics(self.pipeline.get_query(), &self.diagnostics, f)
     }
-}
-
-pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
-    type Records<'a>: ColumnarRecords
-    where
-        Self: 'a;
-
-    fn create<'a>(&self, batches: &'a [Option<RecordBatch>]) -> Self::Records<'a>;
-
-    fn filter(
-        &self,
-        batch: &Self::Records<'_>,
-        filter: &BooleanArray,
-    ) -> [Option<RecordBatch>; BATCH_SIZE];
-}
-
-pub trait ColumnarRecords: RecordTable
-where
-    Self: Sized,
-{
-    fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel>;
-
-    fn get_key_data_type(&self) -> DataType;
-
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() > 0
-    }
-
-    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable>;
-}
-
-pub trait RecordTable: Display + Debug {
-    //fn get_keys(&self) -> &[&str];
-
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>>;
-}
-
-#[derive(Debug)]
-pub enum RecordTableValue<'a> {
-    Dictionary(Dictionary<'a>),
-    Table(&'a dyn RecordTable),
 }
 
 pub fn format_diagnostics(

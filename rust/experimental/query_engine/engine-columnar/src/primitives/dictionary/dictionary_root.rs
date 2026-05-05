@@ -10,24 +10,24 @@ use crate::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dictionary<'a> {
-    keys: DictionaryKeyArray<'a>,
+    keys: DictionaryKeyArray,
     values: DictionaryValueArray<'a>,
 }
 
 impl<'a> Dictionary<'a> {
-    pub fn new(keys: DictionaryKeyArray<'a>, values: DictionaryValueArray<'a>) -> Dictionary<'a> {
+    pub fn new(keys: DictionaryKeyArray, values: DictionaryValueArray<'a>) -> Dictionary<'a> {
         Self { keys, values }
     }
 
     pub fn from_array<K: ArrowDictionaryKeyType, V: ArrowPrimitiveType>(
-        values: &'a PrimitiveArray<V>,
+        values: &PrimitiveArray<V>,
     ) -> Dictionary<'a> {
         Self {
             keys: DictionaryKeyArray::UniqueValues {
                 data_type: K::DATA_TYPE,
                 length: values.len(),
             },
-            values: values.into(),
+            values: (values as &dyn Array).into(),
         }
     }
 
@@ -100,7 +100,7 @@ impl<'a> Dictionary<'a> {
         self.keys.is_empty()
     }
 
-    pub fn keys(&self) -> &DictionaryKeyArray<'a> {
+    pub fn keys(&self) -> &DictionaryKeyArray {
         &self.keys
     }
 
@@ -108,7 +108,7 @@ impl<'a> Dictionary<'a> {
         &self.values
     }
 
-    pub fn into_parts(self) -> (DictionaryKeyArray<'a>, DictionaryValueArray<'a>) {
+    pub fn into_parts(self) -> (DictionaryKeyArray, DictionaryValueArray<'a>) {
         (self.keys, self.values)
     }
 
@@ -139,41 +139,44 @@ impl Display for Dictionary<'_> {
     }
 }
 
-impl From<BooleanArray> for Dictionary<'_> {
-    fn from(value: BooleanArray) -> Self {
-        Dictionary {
-            keys: DictionaryKeyArray::BooleanOwned(value),
-            values: DictionaryValueArray::Boolean,
-        }
-    }
-}
-
-impl<'a> From<&'a BooleanArray> for Dictionary<'a> {
-    fn from(value: &'a BooleanArray) -> Self {
-        Dictionary {
-            keys: DictionaryKeyArray::BooleanRef(value),
-            values: DictionaryValueArray::Boolean,
-        }
-    }
-}
-
-impl<'a, T: ArrowDictionaryKeyType> From<&'a DictionaryArray<T>> for Dictionary<'a> {
-    fn from(value: &'a DictionaryArray<T>) -> Self {
+impl<'a, T: ArrowDictionaryKeyType> From<&DictionaryArray<T>> for Dictionary<'a> {
+    fn from(value: &DictionaryArray<T>) -> Self {
         Dictionary {
             keys: value.keys().into(),
-            values: value.values().into(),
+            values: (value.values() as &dyn Array).into(),
         }
     }
 }
 
-impl<'a, K: ArrowDictionaryKeyType, V> From<TypedDictionaryArray<'a, K, V>> for Dictionary<'a>
+impl<'a, 'b, K: ArrowDictionaryKeyType, V> From<TypedDictionaryArray<'b, K, V>> for Dictionary<'a>
 where
-    DictionaryValueArray<'a>: From<&'a V>,
+    DictionaryValueArray<'a>: From<&'b V>,
 {
-    fn from(value: TypedDictionaryArray<'a, K, V>) -> Self {
+    fn from(value: TypedDictionaryArray<'b, K, V>) -> Self {
         Dictionary {
             keys: value.keys().into(),
             values: value.values().into(),
+        }
+    }
+}
+
+impl From<RecordTableDictionary> for Dictionary<'static> {
+    fn from(value: RecordTableDictionary) -> Self {
+        let (keys, values) = value.into_parts();
+
+        Dictionary {
+            keys,
+            values: values.into(),
+        }
+    }
+}
+
+impl From<RecordTableDictionaryValueArray> for DictionaryValueArray<'static> {
+    fn from(value: RecordTableDictionaryValueArray) -> Self {
+        match value {
+            RecordTableDictionaryValueArray::Array(a) => DictionaryValueArray::Array(a),
+            RecordTableDictionaryValueArray::Vec(v) => DictionaryValueArray::Vec(v),
+            RecordTableDictionaryValueArray::Boolean => DictionaryValueArray::Boolean,
         }
     }
 }

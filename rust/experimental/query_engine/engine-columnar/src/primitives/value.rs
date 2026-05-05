@@ -1,12 +1,11 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use ahash::RandomState;
+use ahash::AHashMap;
 use chrono::{DateTime, FixedOffset, TimeDelta};
 use data_engine_expressions::*;
 use regex::Regex;
@@ -78,27 +77,27 @@ impl<'a> MapValueOrRef<'a> {
 
 #[derive(Debug, Clone)]
 pub struct OwnedMapValue<'a> {
-    values: HashMap<Box<str>, ValueOrRef<'a>, RandomState>,
+    values: AHashMap<Box<str>, ValueOrRef<'a>>,
 }
 
 impl<'a> OwnedMapValue<'a> {
     pub fn new() -> OwnedMapValue<'a> {
         Self {
-            values: HashMap::with_hasher(RandomState::new()),
+            values: AHashMap::new(),
         }
     }
 
     pub fn with_capacity(capacity: usize) -> OwnedMapValue<'a> {
         Self {
-            values: HashMap::with_capacity_and_hasher(capacity, RandomState::new()),
+            values: AHashMap::with_capacity(capacity),
         }
     }
 
-    pub fn get_values(&self) -> &HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
+    pub fn get_values(&self) -> &AHashMap<Box<str>, ValueOrRef<'a>> {
         &self.values
     }
 
-    pub fn get_values_mut(&mut self) -> &mut HashMap<Box<str>, ValueOrRef<'a>, RandomState> {
+    pub fn get_values_mut(&mut self) -> &mut AHashMap<Box<str>, ValueOrRef<'a>> {
         &mut self.values
     }
 }
@@ -107,7 +106,7 @@ impl<'a, const N: usize> From<[(Box<str>, ValueOrRef<'a>); N]> for MapValueOrRef
     fn from(arr: [(Box<str>, ValueOrRef<'a>); N]) -> Self {
         MapValueOrRef::Owned(
             OwnedMapValue {
-                values: HashMap::<Box<str>, ValueOrRef<'a>, RandomState>::from_iter(arr),
+                values: AHashMap::<Box<str>, ValueOrRef<'a>>::from_iter(arr),
             }
             .into(),
         )

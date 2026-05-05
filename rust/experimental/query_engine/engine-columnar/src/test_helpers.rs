@@ -3,10 +3,8 @@
 
 use std::{cell::RefCell, collections::HashMap, fmt::Display};
 
-use ahash::RandomState;
 use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
-use indexmap::IndexSet;
 
 use crate::{execution_context::*, resolved_value::*, scalars::execute_scalar_expression, *};
 
@@ -15,7 +13,7 @@ pub(crate) fn run_scalar_expression_test<FValidate>(
     expression: ScalarExpression,
     validate: FValidate,
 ) where
-    for<'a> FValidate: FnOnce(ResolvedScalarValue<'a>),
+    for<'a, 'b> FValidate: FnOnce(ResolvedScalarValue<'a, 'b>),
 {
     let d = RefCell::new(vec![]);
 
@@ -28,10 +26,10 @@ pub(crate) fn run_scalar_expression_test<FValidate>(
     validate(result)
 }
 
-pub(crate) fn build_indexset_dictionary<'a>(
+pub(crate) fn build_dictionary(
     keys: Vec<Option<u16>>,
-    values: Vec<ValueOrRef<'a>>,
-) -> Dictionary<'a> {
+    values: Vec<ValueOrRef<'static>>,
+) -> RecordTableDictionary {
     let mut key_builder = PrimitiveBuilder::<UInt16Type>::new();
 
     for key in keys {
@@ -43,24 +41,20 @@ pub(crate) fn build_indexset_dictionary<'a>(
 
     let keys = key_builder.finish();
 
-    let mut set = IndexSet::with_hasher(RandomState::new());
-
-    for value in values {
-        let (_, inserted) = set.insert_full(value);
-        assert!(inserted);
-    }
-
-    Dictionary::new(keys.into(), set.into())
+    RecordTableDictionary::new(
+        keys.into(),
+        RecordTableDictionaryValueArray::Vec(values.into()),
+    )
 }
 
 #[derive(Debug)]
-pub(crate) struct TestRecords<'a> {
-    values: HashMap<Box<str>, Dictionary<'a>>,
-    attached_records: Option<HashMap<Box<str>, TestRecords<'a>>>,
+pub(crate) struct TestRecords {
+    values: HashMap<Box<str>, RecordTableDictionary>,
+    attached_records: Option<HashMap<Box<str>, TestRecords>>,
 }
 
-impl<'a> TestRecords<'a> {
-    pub fn new(values: HashMap<Box<str>, Dictionary<'a>>) -> TestRecords<'a> {
+impl TestRecords {
+    pub fn new(values: HashMap<Box<str>, RecordTableDictionary>) -> TestRecords {
         Self {
             values,
             attached_records: None,
@@ -68,9 +62,9 @@ impl<'a> TestRecords<'a> {
     }
 
     pub fn with_attached_records(
-        values: HashMap<Box<str>, Dictionary<'a>>,
-        attached_records: HashMap<Box<str>, TestRecords<'a>>,
-    ) -> TestRecords<'a> {
+        values: HashMap<Box<str>, RecordTableDictionary>,
+        attached_records: HashMap<Box<str>, TestRecords>,
+    ) -> TestRecords {
         Self {
             values,
             attached_records: Some(attached_records),
@@ -78,7 +72,7 @@ impl<'a> TestRecords<'a> {
     }
 }
 
-impl<'a> ColumnarRecords for TestRecords<'a> {
+impl ColumnarRecords for TestRecords {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         None
     }
@@ -98,15 +92,23 @@ impl<'a> ColumnarRecords for TestRecords<'a> {
     }
 }
 
-impl<'a> RecordTable for TestRecords<'a> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'a>> {
+impl RecordTable for TestRecords {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
         self.values
             .get(key)
             .map(|v| RecordTableValue::Dictionary(v.clone()))
     }
+
+    fn get_child_table_mut(&mut self, key: &str) -> Option<&mut dyn RecordTable> {
+        todo!()
+    }
+
+    fn set_values(&mut self, key: &str, values: Dictionary<'_>) {
+        todo!()
+    }
 }
 
-impl Display for TestRecords<'_> {
+impl Display for TestRecords {
     fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Ok(())
     }

@@ -1,7 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::{Display, Write};
+use std::{
+    fmt::{Display, Write},
+    sync::Arc,
+};
 
 use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
@@ -9,22 +12,25 @@ use data_engine_expressions::*;
 use crate::*;
 
 #[derive(Debug)]
-pub(crate) enum ResolvedScalarValue<'a> {
+pub(crate) enum ResolvedScalarValue<'a, 'b>
+where
+    'a: 'b,
+{
     Single(ValueOrRef<'a>),
     Dictionary(Dictionary<'a>),
-    Table(&'a dyn RecordTable),
+    Table(&'b dyn RecordTable),
 }
 
-impl<'a> ResolvedScalarValue<'a> {
-    pub fn new_null() -> ResolvedScalarValue<'a> {
+impl<'a, 'b> ResolvedScalarValue<'a, 'b> {
+    pub fn new_null() -> ResolvedScalarValue<'a, 'b> {
         ResolvedScalarValue::Single(ValueOrRef::Null)
     }
 
-    pub fn new_int(value: i64) -> ResolvedScalarValue<'a> {
+    pub fn new_int(value: i64) -> ResolvedScalarValue<'a, 'b> {
         ResolvedScalarValue::Single(ValueOrRef::Integer(value))
     }
 
-    pub fn new_from_value(value: Value<'a>) -> ResolvedScalarValue<'a> {
+    pub fn new_from_value(value: Value<'a>) -> ResolvedScalarValue<'a, 'b> {
         ResolvedScalarValue::Single(match value {
             Value::Array(a) => ValueOrRef::Array(ArrayValueOrRef::Ref(a)),
             Value::Boolean(b) => ValueOrRef::Boolean(b.get_value()),
@@ -48,7 +54,7 @@ impl<'a> ResolvedScalarValue<'a> {
     where
         FSingle: FnOnce(ValueOrRef<'a>) -> FRet,
         FDictionary: FnOnce(Dictionary<'a>) -> FRet,
-        FTable: FnOnce(&'a dyn RecordTable) -> FRet,
+        FTable: FnOnce(&'b dyn RecordTable) -> FRet,
     {
         match self {
             ResolvedScalarValue::Single(single) => when_single(single),
@@ -67,7 +73,7 @@ impl<'a> ResolvedScalarValue<'a> {
     where
         FSingle: FnOnce(TState, ValueOrRef<'a>) -> FRet,
         FDictionary: FnOnce(TState, Dictionary<'a>) -> FRet,
-        FTable: FnOnce(TState, &'a dyn RecordTable) -> FRet,
+        FTable: FnOnce(TState, &'b dyn RecordTable) -> FRet,
     {
         match self {
             ResolvedScalarValue::Single(single) => when_single(state, single),
@@ -112,8 +118,10 @@ impl<'a> ResolvedScalarValue<'a> {
     }
 }
 
-impl ResolvedScalarValue<'_> {
-    pub fn try_get_key_info(values: &[&ResolvedScalarValue<'_>]) -> Result<(usize, DataType), ()> {
+impl ResolvedScalarValue<'_, '_> {
+    pub fn try_get_key_info(
+        values: &[&ResolvedScalarValue<'_, '_>],
+    ) -> Result<(usize, DataType), ()> {
         for value in values {
             if let ResolvedScalarValue::Dictionary(d) = value {
                 let keys = d.keys();
@@ -125,7 +133,7 @@ impl ResolvedScalarValue<'_> {
     }
 }
 
-impl Display for ResolvedScalarValue<'_> {
+impl Display for ResolvedScalarValue<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ResolvedScalarValue::Table(t) => t.fmt(f),
@@ -140,20 +148,23 @@ impl Display for ResolvedScalarValue<'_> {
 }
 
 #[derive(Debug)]
-pub(crate) enum ResolvedLogicalValue<'a> {
+pub(crate) enum ResolvedLogicalValue {
     Single(bool),
-    Array(ResolvedBooleanArray<'a>),
+    Array {
+        data_type: DataType,
+        values: Arc<dyn Array>,
+    },
 }
 
-impl<'a> ResolvedLogicalValue<'a> {
+impl ResolvedLogicalValue {
     pub fn map_into<FSingle, FArray, FRet>(self, when_single: FSingle, when_array: FArray) -> FRet
     where
         FSingle: FnOnce(bool) -> FRet,
-        FArray: FnOnce(ResolvedBooleanArray<'a>) -> FRet,
+        FArray: FnOnce(DataType, Arc<dyn Array>) -> FRet,
     {
         match self {
             ResolvedLogicalValue::Single(single) => when_single(single),
-            ResolvedLogicalValue::Array(array) => when_array(array),
+            ResolvedLogicalValue::Array { data_type, values } => when_array(data_type, values),
         }
     }
 
@@ -165,69 +176,55 @@ impl<'a> ResolvedLogicalValue<'a> {
     ) -> FRet
     where
         FSingle: FnOnce(TState, bool) -> FRet,
-        FArray: FnOnce(TState, ResolvedBooleanArray<'a>) -> FRet,
+        FArray: FnOnce(TState, DataType, Arc<dyn Array>) -> FRet,
     {
         match self {
             ResolvedLogicalValue::Single(single) => when_single(state, single),
-            ResolvedLogicalValue::Array(array) => when_array(state, array),
+            ResolvedLogicalValue::Array { data_type, values } => {
+                when_array(state, data_type, values)
+            }
         }
     }
 }
 
-impl Display for ResolvedLogicalValue<'_> {
+impl Display for ResolvedLogicalValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ResolvedLogicalValue::Single(s) => write!(f, "[Boolean({s})]"),
-            ResolvedLogicalValue::Array(a) => a.fmt(f),
+            ResolvedLogicalValue::Array {
+                data_type: _,
+                values,
+            } => {
+                let a = values.as_boolean();
+
+                f.write_char('{')?;
+                for key in 0..a.len() {
+                    if key > 0 {
+                        f.write_char(',')?;
+                    }
+                    if a.is_null(key) {
+                        write!(f, "{key}:Null")?;
+                    } else {
+                        let value = unsafe { a.value_unchecked(key) };
+                        write!(f, "{key}:Boolean({value})")?;
+                    }
+                }
+                f.write_char('}')
+            }
         }
     }
 }
 
-impl<'a> From<ResolvedLogicalValue<'a>> for ResolvedScalarValue<'a> {
-    fn from(value: ResolvedLogicalValue<'a>) -> Self {
+impl From<ResolvedLogicalValue> for ResolvedScalarValue<'_, '_> {
+    fn from(value: ResolvedLogicalValue) -> Self {
         match value {
             ResolvedLogicalValue::Single(s) => ResolvedScalarValue::Single(ValueOrRef::Boolean(s)),
-            ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a)) => {
-                ResolvedScalarValue::Dictionary(a.into())
-            }
-            ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a)) => {
-                ResolvedScalarValue::Dictionary(a.into())
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum ResolvedBooleanArray<'a> {
-    Ref(&'a BooleanArray),
-    Owned(BooleanArray),
-}
-
-impl ResolvedBooleanArray<'_> {
-    pub fn as_array(&self) -> &BooleanArray {
-        match self {
-            ResolvedBooleanArray::Ref(a) => a,
-            ResolvedBooleanArray::Owned(a) => a,
-        }
-    }
-}
-
-impl Display for ResolvedBooleanArray<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let a = self.as_array();
-
-        f.write_char('{')?;
-        for key in 0..a.len() {
-            if key > 0 {
-                f.write_char(',')?;
-            }
-            if a.is_null(key) {
-                write!(f, "{key}:Null")?;
-            } else {
-                let value = unsafe { a.value_unchecked(key) };
-                write!(f, "{key}:Boolean({value})")?;
+            ResolvedLogicalValue::Array { data_type, values } => {
+                ResolvedScalarValue::Dictionary(Dictionary::new(
+                    DictionaryKeyArray::BooleanArray { data_type, values },
+                    DictionaryValueArray::Boolean,
+                ))
             }
         }
-        f.write_char('}')
     }
 }

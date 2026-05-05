@@ -7,14 +7,10 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, selection::select_from_record_table, *,
 };
 
-pub fn execute_source_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
+pub fn execute_source_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     source_scalar_expression: &'pipeline SourceScalarExpression,
-) -> ResolvedScalarValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let record = match execution_context.get_records() {
         Some(r) => r,
         None => {
@@ -31,7 +27,6 @@ where
 
     select_from_record_table(
         execution_context,
-        source_scalar_expression,
         key_data_type,
         record,
         source_scalar_expression
@@ -50,7 +45,7 @@ mod tests {
 
     #[test]
     fn test_select_from_source_table_using_single_string() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(0), None, Some(1), Some(2), Some(3)],
             vec![
                 ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
@@ -80,7 +75,9 @@ mod tests {
             )])),
             ScalarExpression::Source(select_valid_key),
             |r| match r {
-                ResolvedScalarValue::Dictionary(actual) => assert_eq!(values_dictionary, actual),
+                ResolvedScalarValue::Dictionary(actual) => {
+                    assert_eq!(values_dictionary.as_dictionary(), actual)
+                }
                 _ => panic!("test failure"),
             },
         );
@@ -135,10 +132,11 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![None, None, None, None, Some(0), None],
                             vec![ValueOrRef::Integer(18)]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -167,7 +165,8 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(vec![None, None, None, None, None, None], vec![]),
+                        build_dictionary(vec![None, None, None, None, None, None], vec![])
+                            .as_dictionary(),
                         actual
                     );
                 }
@@ -178,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_select_from_source_table_using_single_integer() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(0), None, Some(1)],
             vec![
                 ValueOrRef::Array(ArrayValueOrRef::from([
@@ -211,10 +210,11 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0), Some(0), None, None],
                             vec![ValueOrRef::Integer(0)]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -243,10 +243,11 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0), Some(0), None, None],
                             vec![ValueOrRef::Integer(2)]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -275,7 +276,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(vec![None, None, None, None], vec![]),
+                        build_dictionary(vec![None, None, None, None], vec![]).as_dictionary(),
                         actual
                     );
                 }
@@ -286,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_select_from_source_table_using_dictionary() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![
                 Some(0), // string value: hello world
                 Some(0), // string value: hello world
@@ -320,7 +321,7 @@ mod tests {
             ],
         );
 
-        let keys_dictionary = build_indexset_dictionary(
+        let keys_dictionary = build_dictionary(
             vec![
                 None,
                 None,
@@ -338,7 +339,7 @@ mod tests {
             ],
         );
 
-        let indicies_dictionary = build_indexset_dictionary(
+        let indicies_dictionary = build_dictionary(
             vec![
                 None,
                 None,
@@ -380,7 +381,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![
                                 None,
                                 None,
@@ -396,7 +397,8 @@ mod tests {
                                 ValueOrRef::String(StringValueOrRef::new_owned("value1".into())),
                                 ValueOrRef::String(StringValueOrRef::new_owned("value2".into())),
                             ],
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -431,7 +433,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![
                                 None,
                                 None,
@@ -444,7 +446,8 @@ mod tests {
                                 None,
                             ],
                             vec![ValueOrRef::Integer(0), ValueOrRef::Integer(2),],
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }

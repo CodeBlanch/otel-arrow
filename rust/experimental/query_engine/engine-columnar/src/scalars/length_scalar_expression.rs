@@ -9,14 +9,10 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression,
 };
 
-pub fn execute_length_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
+pub fn execute_length_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     length_scalar_expression: &'pipeline LengthScalarExpression,
-) -> ResolvedScalarValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let inner_value = execute_scalar_expression(
         execution_context,
         length_scalar_expression.get_inner_expression(),
@@ -139,15 +135,12 @@ mod tests {
 
     #[test]
     fn test_length_dictionary() {
-        let array = ArrayScalarExpression::new(QueryLocation::new_fake(), vec![]);
-        let map = MapScalarExpression::new(QueryLocation::new_fake(), HashMap::new());
-
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(0), None, Some(1), Some(2), Some(3)],
             vec![
                 ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
-                ValueOrRef::Array(ArrayValueOrRef::Ref(&array)),
-                ValueOrRef::Map(MapValueOrRef::Ref(&map)),
+                ValueOrRef::Array([].into()),
+                ValueOrRef::Map([].into()),
                 ValueOrRef::Integer(0),
             ],
         );
@@ -174,10 +167,11 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0), Some(0), None, Some(1), Some(1), None],
                             vec![ValueOrRef::Integer(11), ValueOrRef::Integer(0),]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }

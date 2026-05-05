@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cell::OnceCell;
+use std::{cell::OnceCell, sync::Arc};
 
 use arrow::{
     array::*,
@@ -21,51 +21,15 @@ impl<'a> Dictionary<'a> {
     {
         let (keys, values) = self.into_parts();
 
-        match keys.values() {
-            DictionaryKeyArrayValues::Array(key_array) => match key_array.data_type() {
-                DataType::Int8 => {
-                    transform_boolean_typed(key_array.as_primitive::<Int8Type>(), values, transform)
-                }
-                DataType::Int16 => transform_boolean_typed(
-                    key_array.as_primitive::<Int16Type>(),
-                    values,
-                    transform,
-                ),
-                DataType::Int32 => transform_boolean_typed(
-                    key_array.as_primitive::<Int32Type>(),
-                    values,
-                    transform,
-                ),
-                DataType::Int64 => transform_boolean_typed(
-                    key_array.as_primitive::<Int64Type>(),
-                    values,
-                    transform,
-                ),
-
-                DataType::UInt8 => transform_boolean_typed(
-                    key_array.as_primitive::<UInt8Type>(),
-                    values,
-                    transform,
-                ),
-                DataType::UInt16 => transform_boolean_typed(
-                    key_array.as_primitive::<UInt16Type>(),
-                    values,
-                    transform,
-                ),
-                DataType::UInt32 => transform_boolean_typed(
-                    key_array.as_primitive::<UInt32Type>(),
-                    values,
-                    transform,
-                ),
-                DataType::UInt64 => transform_boolean_typed(
-                    key_array.as_primitive::<UInt64Type>(),
-                    values,
-                    transform,
-                ),
-
-                d => panic!("Unexpected dictionary key type '{d}' encountered"),
-            },
-            DictionaryKeyArrayValues::UniqueValues {
+        match keys {
+            DictionaryKeyArray::KeyArray(key_array) => {
+                transform_array_into_boolean(&key_array, values, transform)
+            }
+            DictionaryKeyArray::BooleanArray {
+                data_type: _,
+                values: key_array,
+            } => transform_array_into_boolean(&key_array, values, transform),
+            DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
             } => {
@@ -96,7 +60,7 @@ impl<'a> Dictionary<'a> {
                         .and_then(|v| NullBufferBuilder::new_from_buffer(v, length).finish()),
                 )
             }
-            DictionaryKeyArrayValues::SingleValue {
+            DictionaryKeyArray::SingleValue {
                 data_type: _,
                 length,
                 value_index,
@@ -133,37 +97,15 @@ impl<'a> Dictionary<'a> {
     {
         let (keys, values) = self.into_parts();
 
-        match keys.values() {
-            DictionaryKeyArrayValues::Array(key_array) => match key_array.data_type() {
-                DataType::Int8 => {
-                    transform_any_typed(key_array.as_primitive::<Int8Type>(), values, transform)
-                }
-                DataType::Int16 => {
-                    transform_any_typed(key_array.as_primitive::<Int16Type>(), values, transform)
-                }
-                DataType::Int32 => {
-                    transform_any_typed(key_array.as_primitive::<Int32Type>(), values, transform)
-                }
-                DataType::Int64 => {
-                    transform_any_typed(key_array.as_primitive::<Int64Type>(), values, transform)
-                }
-
-                DataType::UInt8 => {
-                    transform_any_typed(key_array.as_primitive::<UInt8Type>(), values, transform)
-                }
-                DataType::UInt16 => {
-                    transform_any_typed(key_array.as_primitive::<UInt16Type>(), values, transform)
-                }
-                DataType::UInt32 => {
-                    transform_any_typed(key_array.as_primitive::<UInt32Type>(), values, transform)
-                }
-                DataType::UInt64 => {
-                    transform_any_typed(key_array.as_primitive::<UInt64Type>(), values, transform)
-                }
-
-                d => panic!("Unexpected dictionary key type '{d}' encountered"),
-            },
-            DictionaryKeyArrayValues::UniqueValues { data_type, length } => match data_type {
+        match keys {
+            DictionaryKeyArray::KeyArray(key_array) => {
+                transform_array_into_any(key_array.data_type(), &key_array, values, transform)
+            }
+            DictionaryKeyArray::BooleanArray {
+                data_type,
+                values: key_array,
+            } => transform_array_into_any(&data_type, &key_array, values, transform),
+            DictionaryKeyArray::UniqueValues { data_type, length } => match data_type {
                 DataType::Int8 => {
                     transform_any_typed_keyless::<Int8Type, _>(length, values, transform)
                 }
@@ -192,22 +134,79 @@ impl<'a> Dictionary<'a> {
 
                 d => panic!("Unexpected dictionary key type '{d}' encountered"),
             },
-            DictionaryKeyArrayValues::SingleValue {
-                data_type,
+            DictionaryKeyArray::SingleValue {
+                ref data_type,
                 length,
                 value_index,
             } => match value_index {
                 None => Dictionary::new(keys, values),
                 Some(value_index) => match transform(values.get_value_at(value_index)) {
-                    ValueOrRef::Null => Dictionary::new_null_with_data_type(length, data_type),
-                    v => Dictionary::new_scalar_with_data_type(length, v, data_type),
+                    ValueOrRef::Null => {
+                        Dictionary::new_null_with_data_type(length, data_type.clone())
+                    }
+                    v => Dictionary::new_scalar_with_data_type(length, v, data_type.clone()),
                 },
             },
         }
     }
 }
 
-fn transform_boolean_typed<K: ArrowDictionaryKeyType, FTransform>(
+fn transform_array_into_boolean<FTransform>(
+    key_array: &Arc<dyn Array>,
+    values: DictionaryValueArray<'_>,
+    transform: FTransform,
+) -> BooleanArray
+where
+    FTransform: FnMut(ValueOrRef<'_>) -> Option<bool>,
+{
+    match key_array.data_type() {
+        DataType::Int8 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<Int8Type>(),
+            values,
+            transform,
+        ),
+        DataType::Int16 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<Int16Type>(),
+            values,
+            transform,
+        ),
+        DataType::Int32 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<Int32Type>(),
+            values,
+            transform,
+        ),
+        DataType::Int64 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<Int64Type>(),
+            values,
+            transform,
+        ),
+
+        DataType::UInt8 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<UInt8Type>(),
+            values,
+            transform,
+        ),
+        DataType::UInt16 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<UInt16Type>(),
+            values,
+            transform,
+        ),
+        DataType::UInt32 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<UInt32Type>(),
+            values,
+            transform,
+        ),
+        DataType::UInt64 => transform_array_into_boolean_typed(
+            key_array.as_primitive::<UInt64Type>(),
+            values,
+            transform,
+        ),
+
+        d => panic!("Unexpected dictionary key type '{d}' encountered"),
+    }
+}
+
+fn transform_array_into_boolean_typed<K: ArrowDictionaryKeyType, FTransform>(
     keys: &PrimitiveArray<K>,
     values: DictionaryValueArray<'_>,
     mut transform: FTransform,
@@ -295,7 +294,53 @@ pub(crate) fn push_null(
     }
 }
 
-fn transform_any_typed<'a, K: ArrowDictionaryKeyType, FTransform>(
+fn transform_array_into_any<'a, FTransform>(
+    key_data_type: &DataType,
+    key_array: &Arc<dyn Array>,
+    values: DictionaryValueArray<'a>,
+    transform: FTransform,
+) -> Dictionary<'a>
+where
+    FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
+{
+    match key_data_type {
+        DataType::Int8 => {
+            transform_array_into_any_typed(key_array.as_primitive::<Int8Type>(), values, transform)
+        }
+        DataType::Int16 => {
+            transform_array_into_any_typed(key_array.as_primitive::<Int16Type>(), values, transform)
+        }
+        DataType::Int32 => {
+            transform_array_into_any_typed(key_array.as_primitive::<Int32Type>(), values, transform)
+        }
+        DataType::Int64 => {
+            transform_array_into_any_typed(key_array.as_primitive::<Int64Type>(), values, transform)
+        }
+
+        DataType::UInt8 => {
+            transform_array_into_any_typed(key_array.as_primitive::<UInt8Type>(), values, transform)
+        }
+        DataType::UInt16 => transform_array_into_any_typed(
+            key_array.as_primitive::<UInt16Type>(),
+            values,
+            transform,
+        ),
+        DataType::UInt32 => transform_array_into_any_typed(
+            key_array.as_primitive::<UInt32Type>(),
+            values,
+            transform,
+        ),
+        DataType::UInt64 => transform_array_into_any_typed(
+            key_array.as_primitive::<UInt64Type>(),
+            values,
+            transform,
+        ),
+
+        d => panic!("Unexpected dictionary key type '{d}' encountered"),
+    }
+}
+
+fn transform_array_into_any_typed<'a, K: ArrowDictionaryKeyType, FTransform>(
     keys: &PrimitiveArray<K>,
     values: DictionaryValueArray<'a>,
     mut transform: FTransform,

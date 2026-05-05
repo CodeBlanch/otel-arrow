@@ -11,17 +11,12 @@ use crate::{
     scalars::execute_scalar_expression, *,
 };
 
-pub(crate) fn select_from_record_table<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
-    execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
-    expression: &'pipeline dyn Expression,
+pub(crate) fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
+    execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
     key_data_type: DataType,
     root: &'a dyn RecordTable,
     selectors: &'pipeline [ScalarExpression],
-) -> ResolvedScalarValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let mut current = ResolvedScalarValue::Table(root);
 
     for selector in selectors {
@@ -29,9 +24,13 @@ where
             current,
             |current, s| match s {
                 ValueOrRef::String(key) => match current {
-                    ResolvedScalarValue::Table(t) => t.get_values(key.get_value()),
+                    ResolvedScalarValue::Table(t) => match t.get_values(key.get_value()) {
+                        Some(RecordTableValue::Table(t)) => Some(ResolvedScalarValue::Table(t)),
+                        Some(RecordTableValue::Dictionary(d)) => Some(ResolvedScalarValue::Dictionary(d.into())),
+                        None => None,
+                    }
                     ResolvedScalarValue::Dictionary(d) => {
-                        Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
+                        Some(ResolvedScalarValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Map(m) = v {
                                 match m {
                                     MapValueOrRef::Ref(m) => m.get(key.get_value()).map_or(ValueOrRef::Null, |v| v.to_value().into()),
@@ -40,7 +39,7 @@ where
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
-                                    expression,
+                                    selector,
                                     || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), v.get_value_type()),
                                 );
                                 ValueOrRef::Null
@@ -51,7 +50,7 @@ where
                 },
                 ValueOrRef::Integer(index) => match current {
                     ResolvedScalarValue::Dictionary(d) => {
-                        Some(RecordTableValue::Dictionary(d.transform_into_any(|v| {
+                        Some(ResolvedScalarValue::Dictionary(d.transform_into_any(|v| {
                             if let ValueOrRef::Array(a) = v {
                                 let len = a.len();
                                 let mut index = index.get_value();
@@ -61,7 +60,7 @@ where
                                 if index < 0 || index >= len as i64 {
                                     execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
-                                        expression,
+                                        selector,
                                         || format!("Array index '{index}' specified in accessor expression is invalid"),
                                     );
                                     ValueOrRef::Null
@@ -71,7 +70,7 @@ where
                             } else {
                                 execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
-                                    expression,
+                                    selector,
                                     || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", index.get_value(), v.get_value_type()),
                                 );
                                 ValueOrRef::Null
@@ -82,7 +81,7 @@ where
                     ResolvedScalarValue::Table(_) => {
                         execution_context.add_diagnostic_if_enabled(
                             ColumnarEngineDiagnosticLevel::Warn,
-                            expression,
+                            selector,
                             || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", index.get_value()),
                         );
                         None
@@ -91,7 +90,7 @@ where
                 v => {
                     execution_context.add_diagnostic_if_enabled(
                         ColumnarEngineDiagnosticLevel::Warn,
-                        expression,
+                        selector,
                         || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
                     );
                     None
@@ -99,15 +98,15 @@ where
             },
             |current, dictionary| {
                 Some(match key_data_type {
-                    DataType::UInt8 => select_using_dictionary::<UInt8Type, TRecords>(execution_context, expression, &current, dictionary),
-                    DataType::UInt16 => select_using_dictionary::<UInt16Type, TRecords>(execution_context, expression, &current, dictionary),
-                    DataType::UInt32 => select_using_dictionary::<UInt32Type, TRecords>(execution_context, expression, &current, dictionary),
-                    DataType::UInt64 => select_using_dictionary::<UInt64Type, TRecords>(execution_context, expression, &current, dictionary),
+                    DataType::UInt8 => select_using_dictionary::<UInt8Type, TRecords>(execution_context, &current, selector, dictionary),
+                    DataType::UInt16 => select_using_dictionary::<UInt16Type, TRecords>(execution_context, &current, selector, dictionary),
+                    DataType::UInt32 => select_using_dictionary::<UInt32Type, TRecords>(execution_context, &current, selector, dictionary),
+                    DataType::UInt64 => select_using_dictionary::<UInt64Type, TRecords>(execution_context, &current, selector, dictionary),
 
-                    DataType::Int8 => select_using_dictionary::<Int8Type, TRecords>(execution_context, expression, &current, dictionary),
-                    DataType::Int16 => select_using_dictionary::<Int16Type, TRecords>(execution_context, expression, &current, dictionary),
-                    DataType::Int32 => select_using_dictionary::<Int32Type, TRecords>(execution_context, expression, &current, dictionary),
-                    DataType::Int64 => select_using_dictionary::<Int64Type, TRecords>(execution_context, expression, &current, dictionary),
+                    DataType::Int8 => select_using_dictionary::<Int8Type, TRecords>(execution_context, &current, selector, dictionary),
+                    DataType::Int16 => select_using_dictionary::<Int16Type, TRecords>(execution_context, &current, selector, dictionary),
+                    DataType::Int32 => select_using_dictionary::<Int32Type, TRecords>(execution_context, &current, selector, dictionary),
+                    DataType::Int64 => select_using_dictionary::<Int64Type, TRecords>(execution_context, &current, selector, dictionary),
 
                     _ => panic!("Key type is not supported"),
                 })
@@ -115,7 +114,7 @@ where
             |_, _| {
                 execution_context.add_diagnostic_if_enabled(
                     ColumnarEngineDiagnosticLevel::Warn,
-                    expression,
+                    selector,
                     || "Unexpected scalar expression with Map value type encountered in accessor expression".into(),
                 );
                 None
@@ -127,10 +126,7 @@ where
                 current = ResolvedScalarValue::new_null();
                 break;
             }
-            Some(v) => match v {
-                RecordTableValue::Table(t) => current = ResolvedScalarValue::Table(t),
-                RecordTableValue::Dictionary(d) => current = ResolvedScalarValue::Dictionary(d),
-            },
+            Some(v) => current = v,
         }
     }
 
@@ -139,10 +135,10 @@ where
 
 fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: ColumnarRecords>(
     execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
-    expression: &'pipeline dyn Expression,
-    source: &ResolvedScalarValue<'a>,
-    selector: Dictionary<'a>,
-) -> RecordTableValue<'a> {
+    source: &ResolvedScalarValue<'pipeline, 'a>,
+    selector_expression: &'pipeline dyn Expression,
+    selector: Dictionary<'pipeline>,
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let key_count = selector.len();
 
     let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_count);
@@ -177,7 +173,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                         v => {
                             execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
-                                    expression,
+                                    selector_expression,
                                     || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), v.get_value_type()),
                                 );
                             ValueOrRef::Null
@@ -202,7 +198,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     ResolvedScalarValue::Table(_) => {
                         execution_context.add_diagnostic_if_enabled(
                             ColumnarEngineDiagnosticLevel::Warn,
-                            expression,
+                            selector_expression,
                             || format!("Could not search for array index '{}' specified in accessor expression because current node is a 'Map' value", index.get_value()),
                         );
                         ValueOrRef::Null
@@ -217,7 +213,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                             if index < 0 || index >= len as i64 {
                                 execution_context.add_diagnostic_if_enabled(
                                         ColumnarEngineDiagnosticLevel::Warn,
-                                        expression,
+                                        selector_expression,
                                         || format!("Array index '{index}' specified in accessor expression is invalid"),
                                     );
                                 ValueOrRef::Null
@@ -228,7 +224,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                         v => {
                             execution_context.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Warn,
-                                    expression,
+                                    selector_expression,
                                     || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", index.get_value(), v.get_value_type()),
                                 );
                             ValueOrRef::Null
@@ -251,7 +247,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
             v => {
                 execution_context.add_diagnostic_if_enabled(
                     ColumnarEngineDiagnosticLevel::Warn,
-                    expression,
+                    selector_expression,
                     || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
                 );
                 push_null(&mut null_buffer, key_index, key_bit_length);
@@ -259,7 +255,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
         }
     }
 
-    RecordTableValue::Dictionary(Dictionary::new(
+    ResolvedScalarValue::Dictionary(Dictionary::new(
         PrimitiveArray::<K>::new(
             key_buffer.into(),
             null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_count).finish()),

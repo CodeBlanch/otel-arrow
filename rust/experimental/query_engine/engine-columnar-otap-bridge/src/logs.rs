@@ -264,7 +264,7 @@ pub struct OtapLogRecordBatch<'record> {
     attributes: Option<OtapAttributes<'record>>,
     resource: Option<OtapResource<'record>>,
     scope: Option<OtapScope<'record>>,
-    body: OnceCell<Option<Dictionary<'record>>>,
+    body: OnceCell<Option<RecordTableDictionary>>,
 }
 
 impl<'record> OtapLogRecordBatch<'record> {
@@ -346,7 +346,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(time_unix_nano_column) =
                         logs_schema.column_with_name("time_unix_nano") =>
                 {
-                    Dictionary::from_array::<UInt16Type, _>(
+                    RecordTableDictionary::from_array::<UInt16Type, _>(
                         logs.column(time_unix_nano_column.0)
                             .as_primitive::<TimestampNanosecondType>(),
                     )
@@ -355,7 +355,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(observed_time_unix_nano_column) =
                         logs_schema.column_with_name("observed_time_unix_nano") =>
                 {
-                    Dictionary::from_array::<UInt16Type, _>(
+                    RecordTableDictionary::from_array::<UInt16Type, _>(
                         logs.column(observed_time_unix_nano_column.0)
                             .as_primitive::<TimestampNanosecondType>(),
                     )
@@ -404,7 +404,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                         .into()
                 }
                 "flags" if let Some(flags_column) = logs_schema.column_with_name("flags") => {
-                    Dictionary::from_array::<UInt16Type, _>(
+                    RecordTableDictionary::from_array::<UInt16Type, _>(
                         logs.column(flags_column.0).as_primitive::<UInt32Type>(),
                     )
                 }
@@ -424,6 +424,14 @@ impl RecordTable for OtapLogRecordBatch<'_> {
         }
 
         None
+    }
+
+    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
+        todo!()
+    }
+
+    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
+        todo!()
     }
 }
 
@@ -450,6 +458,14 @@ impl RecordTable for OtapResource<'_> {
         }
 
         None
+    }
+
+    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
+        todo!()
+    }
+
+    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
+        todo!()
     }
 }
 
@@ -497,6 +513,14 @@ impl RecordTable for OtapScope<'_> {
 
         Some(RecordTableValue::Dictionary(values))
     }
+
+    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
+        todo!()
+    }
+
+    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
+        todo!()
+    }
 }
 
 impl Display for OtapScope<'_> {
@@ -510,7 +534,7 @@ pub struct OtapAttributes<'record> {
     batch: &'record RecordBatch,
     ids: &'record PrimitiveArray<UInt16Type>,
     id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
-    cache: RefCell<AHashMap<Box<str>, Dictionary<'record>>>,
+    cache: RefCell<AHashMap<Box<str>, RecordTableDictionary>>,
     attribute_parent_ids: &'record PrimitiveArray<UInt16Type>,
     attribute_keys:
         TypedDictionaryArray<'record, UInt8Type, GenericByteArray<GenericStringType<i32>>>,
@@ -615,7 +639,7 @@ impl<'record> OtapAttributes<'record> {
         &self,
         attribute_index: usize,
         attribute_type: u8,
-    ) -> Option<AttributeValueOrIndex<'record>> {
+    ) -> Option<AttributeValueOrIndex> {
         /*
         pub enum AttributeValueType {
             Empty = 0,
@@ -687,7 +711,7 @@ impl<'record> OtapAttributes<'record> {
         &self,
         attribute_type: u8,
         attribute_value_index: u16,
-    ) -> ValueOrRef<'record> {
+    ) -> ValueOrRef<'static> {
         /*
         pub enum AttributeValueType {
             Empty = 0,
@@ -701,9 +725,17 @@ impl<'record> OtapAttributes<'record> {
         }
         */
         match attribute_type {
-            1 => ValueOrRef::String(StringValueOrRef::Ref(unsafe {
-                self.attribute_string_values
-                    .value_unchecked(attribute_value_index as usize)
+            1 => ValueOrRef::String(StringValueOrRef::Buffer({
+                let strings = self.attribute_string_values;
+                let offsets = strings.value_offsets();
+                let start =
+                    unsafe { *offsets.get_unchecked(attribute_value_index as usize) } as usize;
+                let end =
+                    unsafe { *offsets.get_unchecked(attribute_value_index as usize + 1) } as usize;
+                strings
+                    .values()
+                    .slice_with_length(start, end - start)
+                    .clone()
             })),
             2 => ValueOrRef::Integer(unsafe {
                 self.attribute_int_values
@@ -720,13 +752,16 @@ impl<'record> OtapAttributes<'record> {
                 // todo: Should we log deserialization failure somewhere?
                 crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
             }
-            7 => ValueOrRef::Array(ArrayValueOrRef::WrappedRef(ArrayValueWrappedRef::new_u8(
-                unsafe {
-                    self.attribute_bytes_values
-                        .unwrap()
-                        .value_unchecked(attribute_value_index as usize)
-                },
-            ))),
+            7 => ValueOrRef::Array(ArrayValueOrRef::Buffer({
+                let bytes = self.attribute_bytes_values.unwrap();
+                let offsets = bytes.value_offsets();
+                let start =
+                    unsafe { *offsets.get_unchecked(attribute_value_index as usize) } as usize;
+                let end =
+                    unsafe { *offsets.get_unchecked(attribute_value_index as usize + 1) } as usize;
+                let buffer = bytes.values().slice_with_length(start, end - start).clone();
+                BufferArray::new_u8(buffer)
+            })),
             d => todo!("Attribute type '{d}' is not supported"),
         }
     }
@@ -818,17 +853,17 @@ impl<'record> RecordTable for OtapAttributes<'record> {
                 PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
             };
 
-            Dictionary::new(keys, DictionaryValueArray::VecAnyOwned(values.into()))
+            RecordTableDictionary::new(keys, RecordTableDictionaryValueArray::Vec(values.into()))
         } else {
             let key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
 
-            Dictionary::new(
+            RecordTableDictionary::new(
                 PrimitiveArray::<UInt16Type>::new(
                     key_buffer.into(),
                     Some(NullBuffer::new_null(record_count)),
                 )
                 .into(),
-                DictionaryValueArray::VecAnyOwned(vec![].into()),
+                RecordTableDictionaryValueArray::Vec(vec![].into()),
             )
         };
 
@@ -837,6 +872,14 @@ impl<'record> RecordTable for OtapAttributes<'record> {
         cache.insert(key.into(), value);
 
         Some(RecordTableValue::Dictionary(copy))
+    }
+
+    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
+        None
+    }
+
+    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
+        todo!()
     }
 }
 
@@ -850,9 +893,9 @@ impl Display for OtapAttributes<'_> {
     }
 }
 
-enum AttributeValueOrIndex<'a> {
+enum AttributeValueOrIndex {
     ValueIndex(u16),
-    Value(ValueOrRef<'a>),
+    Value(ValueOrRef<'static>),
 }
 
 fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_length: usize) {
@@ -877,10 +920,10 @@ fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_leng
     }
 }
 
-fn build_logs_body_dictionary<'a>(
-    logs: &'a RecordBatch,
+fn build_logs_body_dictionary(
+    logs: &RecordBatch,
     logs_schema: &Schema,
-) -> Option<Dictionary<'a>> {
+) -> Option<RecordTableDictionary> {
     if let Some(body_column) = logs_schema.column_with_name("body") {
         let body_struct = logs.column(body_column.0).as_struct();
 
@@ -935,9 +978,15 @@ fn build_logs_body_dictionary<'a>(
                                 Entry::Occupied(occupied) => occupied.into_mut(),
                                 Entry::Vacant(vacant) => {
                                     let index = values.len();
-                                    values.push(ValueOrRef::String(StringValueOrRef::Ref(
-                                        body_strings.values().value(value_index),
-                                    )));
+                                    values.push(ValueOrRef::String(StringValueOrRef::Buffer({
+                                        let strings = body_strings.values();
+                                        let offsets = strings.value_offsets();
+                                        let end =
+                                            unsafe { *offsets.get_unchecked(index + 1) } as usize;
+                                        let start =
+                                            unsafe { *offsets.get_unchecked(index) } as usize;
+                                        strings.values().slice_with_length(start, end - start)
+                                    })));
                                     vacant.insert(index as u16)
                                 }
                             };
@@ -1065,11 +1114,19 @@ fn build_logs_body_dictionary<'a>(
                                 Entry::Occupied(occupied) => occupied.into_mut(),
                                 Entry::Vacant(vacant) => {
                                     let index = values.len();
-                                    values.push(ValueOrRef::Array(ArrayValueOrRef::WrappedRef(
-                                        ArrayValueWrappedRef::new_u8(
-                                            body_bytes.values().value(value_index),
-                                        ),
-                                    )));
+                                    values.push(ValueOrRef::Array(ArrayValueOrRef::Buffer({
+                                        let bytes = body_bytes.values();
+                                        let offsets = bytes.value_offsets();
+                                        let start =
+                                            unsafe { *offsets.get_unchecked(index) } as usize;
+                                        let end =
+                                            unsafe { *offsets.get_unchecked(index + 1) } as usize;
+                                        let buffer = bytes
+                                            .values()
+                                            .slice_with_length(start, end - start)
+                                            .clone();
+                                        BufferArray::new_u8(buffer)
+                                    })));
                                     vacant.insert(index as u16)
                                 }
                             };
@@ -1083,14 +1140,14 @@ fn build_logs_body_dictionary<'a>(
                 push_null(&mut null_buffer, key_index, key_bit_length);
             }
 
-            return Some(Dictionary::new(
+            return Some(RecordTableDictionary::new(
                 PrimitiveArray::<UInt16Type>::new(
                     key_buffer.into(),
                     null_buffer
                         .and_then(|v| NullBufferBuilder::new_from_buffer(v, record_count).finish()),
                 )
                 .into(),
-                values.into(),
+                RecordTableDictionaryValueArray::Vec(values.into()),
             ));
         }
     }

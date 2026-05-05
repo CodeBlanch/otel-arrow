@@ -1,7 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::Arc,
+};
 
 use arrow::array::*;
 use data_engine_expressions::*;
@@ -10,14 +13,10 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
-pub fn execute_logical_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
-    execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
+pub fn execute_logical_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
+    execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
     logical_expression: &'pipeline LogicalExpression,
-) -> ResolvedLogicalValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedLogicalValue {
     let value = match logical_expression {
         LogicalExpression::Scalar(s) => {
             let inner_value = execute_scalar_expression(execution_context, s);
@@ -46,13 +45,11 @@ where
                 },
                 |dictionary| {
                     let (keys, values) = dictionary.into_parts();
-                    if let DictionaryKeyArray::BooleanRef(a) = keys {
-                        ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a))
-                    } else if let DictionaryKeyArray::BooleanOwned(a) = keys {
-                        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a))
+                    if let DictionaryKeyArray::BooleanArray{data_type, values} = keys {
+                        ResolvedLogicalValue::Array{data_type, values}
                     } else {
-                        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
-                            Dictionary::new(keys, values).transform_into_boolean(
+                        ResolvedLogicalValue::Array { data_type: keys.data_type(),
+                            values: Arc::new(Dictionary::new(keys, values).transform_into_boolean(
                                 |v| {
                                     match v.to_value() {
                                         Value::Null => None,
@@ -75,8 +72,8 @@ where
                                         }
                                     }
                                 },
-                            ),
-                        ))
+                            )),
+                        }
                     }
                 },
                 |_| {
@@ -152,16 +149,10 @@ where
         LogicalExpression::Not(n) => {
             match execute_logical_expression(execution_context, n.get_inner_expression()) {
                 ResolvedLogicalValue::Single(s) => ResolvedLogicalValue::Single(!s),
-                ResolvedLogicalValue::Array(ResolvedBooleanArray::Ref(a)) => {
-                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
-                        arrow::compute::not(a).unwrap(),
-                    ))
-                }
-                ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(a)) => {
-                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
-                        arrow::compute::not(&a).unwrap(),
-                    ))
-                }
+                ResolvedLogicalValue::Array { data_type, values } => ResolvedLogicalValue::Array {
+                    data_type,
+                    values: Arc::new(arrow::compute::not(values.as_boolean()).unwrap()),
+                },
             }
         }
         LogicalExpression::And(a) => execute_logical_expression(execution_context, a.get_left())
@@ -173,8 +164,8 @@ where
                         execute_logical_expression(execution_context, a.get_right())
                     }
                 },
-                |left_array| {
-                    let left_as_array = left_array.as_array();
+                |data_type, left_array| {
+                    let left_as_array = left_array.as_boolean();
 
                     if left_as_array.false_count() == left_as_array.len() {
                         ResolvedLogicalValue::Single(false)
@@ -186,17 +177,21 @@ where
                                     if !right_single {
                                         ResolvedLogicalValue::Single(false)
                                     } else {
-                                        ResolvedLogicalValue::Array(left_array)
+                                        ResolvedLogicalValue::Array {
+                                            data_type,
+                                            values: left_array,
+                                        }
                                     }
                                 },
-                                |left_array, right_array| {
-                                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                                |left_array, data_type, right_array| ResolvedLogicalValue::Array {
+                                    data_type,
+                                    values: Arc::new(
                                         arrow::compute::and(
-                                            left_array.as_array(),
-                                            right_array.as_array(),
+                                            left_array.as_boolean(),
+                                            right_array.as_boolean(),
                                         )
                                         .expect("and operation failed"),
-                                    ))
+                                    ),
                                 },
                             )
                     }
@@ -211,8 +206,8 @@ where
                         execute_logical_expression(execution_context, o.get_right())
                     }
                 },
-                |left_array| {
-                    let left_as_array = left_array.as_array();
+                |data_type, left_array| {
+                    let left_as_array = left_array.as_boolean();
 
                     if left_as_array.true_count() == left_as_array.len() {
                         ResolvedLogicalValue::Single(true)
@@ -224,17 +219,21 @@ where
                                     if right_single {
                                         ResolvedLogicalValue::Single(true)
                                     } else {
-                                        ResolvedLogicalValue::Array(left_array)
+                                        ResolvedLogicalValue::Array {
+                                            data_type,
+                                            values: left_array,
+                                        }
                                     }
                                 },
-                                |left_array, right_array| {
-                                    ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
+                                |left_array, data_type, right_array| ResolvedLogicalValue::Array {
+                                    data_type,
+                                    values: Arc::new(
                                         arrow::compute::or(
-                                            left_array.as_array(),
-                                            right_array.as_array(),
+                                            left_array.as_boolean(),
+                                            right_array.as_boolean(),
                                         )
                                         .expect("or operation failed"),
-                                    ))
+                                    ),
                                 },
                             )
                     }
@@ -281,11 +280,11 @@ where
     value
 }
 
-fn compare<'record, FCompare>(
-    left: ResolvedScalarValue<'_>,
-    right: ResolvedScalarValue<'_>,
+fn compare<FCompare>(
+    left: ResolvedScalarValue<'_, '_>,
+    right: ResolvedScalarValue<'_, '_>,
     compare: FCompare,
-) -> ResolvedLogicalValue<'record>
+) -> ResolvedLogicalValue
 where
     FCompare: Fn(&Value, &Value) -> bool,
 {
@@ -305,26 +304,45 @@ where
         if let Some(right) = right_single {
             ResolvedLogicalValue::Single(compare(&left.to_value(), &right.to_value()))
         } else {
-            ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(compare_single_to_dictionary(
-                &left,
-                right_dictionary.expect("right is dictionary"),
-                compare,
-            )))
+            ResolvedLogicalValue::Array {
+                data_type: right_dictionary
+                    .as_ref()
+                    .expect("right is dictionary")
+                    .keys()
+                    .data_type(),
+                values: Arc::new(compare_single_to_dictionary(
+                    &left,
+                    right_dictionary.expect("right is dictionary"),
+                    compare,
+                )),
+            }
         }
     } else if let Some(right) = right_single {
-        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(compare_dictionary_to_single(
-            left_dictionary.expect("left is dictionary"),
-            &right,
-            compare,
-        )))
+        ResolvedLogicalValue::Array {
+            data_type: left_dictionary
+                .as_ref()
+                .expect("left is dictionary")
+                .keys()
+                .data_type(),
+            values: Arc::new(compare_dictionary_to_single(
+                left_dictionary.expect("left is dictionary"),
+                &right,
+                compare,
+            )),
+        }
     } else {
-        ResolvedLogicalValue::Array(ResolvedBooleanArray::Owned(
-            compare_dictionary_to_dictionary(
+        ResolvedLogicalValue::Array {
+            data_type: left_dictionary
+                .as_ref()
+                .expect("left is dictionary")
+                .keys()
+                .data_type(),
+            values: Arc::new(compare_dictionary_to_dictionary(
                 left_dictionary.expect("left is dictionary"),
                 right_dictionary.expect("right is dictionary"),
                 compare,
-            ),
-        ))
+            )),
+        }
     }
 }
 

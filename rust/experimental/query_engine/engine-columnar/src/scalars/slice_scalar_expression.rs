@@ -7,14 +7,10 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
-pub fn execute_slice_scalar_expression<'a, 'pipeline, 'c, TRecords: ColumnarRecords>(
+pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     slice_scalar_expression: &'pipeline SliceScalarExpression,
-) -> ResolvedScalarValue<'c>
-where
-    'a: 'c,
-    'pipeline: 'c,
-{
+) -> ResolvedScalarValue<'pipeline, 'a> {
     let inner_value =
         execute_scalar_expression(execution_context, slice_scalar_expression.get_source());
 
@@ -641,7 +637,7 @@ mod tests {
 
     #[test]
     fn test_slice_dictionary_string_with_single_ranges() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(0), None, Some(1), Some(2), Some(3)],
             vec![
                 ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
@@ -733,13 +729,14 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0), Some(0), None, Some(1), Some(1), None],
                             vec![
                                 ValueOrRef::String(StringValueOrRef::new_owned("lo".into())),
                                 ValueOrRef::String(StringValueOrRef::new_owned("db".into())),
                             ]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -775,7 +772,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0), Some(0), None, Some(1), Some(2), None],
                             vec![
                                 ValueOrRef::String(StringValueOrRef::new_owned("lo world".into())),
@@ -784,7 +781,8 @@ mod tests {
                                 )),
                                 ValueOrRef::String(StringValueOrRef::new_owned("dbye".into())),
                             ]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -951,7 +949,8 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(vec![None, None, None, None, None, None], vec![]),
+                        build_dictionary(vec![None, None, None, None, None, None], vec![])
+                            .as_dictionary(),
                         actual
                     );
                 }
@@ -962,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_slice_dictionary_array_with_single_ranges() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(1), None, Some(2)],
             vec![
                 ValueOrRef::Array([].into()),
@@ -1061,12 +1060,13 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![None, Some(0), None, None],
                             vec![ValueOrRef::Array(
                                 [ValueOrRef::Integer(1), ValueOrRef::Integer(2),].into()
                             ),]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -1102,7 +1102,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![None, Some(0), None, None],
                             vec![ValueOrRef::Array(
                                 [
@@ -1112,7 +1112,8 @@ mod tests {
                                 ]
                                 .into()
                             ),]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -1143,7 +1144,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(vec![None, None, None, None], vec![]),
+                        build_dictionary(vec![None, None, None, None], vec![]).as_dictionary(),
                         actual
                     );
                 }
@@ -1154,7 +1155,7 @@ mod tests {
 
     #[test]
     fn test_slice_string_any_with_any_ranges() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![
                 Some(0),
                 Some(0),
@@ -1173,12 +1174,12 @@ mod tests {
             ],
         );
 
-        let range_start_values = build_indexset_dictionary(
+        let range_start_values = build_dictionary(
             vec![None, None, Some(0), Some(0), None, Some(1), Some(1), None],
             vec![ValueOrRef::Integer(0), ValueOrRef::Integer(3)],
         );
 
-        let range_length_values = build_indexset_dictionary(
+        let range_length_values = build_dictionary(
             vec![None, Some(0), None, Some(0), None, Some(1), Some(1), None],
             vec![ValueOrRef::Integer(2), ValueOrRef::Integer(4)],
         );
@@ -1224,7 +1225,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![
                                 Some(0),
                                 Some(1),
@@ -1242,7 +1243,8 @@ mod tests {
                                 ValueOrRef::String(StringValueOrRef::new_owned("he".into())),
                                 ValueOrRef::String(StringValueOrRef::new_owned("dbye".into())),
                             ]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -1250,7 +1252,7 @@ mod tests {
             },
         );
 
-        let range_invalid = build_indexset_dictionary(
+        let range_invalid = build_dictionary(
             vec![Some(0)],
             vec![ValueOrRef::String(StringValueOrRef::new_ref("invalid"))],
         );
@@ -1282,12 +1284,13 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0),],
                             vec![ValueOrRef::String(StringValueOrRef::new_owned(
                                 "hello world".into()
                             )),]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -1322,12 +1325,13 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0),],
                             vec![ValueOrRef::String(StringValueOrRef::new_owned(
                                 "hello world".into()
                             )),]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -1335,7 +1339,7 @@ mod tests {
             },
         );
 
-        let range_length_empty = build_indexset_dictionary(vec![None], vec![]);
+        let range_length_empty = build_dictionary(vec![None], vec![]);
 
         let slice_invalid_range = SliceScalarExpression::new(
             QueryLocation::new_fake(),
@@ -1365,7 +1369,7 @@ mod tests {
             ScalarExpression::Slice(slice_invalid_range),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
-                    assert_eq!(build_indexset_dictionary(vec![None], vec![]), actual);
+                    assert_eq!(build_dictionary(vec![None], vec![]).as_dictionary(), actual);
                 }
                 _ => panic!("test failure"),
             },
@@ -1374,7 +1378,7 @@ mod tests {
 
     #[test]
     fn test_slice_array_any_with_any_ranges() {
-        let values_dictionary = build_indexset_dictionary(
+        let values_dictionary = build_dictionary(
             vec![Some(0), Some(0), Some(0), Some(0), None, Some(1)],
             vec![
                 ValueOrRef::Array(
@@ -1390,12 +1394,12 @@ mod tests {
             ],
         );
 
-        let range_start_values = build_indexset_dictionary(
+        let range_start_values = build_dictionary(
             vec![None, None, Some(0), Some(1), None, Some(1)],
             vec![ValueOrRef::Integer(0), ValueOrRef::Integer(3)],
         );
 
-        let range_length_values = build_indexset_dictionary(
+        let range_length_values = build_dictionary(
             vec![None, Some(0), None, Some(1), None, Some(1)],
             vec![ValueOrRef::Integer(2), ValueOrRef::Integer(4)],
         );
@@ -1441,7 +1445,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_indexset_dictionary(
+                        build_dictionary(
                             vec![Some(0), Some(1), Some(0), Some(2), None, None],
                             vec![
                                 ValueOrRef::Array(
@@ -1458,7 +1462,8 @@ mod tests {
                                 ),
                                 ValueOrRef::Array([ValueOrRef::Integer(3),].into(),),
                             ]
-                        ),
+                        )
+                        .as_dictionary(),
                         actual
                     );
                 }
@@ -1466,7 +1471,7 @@ mod tests {
             },
         );
 
-        let range_length_empty = build_indexset_dictionary(vec![None], vec![]);
+        let range_length_empty = build_dictionary(vec![None], vec![]);
 
         let slice_invalid_range = SliceScalarExpression::new(
             QueryLocation::new_fake(),
@@ -1496,25 +1501,26 @@ mod tests {
             ScalarExpression::Slice(slice_invalid_range),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
-                    assert_eq!(build_indexset_dictionary(vec![None], vec![]), actual);
+                    assert_eq!(build_dictionary(vec![None], vec![]).as_dictionary(), actual);
                 }
                 _ => panic!("test failure"),
             },
         );
     }
 
-    fn valid_full_string_range_result(result: ResolvedScalarValue<'_>) {
+    fn valid_full_string_range_result(result: ResolvedScalarValue<'_, '_>) {
         match result {
             ResolvedScalarValue::Dictionary(actual) => {
                 assert_eq!(
-                    build_indexset_dictionary(
+                    build_dictionary(
                         vec![Some(0), Some(0), None, Some(1), Some(2), None],
                         vec![
                             ValueOrRef::String(StringValueOrRef::new_owned("hello world".into())),
                             ValueOrRef::String(StringValueOrRef::new_owned("goodbye world".into())),
                             ValueOrRef::String(StringValueOrRef::new_owned("goodbye".into())),
                         ]
-                    ),
+                    )
+                    .as_dictionary(),
                     actual
                 );
             }
@@ -1522,11 +1528,11 @@ mod tests {
         }
     }
 
-    fn valid_full_array_range_result(result: ResolvedScalarValue<'_>) {
+    fn valid_full_array_range_result(result: ResolvedScalarValue<'_, '_>) {
         match result {
             ResolvedScalarValue::Dictionary(actual) => {
                 assert_eq!(
-                    build_indexset_dictionary(
+                    build_dictionary(
                         vec![None, Some(0), None, None],
                         vec![ValueOrRef::Array(
                             [
@@ -1537,7 +1543,8 @@ mod tests {
                             ]
                             .into()
                         ),]
-                    ),
+                    )
+                    .as_dictionary(),
                     actual
                 );
             }

@@ -73,9 +73,9 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
         self.records.as_ref()
     }
 
-    /*pub fn set_records(&mut self, records: TRecords) {
-        self.records = Some(records)
-    }*/
+    pub fn get_records_mut(&mut self) -> Option<&mut TRecords> {
+        self.records.as_mut()
+    }
 
     /*pub(crate) fn take_diagnostics(self) -> Vec<ColumnarEngineDiagnostic<'pipeline>> {
         self.diagnostics.take()

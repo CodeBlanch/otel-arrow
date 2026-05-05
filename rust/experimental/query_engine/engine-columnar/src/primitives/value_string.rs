@@ -3,13 +3,16 @@
 
 use std::rc::Rc;
 
+use arrow::buffer::Buffer;
 use data_engine_expressions::*;
 
 use crate::{resolved_value::*, *};
 
 #[derive(Debug, Clone)]
 pub enum StringValueOrRef<'a> {
+    Empty,
     Ref(&'a str),
+    Buffer(Buffer),
     Owned(Rc<String>),
     Slice(StringValueOrRefSlice<'a>),
 }
@@ -25,7 +28,9 @@ impl StringValueOrRef<'_> {
 
     pub fn len(&self) -> usize {
         match self {
+            StringValueOrRef::Empty => 0,
             StringValueOrRef::Ref(s) => s.len(),
+            StringValueOrRef::Buffer(b) => b.len(),
             StringValueOrRef::Owned(s) => s.len(),
             StringValueOrRef::Slice(s) => s.len(),
         }
@@ -33,7 +38,11 @@ impl StringValueOrRef<'_> {
 
     pub fn char_len(&self) -> usize {
         match self {
+            StringValueOrRef::Empty => 0,
             StringValueOrRef::Ref(s) => s.chars().count(),
+            StringValueOrRef::Buffer(b) => {
+                unsafe { std::str::from_utf8_unchecked(b) }.chars().count()
+            }
             StringValueOrRef::Owned(s) => s.chars().count(),
             StringValueOrRef::Slice(s) => s.char_len(),
         }
@@ -41,7 +50,11 @@ impl StringValueOrRef<'_> {
 
     pub fn char_indices(&self) -> CharIndices<'_> {
         match self {
+            StringValueOrRef::Empty => CharIndices::String("".char_indices()),
             StringValueOrRef::Ref(s) => CharIndices::String(s.char_indices()),
+            StringValueOrRef::Buffer(b) => {
+                CharIndices::String(unsafe { std::str::from_utf8_unchecked(b) }.char_indices())
+            }
             StringValueOrRef::Owned(s) => CharIndices::String(s.char_indices()),
             StringValueOrRef::Slice(s) => s.char_indices(),
         }
@@ -49,29 +62,27 @@ impl StringValueOrRef<'_> {
 
     pub fn append_to(self, value: &mut String) {
         match self {
+            StringValueOrRef::Empty => {}
             StringValueOrRef::Ref(s) => value.push_str(s),
+            StringValueOrRef::Buffer(b) => {
+                value.push_str(unsafe { std::str::from_utf8_unchecked(b.as_ref()) })
+            }
             StringValueOrRef::Owned(s) => value.push_str(&s),
             StringValueOrRef::Slice(s) => s.append_to(value),
         }
     }
-}
-
-impl<'a> StringValueOrRef<'a> {
-    pub fn new_ref(value: &'a str) -> StringValueOrRef<'a> {
-        StringValueOrRef::Ref(value)
-    }
 
     pub(crate) fn new_slice(
-        inner_value: StringValueOrRef<'a>,
+        inner_value: StringValueOrRef,
         range_start_inclusive: usize,
         range_end_exclusive: usize,
-    ) -> StringValueOrRef<'a> {
+    ) -> StringValueOrRef {
         // Note: Slice of a str returns raw utf8 bytes. Chars can take 1 to 4
         // bytes. In order to correctly slice the str as chars we have to find
         // the correct byte indices to do the slicing
         let count = range_end_exclusive - range_start_inclusive;
         if count == 0 {
-            return StringValueOrRef::Ref("");
+            return StringValueOrRef::Empty;
         }
 
         let str_byte_len = inner_value.len();
@@ -107,7 +118,11 @@ impl<'a> StringValueOrRef<'a> {
                 inner_value
             } else {
                 match inner_value {
-                    StringValueOrRef::Ref(r) => StringValueOrRef::Ref(&r[start..end]),
+                    StringValueOrRef::Empty => StringValueOrRef::Empty,
+                    StringValueOrRef::Ref(s) => StringValueOrRef::Ref(&s[start..end]),
+                    StringValueOrRef::Buffer(b) => {
+                        StringValueOrRef::Buffer(b.slice_with_length(start, end - start))
+                    }
                     StringValueOrRef::Owned(o) => StringValueOrRef::Slice(StringValueOrRefSlice {
                         value: StringValueOrRef::Owned(o).into(),
                         byte_start_inclusive: start,
@@ -128,31 +143,43 @@ impl<'a> StringValueOrRef<'a> {
                 }
             }
         } else {
-            StringValueOrRef::Ref("")
+            StringValueOrRef::Empty
         }
+    }
+}
+
+impl<'a> StringValueOrRef<'a> {
+    pub fn new_ref(value: &'a str) -> StringValueOrRef<'a> {
+        StringValueOrRef::Ref(value)
     }
 }
 
 impl StringValue for StringValueOrRef<'_> {
     fn get_value(&self) -> &str {
         match self {
+            StringValueOrRef::Empty => "",
             StringValueOrRef::Ref(s) => s,
+            StringValueOrRef::Buffer(b) => unsafe { std::str::from_utf8_unchecked(b) },
             StringValueOrRef::Owned(s) => s,
             StringValueOrRef::Slice(s) => s.get_value(),
         }
     }
 }
 
-impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a> {
+impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a, '_> {
     fn from(value: StringValueOrRef<'a>) -> Self {
         ResolvedScalarValue::Single(ValueOrRef::String(value))
     }
 }
 
 impl From<StringValueOrRef<'_>> for String {
-    fn from(value: StringValueOrRef<'_>) -> Self {
+    fn from(value: StringValueOrRef) -> Self {
         match value {
+            StringValueOrRef::Empty => String::new(),
             StringValueOrRef::Ref(s) => s.into(),
+            StringValueOrRef::Buffer(b) => {
+                unsafe { std::str::from_utf8_unchecked(b.as_ref()) }.into()
+            }
             StringValueOrRef::Owned(s) => match Rc::try_unwrap(s) {
                 Ok(s) => s,
                 Err(o) => (*o).clone(),
