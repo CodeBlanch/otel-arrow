@@ -29,6 +29,7 @@ pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
         ScalarExpression::Constant(_) => todo!(),
         ScalarExpression::Convert(_) => todo!(),
         ScalarExpression::GetType(_) => todo!(),
+        ScalarExpression::GetRecordType(_) => todo!(),
         ScalarExpression::InvokeFunction(_) => todo!(),
         ScalarExpression::Length(l) => execute_length_scalar_expression(execution_context, l),
         ScalarExpression::Logical(_) => todo!(),
