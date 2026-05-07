@@ -144,7 +144,7 @@ impl<'a> Dictionary<'a> {
                     ValueOrRef::Null => {
                         Dictionary::new_null_with_data_type(length, data_type.clone())
                     }
-                    v => Dictionary::new_scalar_with_data_type(length, v, data_type.clone()),
+                    v => Dictionary::new_scalar_with_data_type(data_type.clone(), length, v,),
                 },
             },
         }

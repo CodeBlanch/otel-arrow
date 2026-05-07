@@ -16,13 +16,25 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
     where
         Self: 'a;
 
-    fn create<'a>(&self, batches: &'a [Option<RecordBatch>]) -> Self::Records<'a>;
+    fn create<'a>(&self, batches: &'a [Option<RecordBatch>; BATCH_SIZE]) -> Self::Records<'a>;
 
     fn filter(
         &self,
-        batch: &Self::Records<'_>,
+        batches: &[Option<RecordBatch>; BATCH_SIZE],
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; BATCH_SIZE];
+
+    fn set(
+        &self,
+        batches: &mut [Option<RecordBatch>; BATCH_SIZE],
+        path: &[SelectionPath<'_>],
+        values: Dictionary,
+    ) -> Result<(), &'static str>;
+}
+
+pub enum SelectionPath<'a> {
+    Key(StringValueOrRef<'a>),
+    Index(ArrayValueOrRef<'a>),
 }
 
 pub trait ColumnarRecords: RecordTable
@@ -46,10 +58,6 @@ pub trait RecordTable: Display + Debug {
     //fn get_keys(&self) -> &[&str];
 
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>>;
-
-    fn get_child_table_mut(&mut self, key: &str) -> Option<&mut dyn RecordTable>;
-
-    fn set_values(&mut self, key: &str, values: Dictionary<'_>);
 }
 
 #[derive(Debug, Clone)]

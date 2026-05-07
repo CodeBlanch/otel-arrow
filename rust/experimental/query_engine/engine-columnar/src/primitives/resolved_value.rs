@@ -84,8 +84,8 @@ impl<'a, 'b> ResolvedScalarValue<'a, 'b> {
 
     pub fn try_into_dictionary(
         self,
-        key_count: usize,
         key_type: DataType,
+        key_count: usize,
     ) -> Result<Dictionary<'a>, ()> {
         match self {
             ResolvedScalarValue::Single(s) => Ok(match s {
@@ -98,7 +98,7 @@ impl<'a, 'b> ResolvedScalarValue<'a, 'b> {
                     DataType::UInt16 => Dictionary::new_null::<UInt16Type>(key_count),
                     DataType::UInt32 => Dictionary::new_null::<UInt32Type>(key_count),
                     DataType::UInt64 => Dictionary::new_null::<UInt64Type>(key_count),
-                    _ => todo!(),
+                    d => panic!("Unexpected dictionary key type '{d}' encountered"),
                 },
                 value => match key_type {
                     DataType::Int8 => Dictionary::new_scalar::<Int8Type>(key_count, value),
@@ -109,7 +109,7 @@ impl<'a, 'b> ResolvedScalarValue<'a, 'b> {
                     DataType::UInt16 => Dictionary::new_scalar::<UInt16Type>(key_count, value),
                     DataType::UInt32 => Dictionary::new_scalar::<UInt32Type>(key_count, value),
                     DataType::UInt64 => Dictionary::new_scalar::<UInt64Type>(key_count, value),
-                    _ => todo!(),
+                    d => panic!("Unexpected dictionary key type '{d}' encountered"),
                 },
             }),
             ResolvedScalarValue::Dictionary(d) => Ok(d),

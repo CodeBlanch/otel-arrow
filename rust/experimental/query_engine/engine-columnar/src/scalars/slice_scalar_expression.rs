@@ -229,7 +229,7 @@ pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>
                 }
             };
 
-            let inner_value = match inner_value.try_into_dictionary(key_count, key_type.clone()) {
+            let inner_value = match inner_value.try_into_dictionary(key_type.clone(), key_count) {
                 Ok(v) => v,
                 Err(_) => {
                     execution_context.add_diagnostic_if_enabled(
@@ -242,7 +242,7 @@ pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>
             };
 
             let mut range_start_inclusive = match range_start_inclusive
-                .try_into_dictionary(key_count, key_type.clone())
+                .try_into_dictionary(key_type.clone(), key_count)
             {
                 Ok(v) => v,
                 Err(_) => {
@@ -257,7 +257,7 @@ pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>
                 }
             };
 
-            let mut range_length = match range_length.try_into_dictionary(key_count, key_type) {
+            let mut range_length = match range_length.try_into_dictionary(key_type, key_count) {
                 Ok(v) => v,
                 Err(_) => {
                     execution_context.add_diagnostic_if_enabled(

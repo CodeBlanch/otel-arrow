@@ -32,33 +32,33 @@ impl<'a> Dictionary<'a> {
     }
 
     pub fn new_scalar_with_data_type(
-        count: usize,
+        key_data_type: DataType,
+        key_count: usize,
         value: ValueOrRef<'a>,
-        data_type: DataType,
     ) -> Dictionary<'a> {
-        match data_type {
-            DataType::Int8 => Self::new_scalar::<Int8Type>(count, value),
-            DataType::Int16 => Self::new_scalar::<Int16Type>(count, value),
-            DataType::Int32 => Self::new_scalar::<Int32Type>(count, value),
-            DataType::Int64 => Self::new_scalar::<Int64Type>(count, value),
+        match key_data_type {
+            DataType::Int8 => Self::new_scalar::<Int8Type>(key_count, value),
+            DataType::Int16 => Self::new_scalar::<Int16Type>(key_count, value),
+            DataType::Int32 => Self::new_scalar::<Int32Type>(key_count, value),
+            DataType::Int64 => Self::new_scalar::<Int64Type>(key_count, value),
 
-            DataType::UInt8 => Self::new_scalar::<UInt8Type>(count, value),
-            DataType::UInt16 => Self::new_scalar::<UInt16Type>(count, value),
-            DataType::UInt32 => Self::new_scalar::<UInt32Type>(count, value),
-            DataType::UInt64 => Self::new_scalar::<UInt64Type>(count, value),
+            DataType::UInt8 => Self::new_scalar::<UInt8Type>(key_count, value),
+            DataType::UInt16 => Self::new_scalar::<UInt16Type>(key_count, value),
+            DataType::UInt32 => Self::new_scalar::<UInt32Type>(key_count, value),
+            DataType::UInt64 => Self::new_scalar::<UInt64Type>(key_count, value),
 
             d => panic!("Unexpected dictionary key type '{d}' encountered"),
         }
     }
 
     pub fn new_scalar<K: ArrowDictionaryKeyType>(
-        count: usize,
+        key_count: usize,
         value: ValueOrRef<'a>,
     ) -> Dictionary<'a> {
         Dictionary::new(
             DictionaryKeyArray::SingleValue {
                 data_type: K::DATA_TYPE,
-                length: count,
+                length: key_count,
                 value_index: Some(0),
             },
             vec![value].into(),

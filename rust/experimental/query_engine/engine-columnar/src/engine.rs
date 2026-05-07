@@ -11,12 +11,7 @@ use arrow::array::*;
 use data_engine_expressions::*;
 
 use crate::{
-    engine_diagnostic::{ColumnarEngineDiagnostic, ColumnarEngineDiagnosticLevel},
-    execution_context::ExecutionContext,
-    logical_expressions::execute_logical_expression,
-    resolved_value::*,
-    transform::set_transform_expression::execute_set_transform_expression,
-    *,
+    engine_diagnostic::{ColumnarEngineDiagnostic, ColumnarEngineDiagnosticLevel}, execution_context::ExecutionContext, logical_expressions::execute_logical_expression, resolved_value::*, scalars::execute_scalar_expression, selection::capture_selector_values, transform::set_transform_expression::{SingleOrDictionaryValue, execute_set_transform_expression}, *
 };
 
 pub struct ColumnarEngineOptions {
@@ -186,12 +181,12 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                 data_type: _,
                                 values,
                             } => {
+                                std::mem::drop(execution_context);
+
                                 let new_batches = factory.filter(
-                                    execution_context.get_records().unwrap(),
+                                    &batches,
                                     values.as_boolean(),
                                 );
-
-                                std::mem::drop(execution_context);
 
                                 batches = new_batches;
 
@@ -242,7 +237,76 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                     TransformExpression::RemoveMapKeys(_) => todo!(),
                     TransformExpression::RenameMapKeys(_) => todo!(),
                     TransformExpression::Set(s) => {
-                        execute_set_transform_expression(&mut execution_context, s)
+                        let value = match execute_scalar_expression(
+                            &execution_context,
+                            s.get_source(),
+                        ) {
+                            ResolvedScalarValue::Single(s) => SingleOrDictionaryValue::Single(s),
+                            ResolvedScalarValue::Dictionary(d) => SingleOrDictionaryValue::Dictionary(d),
+                            ResolvedScalarValue::Table(t) => {
+                                // In order to set a table it needs to be converted to a map per record
+                                todo!()
+                            }
+                        };
+
+                        match s.get_destination() {
+                            MutableValueExpression::Source(s) => {
+                                let (key_data_type, key_count) = match execution_context.get_records() {
+                                    Some(r) => {
+                                        (r.get_key_data_type(), r.len())
+                                    }
+                                    None => {
+                                        execution_context.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Warn,
+                                            s,
+                                            || "Source could not be found".into(),
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                let path = match capture_selector_values(&execution_context, s.get_value_accessor().get_selectors())
+                                {
+                                    Ok(p) => p,
+                                    Err(()) => {
+                                        execution_context.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Warn,
+                                            s,
+                                            || "Destination path could not be resolved".into(),
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                std::mem::drop(execution_context);
+
+                                let error = match factory.set(&mut batches, &path, value.into_dictionary(key_data_type, key_count)) {
+                                    Ok(_) => None,
+                                    Err(e) => Some(e)
+                                };
+
+                                execution_context = ExecutionContext::new(
+                                    diagnostic_level,
+                                    //&self.engine.external_function_implementations,
+                                    &self.diagnostics,
+                                    pipeline,
+                                    //&self.global_variables,
+                                    //&self.summaries,
+                                    Some(factory.create(&batches)),
+                                    //None,
+                                );
+
+                                if let Some(error) = error {
+                                    execution_context.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        s,
+                                        || format!("Data could not be set on Source: {error}"),
+                                    );
+                                }
+                            }
+                            MutableValueExpression::Variable(_) => todo!(),
+                            MutableValueExpression::Argument(_) => todo!(),
+                        }
                     }
                 },
                 DataExpression::Conditional(_) => todo!(),

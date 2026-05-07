@@ -98,14 +98,6 @@ impl RecordTable for TestRecords {
             .get(key)
             .map(|v| RecordTableValue::Dictionary(v.clone()))
     }
-
-    fn get_child_table_mut(&mut self, key: &str) -> Option<&mut dyn RecordTable> {
-        todo!()
-    }
-
-    fn set_values(&mut self, key: &str, values: Dictionary<'_>) {
-        todo!()
-    }
 }
 
 impl Display for TestRecords {

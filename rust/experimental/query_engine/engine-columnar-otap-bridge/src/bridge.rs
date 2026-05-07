@@ -862,4 +862,75 @@ mod tests {
                 .map_or(0, |v| v.num_rows())
         );
     }
+
+    #[test]
+    fn test_engine_set_attribute() {
+        let logs = LogsData {
+            resource_logs: vec![
+                ResourceLogs {
+                    scope_logs: vec![ScopeLogs {
+                        log_records: vec![
+                            LogRecord::build().finish(),
+                            LogRecord::build().finish(),
+                            LogRecord::build().finish()
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
+
+        let logs = match otap_batch {
+            OtapArrowRecords::Logs(l) => l,
+            _ => panic!(),
+        };
+
+        assert_eq!(
+            3,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            logs.get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+
+        let pipeline =
+            parse_kql_logs_query_into_pipeline("source | extend new_attr = 'hello world'", None)
+                .unwrap();
+
+        println!("{pipeline}");
+
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
+
+        println!("{results}");
+
+        assert_eq!(0, results.dropped_record_count);
+        assert_eq!(3, results.included_record_count);
+
+        let final_batch = &results.included_records;
+
+        assert_eq!(
+            3,
+            final_batch
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            3,
+            final_batch
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+    }
 }

@@ -15,6 +15,7 @@ use arrow::{
     datatypes::*,
 };
 use data_engine_columnar::*;
+use data_engine_expressions::StringValue;
 
 use crate::{
     filter::{IdBitmap, filter_child_batch},
@@ -41,7 +42,7 @@ impl OtapLogRecordBatchFactory {
 impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     type Records<'a> = OtapLogRecordBatch<'a>;
 
-    fn create<'a>(&self, batches: &'a [Option<RecordBatch>]) -> OtapLogRecordBatch<'a> {
+    fn create<'a>(&self, batches: &'a [Option<RecordBatch>; 4]) -> OtapLogRecordBatch<'a> {
         if let Some(logs) = batches[2].as_ref() {
             let logs_schema = logs.schema_ref();
 
@@ -114,9 +115,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
     fn filter(
         &self,
-        batch: &OtapLogRecordBatch,
+        batches: &[Option<RecordBatch>; 4],
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; 4] {
+        let l = otap_df_pdata::otap::Logs::from(batches);
         let filter_true_count = filter.true_count();
 
         if let Some(logs) = batch.logs
@@ -253,6 +255,42 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         }
 
         [None, None, None, None]
+    }
+
+    fn set(
+        &self,
+        batches: &mut [Option<RecordBatch>; 4],
+        path: &[SelectionPath<'_>],
+        values: Dictionary,
+    ) -> Result<(), &'static str> {
+        match path.len() {
+            0 => Err("Log record cannot be set directly"),
+            l => {
+                if let SelectionPath::Key(root_key) = &path[0] {
+                    match get_log_record_schema().normalize_key(root_key.get_value()) {
+                        "attributes" => {
+                            todo!()
+                        }
+                        "severity_text" => {
+                            if l > 1 {
+                                Err("Invalid accessor path specified")
+                            } else {
+                                let (schema, mut columns, count) = batches[2].take().unwrap().into_parts();
+
+                                //todo!();
+
+                                batches[2] = Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+
+                                Ok(())
+                            }
+                        }
+                        _ => Err("Unknown key specified on accessor path")
+                    }
+                } else {
+                    Err("Accessor path did not refer to a valid string key on log record")
+                }
+            }
+        }
     }
 }
 
@@ -425,14 +463,6 @@ impl RecordTable for OtapLogRecordBatch<'_> {
 
         None
     }
-
-    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
-        todo!()
-    }
-
-    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
-        todo!()
-    }
 }
 
 impl Display for OtapLogRecordBatch<'_> {
@@ -458,14 +488,6 @@ impl RecordTable for OtapResource<'_> {
         }
 
         None
-    }
-
-    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
-        todo!()
-    }
-
-    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
-        todo!()
     }
 }
 
@@ -512,14 +534,6 @@ impl RecordTable for OtapScope<'_> {
         };
 
         Some(RecordTableValue::Dictionary(values))
-    }
-
-    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
-        todo!()
-    }
-
-    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
-        todo!()
     }
 }
 
@@ -872,14 +886,6 @@ impl<'record> RecordTable for OtapAttributes<'record> {
         cache.insert(key.into(), value);
 
         Some(RecordTableValue::Dictionary(copy))
-    }
-
-    fn get_child_table_mut(&mut self, _key: &str) -> Option<&mut dyn RecordTable> {
-        None
-    }
-
-    fn set_values(&mut self, _key: &str, _values: Dictionary<'_>) {
-        todo!()
     }
 }
 

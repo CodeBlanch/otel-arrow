@@ -11,7 +11,7 @@ use crate::{
     scalars::execute_scalar_expression, *,
 };
 
-pub(crate) fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
     execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
     key_data_type: DataType,
     root: &'a dyn RecordTable,
@@ -131,6 +131,49 @@ pub(crate) fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>
     }
 
     current
+}
+
+pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
+    execution_context: &ExecutionContext<'_, 'pipeline, TRecords>,
+    selectors: &'pipeline [ScalarExpression]) -> Result<Vec<SelectionPath<'pipeline>>, ()> {
+    let mut path = match selectors.iter().size_hint() {
+        (_, Some(len)) => Vec::with_capacity(len),
+        _ => Vec::new(),
+    };
+
+    for selector in selectors {
+        let ret = execute_scalar_expression(&execution_context, selector).map_into(
+            |single| match single {
+                ValueOrRef::String(key) => {
+                    path.push(SelectionPath::Key(key));
+                    Ok(())
+                }
+                ValueOrRef::Array(index) => {
+                    path.push(SelectionPath::Index(index));
+                    Ok(())
+                }
+                v => {
+                    execution_context.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Warn,
+                        selector,
+                        || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
+                    );
+                    Err(())
+                }
+            },
+            |dictionary| {
+                todo!()
+            },
+            |table| {
+                todo!()
+            });
+
+        if ret.is_err() {
+            return Err(());
+        }
+    }
+
+    Ok(path)
 }
 
 fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: ColumnarRecords>(
