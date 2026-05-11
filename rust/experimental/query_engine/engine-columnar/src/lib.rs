@@ -11,7 +11,6 @@ pub(crate) mod scalars;
 pub(crate) mod selection;
 #[cfg(test)]
 pub(crate) mod test_helpers;
-pub(crate) mod transform;
 
 pub use columnar_records::*;
 pub use engine::*;

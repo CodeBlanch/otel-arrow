@@ -10,6 +10,7 @@ use arrow::{
     datatypes::*,
 };
 use chrono::{TimeZone, Utc};
+use data_engine_expressions::StringValue;
 use indexmap::IndexSet;
 
 use crate::*;
@@ -98,6 +99,46 @@ impl<'a> DictionaryValueArray<'a> {
                     transform(ValueOrRef::Boolean(true)),
                 ]
             }
+        }
+    }
+
+    pub fn transform_into_string_array(
+        self,
+    ) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
+        match self {
+            DictionaryValueArray::Array(a) => {
+                if let Some(s) = a.as_string_opt() {
+                    (s.clone(), None)
+                } else {
+                    let (values, lookup) = transform_array_into_set(
+                        &mut |v| Some(Into::<StringValueOrRef>::into(v)),
+                        a,
+                    );
+
+                    (
+                        StringArray::from(
+                            values
+                                .iter()
+                                .map(|v: &StringValueOrRef<'_>| v.get_value())
+                                .collect::<Vec<_>>(),
+                        ),
+                        Some(lookup),
+                    )
+                }
+            }
+            DictionaryValueArray::Vec(a) => {
+                let length = a.len();
+                let values = Rc::unwrap_or_clone(a).into_iter();
+
+                transform_iter_into_string_array(length, values)
+            }
+            DictionaryValueArray::Set(a) => {
+                let length = a.len();
+                let values = Rc::unwrap_or_clone(a).into_iter();
+
+                transform_iter_into_string_array(length, values)
+            }
+            DictionaryValueArray::Boolean => (StringArray::from(vec!["false", "true"]), None),
         }
     }
 }
@@ -492,6 +533,57 @@ where
     }
 
     (transformed_values, value_index_lookup)
+}
+
+fn transform_iter_into_string_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
+    length: usize,
+    values: T,
+) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
+    transform_iter_into_array(
+        length,
+        values,
+        |set| {
+            StringArray::from(
+                set.iter()
+                    .map(|v: &StringValueOrRef<'_>| v.get_value())
+                    .collect::<Vec<_>>(),
+            )
+        },
+        |value| Some(value.into()),
+    )
+}
+
+fn transform_iter_into_array<
+    'a,
+    TItems: Iterator<Item = ValueOrRef<'a>>,
+    TInput: Hash + PartialEq + Eq,
+    TOutput: Array,
+    FBuild,
+    FTransform,
+>(
+    length: usize,
+    values: TItems,
+    build: FBuild,
+    mut transform: FTransform,
+) -> (TOutput, Option<AHashMap<usize, Option<usize>>>)
+where
+    FBuild: FnOnce(IndexSet<TInput, RandomState>) -> TOutput,
+    FTransform: FnMut(ValueOrRef<'a>) -> Option<TInput>,
+{
+    let mut lookup = AHashMap::with_capacity(length);
+    let mut set = IndexSet::with_capacity_and_hasher(length, RandomState::new());
+
+    for (value_index, v) in values.enumerate() {
+        if let Some(v) = transform(v) {
+            let (index, _) = set.insert_full(v);
+
+            lookup.insert(value_index, Some(index));
+        } else {
+            lookup.insert(value_index, None);
+        }
+    }
+
+    (build(set), Some(lookup))
 }
 
 pub(crate) fn get_value_from_array(value: &Arc<dyn Array>, index: usize) -> ValueOrRef<'static> {

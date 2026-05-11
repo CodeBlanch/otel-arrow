@@ -135,14 +135,15 @@ pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
 
 pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
     execution_context: &ExecutionContext<'_, 'pipeline, TRecords>,
-    selectors: &'pipeline [ScalarExpression]) -> Result<Vec<SelectionPath<'pipeline>>, ()> {
+    selectors: &'pipeline [ScalarExpression],
+) -> Result<Vec<SelectionPath<'pipeline>>, ()> {
     let mut path = match selectors.iter().size_hint() {
         (_, Some(len)) => Vec::with_capacity(len),
         _ => Vec::new(),
     };
 
     for selector in selectors {
-        let ret = execute_scalar_expression(&execution_context, selector).map_into(
+        let ret = execute_scalar_expression(execution_context, selector).map_into(
             |single| match single {
                 ValueOrRef::String(key) => {
                     path.push(SelectionPath::Key(key));

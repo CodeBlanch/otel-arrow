@@ -28,7 +28,7 @@ impl<'a> Dictionary<'a> {
             DictionaryKeyArray::BooleanArray {
                 data_type: _,
                 values: key_array,
-            } => transform_array_into_boolean(&key_array, values, transform),
+            } => BooleanArray::from(key_array.into_data()),
             DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
@@ -144,7 +144,7 @@ impl<'a> Dictionary<'a> {
                     ValueOrRef::Null => {
                         Dictionary::new_null_with_data_type(length, data_type.clone())
                     }
-                    v => Dictionary::new_scalar_with_data_type(data_type.clone(), length, v,),
+                    v => Dictionary::new_scalar_with_data_type(data_type.clone(), length, v),
                 },
             },
         }

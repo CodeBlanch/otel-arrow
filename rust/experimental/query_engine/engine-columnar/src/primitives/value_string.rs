@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use arrow::buffer::Buffer;
@@ -166,6 +167,22 @@ impl StringValue for StringValueOrRef<'_> {
     }
 }
 
+impl<'a> From<ValueOrRef<'a>> for StringValueOrRef<'a> {
+    fn from(value: ValueOrRef<'a>) -> Self {
+        match value {
+            ValueOrRef::Null => StringValueOrRef::Empty,
+            ValueOrRef::String(s) => s,
+            v => {
+                let mut r = None;
+                v.to_value().convert_to_string(&mut |s| {
+                    r = Some(StringValueOrRef::Owned(Rc::new(s.into())))
+                });
+                r.expect("string value")
+            }
+        }
+    }
+}
+
 impl<'a> From<StringValueOrRef<'a>> for ResolvedScalarValue<'a, '_> {
     fn from(value: StringValueOrRef<'a>) -> Self {
         ResolvedScalarValue::Single(ValueOrRef::String(value))
@@ -192,6 +209,20 @@ impl From<StringValueOrRef<'_>> for String {
         }
     }
 }
+
+impl Hash for StringValueOrRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.get_value().hash(state);
+    }
+}
+
+impl PartialEq for StringValueOrRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.get_value() == other.get_value()
+    }
+}
+
+impl Eq for StringValueOrRef<'_> {}
 
 #[derive(Debug, Clone)]
 pub struct StringValueOrRefSlice<'a> {

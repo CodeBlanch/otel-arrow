@@ -277,7 +277,7 @@ mod tests {
         LogRecord, LogsData, ResourceLogs, ScopeLogs,
     };
     use otap_df_pdata::proto::opentelemetry::resource::v1::Resource;
-    use otap_df_pdata::testing::round_trip::{otlp_to_otap, to_otap_logs};
+    use otap_df_pdata::testing::round_trip::{otap_to_otlp, otlp_to_otap, to_otap_logs};
     use otap_df_pdata::{otap::OtapBatchStore, *};
 
     use super::*;
@@ -864,21 +864,195 @@ mod tests {
     }
 
     #[test]
+    fn test_engine_set_severity_text_column_exists() {
+        let logs = LogsData {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![
+                        LogRecord::build().severity_text("hello world").finish(),
+                        LogRecord::build().finish(),
+                        LogRecord::build().severity_text("goodbye world").finish(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
+
+        let logs = match otap_batch {
+            OtapArrowRecords::Logs(l) => l,
+            _ => panic!(),
+        };
+
+        assert_eq!(
+            3,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            logs.get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+
+        let pipeline = parse_kql_logs_query_into_pipeline(
+            "source | extend severity_text = 'hello world'",
+            None,
+        )
+        .unwrap();
+
+        println!("{pipeline}");
+
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
+
+        println!("{results}");
+
+        assert_eq!(0, results.dropped_record_count);
+        assert_eq!(3, results.included_record_count);
+
+        let final_batch = results.included_records;
+
+        assert_eq!(
+            3,
+            final_batch
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            final_batch
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+
+        if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
+            assert_eq!(
+                "hello world",
+                logs.resource_logs[0].scope_logs[0].log_records[0].severity_text
+            );
+            assert_eq!(
+                "hello world",
+                logs.resource_logs[0].scope_logs[0].log_records[1].severity_text
+            );
+            assert_eq!(
+                "hello world",
+                logs.resource_logs[0].scope_logs[0].log_records[2].severity_text
+            );
+        } else {
+            panic!()
+        }
+    }
+
+    #[test]
+    fn test_engine_set_severity_text_column_doesnt_exist() {
+        let logs = LogsData {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![
+                        LogRecord::build().finish(),
+                        LogRecord::build().finish(),
+                        LogRecord::build().finish(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
+
+        let logs = match otap_batch {
+            OtapArrowRecords::Logs(l) => l,
+            _ => panic!(),
+        };
+
+        assert_eq!(
+            3,
+            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            logs.get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+
+        let pipeline = parse_kql_logs_query_into_pipeline(
+            "source | extend severity_text = 'hello world'",
+            None,
+        )
+        .unwrap();
+
+        println!("{pipeline}");
+
+        let results = process_otap_logs_using_pipeline(
+            &pipeline,
+            &OtapLogRecordBatchFactory::new_with_options(Some(
+                ColumnarEngineDiagnosticLevel::Verbose,
+            )),
+            logs,
+        )
+        .unwrap();
+
+        println!("{results}");
+
+        assert_eq!(0, results.dropped_record_count);
+        assert_eq!(3, results.included_record_count);
+
+        let final_batch = results.included_records;
+
+        assert_eq!(
+            3,
+            final_batch
+                .get(ArrowPayloadType::Logs)
+                .map_or(0, |v| v.num_rows())
+        );
+        assert_eq!(
+            0,
+            final_batch
+                .get(ArrowPayloadType::LogAttrs)
+                .map_or(0, |v| v.num_rows())
+        );
+
+        if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
+            assert_eq!(
+                "hello world",
+                logs.resource_logs[0].scope_logs[0].log_records[0].severity_text
+            );
+            assert_eq!(
+                "hello world",
+                logs.resource_logs[0].scope_logs[0].log_records[1].severity_text
+            );
+            assert_eq!(
+                "hello world",
+                logs.resource_logs[0].scope_logs[0].log_records[2].severity_text
+            );
+        } else {
+            panic!()
+        }
+    }
+
+    #[test]
     fn test_engine_set_attribute() {
         let logs = LogsData {
-            resource_logs: vec![
-                ResourceLogs {
-                    scope_logs: vec![ScopeLogs {
-                        log_records: vec![
-                            LogRecord::build().finish(),
-                            LogRecord::build().finish(),
-                            LogRecord::build().finish()
-                        ],
-                        ..Default::default()
-                    }],
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![
+                        LogRecord::build().finish(),
+                        LogRecord::build().finish(),
+                        LogRecord::build().finish(),
+                    ],
                     ..Default::default()
-                },
-            ],
+                }],
+                ..Default::default()
+            }],
         };
 
         let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));

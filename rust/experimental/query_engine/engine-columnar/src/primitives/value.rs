@@ -177,7 +177,7 @@ impl Hash for ValueOrRef<'_> {
         match self {
             ValueOrRef::String(s) => {
                 [0].hash(state);
-                s.get_value().hash(state);
+                s.hash(state);
             }
             ValueOrRef::Integer(i) => {
                 [1].hash(state);
@@ -234,7 +234,7 @@ impl PartialEq for ValueOrRef<'_> {
         match self {
             ValueOrRef::String(s) => {
                 if let ValueOrRef::String(other) = other {
-                    s.get_value() == other.get_value()
+                    s == other
                 } else {
                     false
                 }

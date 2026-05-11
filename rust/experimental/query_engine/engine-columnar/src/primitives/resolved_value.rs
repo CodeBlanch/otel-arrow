@@ -228,3 +228,19 @@ impl From<ResolvedLogicalValue> for ResolvedScalarValue<'_, '_> {
         }
     }
 }
+
+pub enum ResolvedSingleOrDictionaryValue<'a> {
+    Single(ValueOrRef<'a>),
+    Dictionary(Dictionary<'a>),
+}
+
+impl<'a> ResolvedSingleOrDictionaryValue<'a> {
+    pub fn into_dictionary(self, key_data_type: DataType, key_count: usize) -> Dictionary<'a> {
+        match self {
+            ResolvedSingleOrDictionaryValue::Single(v) => {
+                Dictionary::new_scalar_with_data_type(key_data_type, key_count, v)
+            }
+            ResolvedSingleOrDictionaryValue::Dictionary(d) => d,
+        }
+    }
+}

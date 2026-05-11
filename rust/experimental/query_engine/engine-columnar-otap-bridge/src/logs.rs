@@ -5,6 +5,7 @@ use std::{
     cell::{OnceCell, RefCell},
     collections::hash_map::Entry,
     fmt::Display,
+    sync::Arc,
 };
 
 use ahash::AHashMap;
@@ -16,6 +17,10 @@ use arrow::{
 };
 use data_engine_columnar::*;
 use data_engine_expressions::StringValue;
+use otap_df_pdata::{
+    otap::raw_batch_store::POSITION_LOOKUP, proto::opentelemetry::arrow::v1::ArrowPayloadType,
+    schema::consts,
+};
 
 use crate::{
     filter::{IdBitmap, filter_child_batch},
@@ -43,11 +48,12 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     type Records<'a> = OtapLogRecordBatch<'a>;
 
     fn create<'a>(&self, batches: &'a [Option<RecordBatch>; 4]) -> OtapLogRecordBatch<'a> {
-        if let Some(logs) = batches[2].as_ref() {
+        if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref() {
             let logs_schema = logs.schema_ref();
 
             let attributes = if let Some(id_column) = logs_schema.column_with_name("id")
-                && let Some(attributes_batch) = batches[3].as_ref()
+                && let Some(attributes_batch) =
+                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].as_ref()
             {
                 let ids = logs.column(id_column.0).as_primitive::<UInt16Type>();
 
@@ -60,7 +66,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 && let Some(resource_struct) = logs.column(resource_column.0).as_struct_opt()
             {
                 if let Some(resource_ids) = resource_struct.column_by_name("id")
-                    && let Some(resource_attributes_batch) = batches[0].as_ref()
+                    && let Some(resource_attributes_batch) =
+                        batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].as_ref()
                 {
                     let ids = resource_ids.as_primitive::<UInt16Type>();
 
@@ -82,7 +89,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 && let Some(scope_struct) = logs.column(scope_column.0).as_struct_opt()
             {
                 if let Some(scope_ids) = scope_struct.column_by_name("id")
-                    && let Some(scope_attributes_batch) = batches[1].as_ref()
+                    && let Some(scope_attributes_batch) =
+                        batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].as_ref()
                 {
                     let ids = scope_ids.as_primitive::<UInt16Type>();
 
@@ -118,27 +126,18 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         batches: &[Option<RecordBatch>; 4],
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; 4] {
-        let l = otap_df_pdata::otap::Logs::from(batches);
         let filter_true_count = filter.true_count();
 
-        if let Some(logs) = batch.logs
+        if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref()
             && filter_true_count > 0
         {
             let number_of_logs_before_filter = logs.num_rows();
             if filter_true_count == number_of_logs_before_filter {
                 return [
-                    batch
-                        .resource
-                        .as_ref()
-                        .and_then(|r| r.attributes.as_ref())
-                        .map(|v| v.batch.clone()),
-                    batch
-                        .scope
-                        .as_ref()
-                        .and_then(|s| s.attributes.as_ref())
-                        .map(|v| v.batch.clone()),
+                    batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].clone(),
+                    batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].clone(),
                     Some(logs.clone()),
-                    batch.attributes.as_ref().map(|a| a.batch.clone()),
+                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].clone(),
                 ];
             }
 
@@ -146,23 +145,6 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
             let number_of_logs_after_filter = filtered_logs_batch.num_rows();
             if number_of_logs_after_filter > 0 {
-                if number_of_logs_before_filter == number_of_logs_after_filter {
-                    return [
-                        batch
-                            .resource
-                            .as_ref()
-                            .and_then(|r| r.attributes.as_ref())
-                            .map(|v| v.batch.clone()),
-                        batch
-                            .scope
-                            .as_ref()
-                            .and_then(|s| s.attributes.as_ref())
-                            .map(|v| v.batch.clone()),
-                        Some(filtered_logs_batch),
-                        batch.attributes.as_ref().map(|a| a.batch.clone()),
-                    ];
-                }
-
                 let mut ids = IdBitmap::new();
 
                 if let Some(id_column) = filtered_logs_batch.schema_ref().column_with_name("id") {
@@ -179,14 +161,13 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 let attributes_batch = if ids.is_empty() {
                     None
                 } else {
-                    batch
-                        .attributes
+                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]]
                         .as_ref()
-                        .and_then(|v| filter_child_batch(&ids, v.batch))
+                        .and_then(|v| filter_child_batch(&ids, v))
                 };
 
-                let resource_attributes_batch = if let Some(resource) = batch.resource.as_ref()
-                    && let Some(resource_attributes) = resource.attributes.as_ref()
+                let resource_attributes_batch = if let Some(resource_attributes) =
+                    batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].as_ref()
                 {
                     ids.clear();
 
@@ -210,14 +191,14 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if ids.is_empty() {
                         None
                     } else {
-                        filter_child_batch(&ids, resource_attributes.batch)
+                        filter_child_batch(&ids, resource_attributes)
                     }
                 } else {
                     None
                 };
 
-                let scope_attributes_batch = if let Some(scope) = batch.scope.as_ref()
-                    && let Some(scope_attributes) = scope.attributes.as_ref()
+                let scope_attributes_batch = if let Some(scope_attributes) =
+                    batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].as_ref()
                 {
                     ids.clear();
 
@@ -239,7 +220,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if ids.is_empty() {
                         None
                     } else {
-                        filter_child_batch(&ids, scope_attributes.batch)
+                        filter_child_batch(&ids, scope_attributes)
                     }
                 } else {
                     None
@@ -263,28 +244,72 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         path: &[SelectionPath<'_>],
         values: Dictionary,
     ) -> Result<(), &'static str> {
+        let (keys, values) = values.into_parts();
+
         match path.len() {
             0 => Err("Log record cannot be set directly"),
             l => {
                 if let SelectionPath::Key(root_key) = &path[0] {
                     match get_log_record_schema().normalize_key(root_key.get_value()) {
-                        "attributes" => {
+                        consts::ATTRIBUTES => {
                             todo!()
                         }
-                        "severity_text" => {
+                        consts::SEVERITY_TEXT => {
                             if l > 1 {
                                 Err("Invalid accessor path specified")
                             } else {
-                                let (schema, mut columns, count) = batches[2].take().unwrap().into_parts();
+                                if let Some(logs_batch) =
+                                    batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].take()
+                                {
+                                    let (mut schema, mut columns, count) = logs_batch.into_parts();
 
-                                //todo!();
+                                    let (transformed_values, lookup) =
+                                        values.transform_into_string_array();
 
-                                batches[2] = Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+                                    let values: Arc<dyn Array> = match transformed_values.len() {
+                                        v if v < u8::MAX as usize => {
+                                            Arc::new(DictionaryArray::<UInt8Type>::new(
+                                                keys.transform_into_key_array(lookup),
+                                                Arc::new(transformed_values),
+                                            ))
+                                        }
+                                        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
+                                            keys.transform_into_key_array(lookup),
+                                            Arc::new(transformed_values),
+                                        )),
+                                    };
+
+                                    let mut schema_builder =
+                                        SchemaBuilder::from(schema.fields().clone());
+
+                                    let field = Field::new(
+                                        consts::SEVERITY_TEXT,
+                                        values.data_type().clone(),
+                                        true,
+                                    );
+
+                                    if let Some((column_id, _)) =
+                                        schema.column_with_name(consts::SEVERITY_TEXT)
+                                    {
+                                        *schema_builder.field_mut(column_id) = field.into();
+                                        columns[column_id] = values;
+                                    } else {
+                                        schema_builder.push(field);
+                                        columns.push(values);
+                                    }
+
+                                    schema = Arc::new(schema_builder.finish());
+
+                                    batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]] =
+                                        Some(unsafe {
+                                            RecordBatch::new_unchecked(schema, columns, count)
+                                        });
+                                }
 
                                 Ok(())
                             }
                         }
-                        _ => Err("Unknown key specified on accessor path")
+                        _ => Err("Unknown key specified on accessor path"),
                     }
                 } else {
                     Err("Accessor path did not refer to a valid string key on log record")
@@ -368,7 +393,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
         let key = get_log_record_schema().normalize_key(key);
 
-        if key == "attributes" {
+        if key == consts::ATTRIBUTES {
             if let Some(attributes) = &self.attributes {
                 return Some(RecordTableValue::Table(attributes));
             } else {
@@ -380,27 +405,27 @@ impl RecordTable for OtapLogRecordBatch<'_> {
             && let Some(logs_schema) = self.logs_schema
         {
             let values = match key {
-                "time_unix_nano"
+                consts::TIME_UNIX_NANO
                     if let Some(time_unix_nano_column) =
-                        logs_schema.column_with_name("time_unix_nano") =>
+                        logs_schema.column_with_name(consts::TIME_UNIX_NANO) =>
                 {
                     RecordTableDictionary::from_array::<UInt16Type, _>(
                         logs.column(time_unix_nano_column.0)
                             .as_primitive::<TimestampNanosecondType>(),
                     )
                 }
-                "observed_time_unix_nano"
+                consts::OBSERVED_TIME_UNIX_NANO
                     if let Some(observed_time_unix_nano_column) =
-                        logs_schema.column_with_name("observed_time_unix_nano") =>
+                        logs_schema.column_with_name(consts::OBSERVED_TIME_UNIX_NANO) =>
                 {
                     RecordTableDictionary::from_array::<UInt16Type, _>(
                         logs.column(observed_time_unix_nano_column.0)
                             .as_primitive::<TimestampNanosecondType>(),
                     )
                 }
-                "severity_number"
+                consts::SEVERITY_NUMBER
                     if let Some(severity_number_column) =
-                        logs_schema.column_with_name("severity_number") =>
+                        logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
                 {
                     logs.column(severity_number_column.0)
                         .as_dictionary::<UInt8Type>()
@@ -408,9 +433,9 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                         .expect("severity_number values were an unexpected type")
                         .into()
                 }
-                "severity_text"
+                consts::SEVERITY_TEXT
                     if let Some(severity_text_column) =
-                        logs_schema.column_with_name("severity_text") =>
+                        logs_schema.column_with_name(consts::SEVERITY_TEXT) =>
                 {
                     logs.column(severity_text_column.0)
                         .as_dictionary::<UInt8Type>()
@@ -418,15 +443,16 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                         .expect("severity_text values were an unexpected type")
                         .into()
                 }
-                "body"
+                consts::BODY
                     if let Some(body) = self
                         .body
                         .get_or_init(|| build_logs_body_dictionary(logs, logs_schema)) =>
                 {
                     body.clone()
                 }
-                "trace_id"
-                    if let Some(trace_id_column) = logs_schema.column_with_name("trace_id") =>
+                consts::TRACE_ID
+                    if let Some(trace_id_column) =
+                        logs_schema.column_with_name(consts::TRACE_ID) =>
                 {
                     logs.column(trace_id_column.0)
                         .as_dictionary::<UInt8Type>()
@@ -434,20 +460,25 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                         .expect("trace_id values were an unexpected type")
                         .into()
                 }
-                "span_id" if let Some(span_id_column) = logs_schema.column_with_name("span_id") => {
+                consts::SPAN_ID
+                    if let Some(span_id_column) = logs_schema.column_with_name(consts::SPAN_ID) =>
+                {
                     logs.column(span_id_column.0)
                         .as_dictionary::<UInt8Type>()
                         .downcast_dict::<FixedSizeBinaryArray>()
                         .expect("span_id values were an unexpected type")
                         .into()
                 }
-                "flags" if let Some(flags_column) = logs_schema.column_with_name("flags") => {
+                consts::FLAGS
+                    if let Some(flags_column) = logs_schema.column_with_name(consts::FLAGS) =>
+                {
                     RecordTableDictionary::from_array::<UInt16Type, _>(
                         logs.column(flags_column.0).as_primitive::<UInt32Type>(),
                     )
                 }
-                "event_name"
-                    if let Some(event_name_column) = logs_schema.column_with_name("event_name") =>
+                consts::EVENT_NAME
+                    if let Some(event_name_column) =
+                        logs_schema.column_with_name(consts::EVENT_NAME) =>
                 {
                     logs.column(event_name_column.0)
                         .as_dictionary::<UInt8Type>()
@@ -479,7 +510,7 @@ pub struct OtapResource<'record> {
 
 impl RecordTable for OtapResource<'_> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
-        if key == "attributes" || key == "Attributes" {
+        if key == consts::ATTRIBUTES || key == "Attributes" {
             if let Some(attributes) = &self.attributes {
                 return Some(RecordTableValue::Table(attributes));
             } else {
@@ -505,7 +536,7 @@ pub struct OtapScope<'record> {
 
 impl RecordTable for OtapScope<'_> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
-        if key == "attributes" || key == "Attributes" {
+        if key == consts::ATTRIBUTES || key == "Attributes" {
             if let Some(attributes) = &self.attributes {
                 return Some(RecordTableValue::Table(attributes));
             } else {
@@ -514,14 +545,16 @@ impl RecordTable for OtapScope<'_> {
         }
 
         let values = match key {
-            "name" | "Name" if let Some(name_column) = self.scope_struct.column_by_name("name") => {
+            consts::NAME | "Name"
+                if let Some(name_column) = self.scope_struct.column_by_name("name") =>
+            {
                 name_column
                     .as_dictionary::<UInt8Type>()
                     .downcast_dict::<StringArray>()
                     .expect("scope name values were an unexpected type")
                     .into()
             }
-            "version" | "Version"
+            consts::VERSION | "Version"
                 if let Some(version_column) = self.scope_struct.column_by_name("version") =>
             {
                 version_column
@@ -545,7 +578,6 @@ impl Display for OtapScope<'_> {
 
 #[derive(Debug)]
 pub struct OtapAttributes<'record> {
-    batch: &'record RecordBatch,
     ids: &'record PrimitiveArray<UInt16Type>,
     id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
     cache: RefCell<AHashMap<Box<str>, RecordTableDictionary>>,
@@ -595,7 +627,6 @@ impl<'record> OtapAttributes<'record> {
         });
 
         Self {
-            batch: attributes_batch,
             ids,
             id_to_record_index_map: OnceCell::new(),
             cache: RefCell::new(AHashMap::new()),
@@ -930,7 +961,7 @@ fn build_logs_body_dictionary(
     logs: &RecordBatch,
     logs_schema: &Schema,
 ) -> Option<RecordTableDictionary> {
-    if let Some(body_column) = logs_schema.column_with_name("body") {
+    if let Some(body_column) = logs_schema.column_with_name(consts::BODY) {
         let body_struct = logs.column(body_column.0).as_struct();
 
         if let Some(body_type) = body_struct.column_by_name("type") {
