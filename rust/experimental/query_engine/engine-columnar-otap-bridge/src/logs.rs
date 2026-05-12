@@ -242,10 +242,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         &self,
         batches: &mut [Option<RecordBatch>; 4],
         path: &[SelectionPath<'_>],
-        values: Dictionary,
+        value: Dictionary,
     ) -> Result<(), &'static str> {
-        let (keys, values) = values.into_parts();
-
         match path.len() {
             0 => Err("Log record cannot be set directly"),
             l => {
@@ -256,58 +254,29 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
                         consts::SEVERITY_TEXT => {
                             if l > 1 {
-                                Err("Invalid accessor path specified")
-                            } else {
-                                if let Some(logs_batch) =
-                                    batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].take()
-                                {
-                                    let (mut schema, mut columns, count) = logs_batch.into_parts();
-
-                                    let (transformed_values, lookup) =
-                                        values.transform_into_string_array();
-
-                                    let values: Arc<dyn Array> = match transformed_values.len() {
-                                        v if v < u8::MAX as usize => {
-                                            Arc::new(DictionaryArray::<UInt8Type>::new(
-                                                keys.transform_into_key_array(lookup),
-                                                Arc::new(transformed_values),
-                                            ))
-                                        }
-                                        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
-                                            keys.transform_into_key_array(lookup),
-                                            Arc::new(transformed_values),
-                                        )),
-                                    };
-
-                                    let mut schema_builder =
-                                        SchemaBuilder::from(schema.fields().clone());
-
-                                    let field = Field::new(
-                                        consts::SEVERITY_TEXT,
-                                        values.data_type().clone(),
-                                        true,
-                                    );
-
-                                    if let Some((column_id, _)) =
-                                        schema.column_with_name(consts::SEVERITY_TEXT)
-                                    {
-                                        *schema_builder.field_mut(column_id) = field.into();
-                                        columns[column_id] = values;
-                                    } else {
-                                        schema_builder.push(field);
-                                        columns.push(values);
-                                    }
-
-                                    schema = Arc::new(schema_builder.finish());
-
-                                    batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]] =
-                                        Some(unsafe {
-                                            RecordBatch::new_unchecked(schema, columns, count)
-                                        });
-                                }
-
-                                Ok(())
+                                return Err("Invalid accessor path specified");
                             }
+
+                            set_column(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::SEVERITY_TEXT,
+                                value,
+                                adaptive_string_array_transform,
+                            )
+                        }
+                        consts::EVENT_NAME => {
+                            if l > 1 {
+                                return Err("Invalid accessor path specified");
+                            }
+
+                            set_column(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::EVENT_NAME,
+                                value,
+                                adaptive_string_array_transform,
+                            )
                         }
                         _ => Err("Unknown key specified on accessor path"),
                     }
@@ -316,6 +285,62 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 }
             }
         }
+    }
+}
+
+fn set_column<
+    FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+    const BATCH_SIZE: usize,
+>(
+    batches: &mut [Option<RecordBatch>; BATCH_SIZE],
+    batch_position: usize,
+    column_name: &str,
+    value: Dictionary,
+    transform_value: FTransform,
+) -> Result<(), &'static str> {
+    if let Some(logs_batch) = batches[batch_position].take() {
+        let (keys, values) = value.into_parts();
+
+        let values = transform_value(keys, values);
+
+        let (mut schema, mut columns, count) = logs_batch.into_parts();
+
+        let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
+
+        let field = Field::new(column_name, values.data_type().clone(), true);
+
+        if let Some((column_id, _)) = schema.column_with_name(column_name) {
+            *schema_builder.field_mut(column_id) = field.into();
+            columns[column_id] = values;
+        } else {
+            schema_builder.push(field);
+            columns.push(values);
+        }
+
+        schema = Arc::new(schema_builder.finish());
+
+        batches[batch_position] =
+            Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+    }
+
+    Ok(())
+}
+
+fn adaptive_string_array_transform(
+    keys: DictionaryKeyArray,
+    values: DictionaryValueArray,
+) -> Arc<dyn Array> {
+    let (transformed_values, lookup) = values.transform_into_string_array();
+
+    match transformed_values.len() {
+        v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
+            keys.transform_into_key_array(lookup),
+            Arc::new(transformed_values),
+        )),
+        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
+            keys.transform_into_key_array(lookup),
+            Arc::new(transformed_values),
+        )),
     }
 }
 

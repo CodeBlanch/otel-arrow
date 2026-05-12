@@ -28,7 +28,7 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
         &self,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
         path: &[SelectionPath<'_>],
-        values: Dictionary,
+        value: Dictionary,
     ) -> Result<(), &'static str>;
 }
 

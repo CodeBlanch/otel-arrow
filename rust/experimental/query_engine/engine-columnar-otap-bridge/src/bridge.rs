@@ -6,7 +6,10 @@ use std::{fmt::Display, sync::LazyLock};
 use data_engine_columnar::*;
 use data_engine_expressions::*;
 use data_engine_kql_parser::*;
-use otap_df_pdata::otap::{Logs, OtapBatchStore, raw_batch_store::RawLogsStore};
+use otap_df_pdata::{
+    otap::{Logs, OtapBatchStore, raw_batch_store::RawLogsStore},
+    schema::consts,
+};
 
 use crate::{logs::*, *};
 
@@ -14,38 +17,42 @@ static LOG_RECORD_SCHEMA: LazyLock<ParserMapSchema> = LazyLock::new(|| {
     // Canonical schema definition comes from LogRecord proto definition
     // https://github.com/open-telemetry/otel-arrow/blob/main/rust/otap-dataflow/crates/pdata/src/views/otlp/proto/logs.rs
     ParserMapSchema::new()
-        .set_default_map_key("attributes")
-        .with_key_definition("time_unix_nano", ParserMapKeySchema::DateTime)
-        .with_key_definition("observed_time_unix_nano", ParserMapKeySchema::DateTime)
-        .with_key_definition("severity_number", ParserMapKeySchema::Integer)
-        .with_key_definition("severity_text", ParserMapKeySchema::String)
-        .with_key_definition("body", ParserMapKeySchema::Any)
-        .with_key_definition("trace_id", ParserMapKeySchema::Array)
-        .with_key_definition("span_id", ParserMapKeySchema::Array)
-        .with_key_definition("flags", ParserMapKeySchema::Integer)
-        .with_key_definition("event_name", ParserMapKeySchema::String)
+        .set_default_map_key(consts::ATTRIBUTES)
+        .with_key_definition(consts::TIME_UNIX_NANO, ParserMapKeySchema::DateTime)
+        .with_key_definition(
+            consts::OBSERVED_TIME_UNIX_NANO,
+            ParserMapKeySchema::DateTime,
+        )
+        .with_key_definition(consts::SEVERITY_NUMBER, ParserMapKeySchema::Integer)
+        .with_key_definition(consts::SEVERITY_TEXT, ParserMapKeySchema::String)
+        .with_key_definition(consts::BODY, ParserMapKeySchema::Any)
+        .with_key_definition(consts::TRACE_ID, ParserMapKeySchema::Array)
+        .with_key_definition(consts::SPAN_ID, ParserMapKeySchema::Array)
+        .with_key_definition(consts::FLAGS, ParserMapKeySchema::Integer)
+        .with_key_definition(consts::EVENT_NAME, ParserMapKeySchema::String)
         .with_key_aliases([
             // Support aliases to the Log and Event definition naming
             // https://opentelemetry.io/docs/specs/otel/logs/data-model/
-            ("Attributes", "attributes"),
-            ("Timestamp", "time_unix_nano"),
-            ("ObservedTimestamp", "observed_time_unix_nano"),
-            ("SeverityNumber", "severity_number"),
-            ("SeverityText", "severity_text"),
-            ("Body", "body"),
-            ("TraceId", "trace_id"),
-            ("SpanId", "span_id"),
-            ("TraceFlags", "flags"),
-            ("EventName", "event_name"),
+            ("Attributes", consts::ATTRIBUTES),
+            ("Timestamp", consts::TIME_UNIX_NANO),
+            ("ObservedTimestamp", consts::OBSERVED_TIME_UNIX_NANO),
+            ("SeverityNumber", consts::SEVERITY_NUMBER),
+            ("SeverityText", consts::SEVERITY_TEXT),
+            ("Body", consts::BODY),
+            ("TraceId", consts::TRACE_ID),
+            ("SpanId", consts::SPAN_ID),
+            ("TraceFlags", consts::FLAGS),
+            ("EventName", consts::EVENT_NAME),
             // Support aliases from OTLP JSON encoding
             // https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding
-            ("timeUnixNano", "time_unix_nano"),
-            ("observedTimeUnixNano", "observed_time_unix_nano"),
-            ("severityNumber", "severity_number"),
-            ("severityText", "severity_text"),
-            ("traceId", "trace_id"),
-            ("spanId", "span_id"),
-            ("eventName", "event_name"),
+            ("timeUnixNano", consts::TIME_UNIX_NANO),
+            ("observedTimeUnixNano", consts::OBSERVED_TIME_UNIX_NANO),
+            ("severityNumber", consts::SEVERITY_NUMBER),
+            ("severityText", consts::SEVERITY_TEXT),
+            ("traceId", consts::TRACE_ID),
+            ("spanId", consts::SPAN_ID),
+            ("traceFlags", consts::FLAGS),
+            ("eventName", consts::EVENT_NAME),
         ])
 });
 
@@ -863,180 +870,159 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_engine_set_severity_text_column_exists() {
-        let logs = LogsData {
-            resource_logs: vec![ResourceLogs {
-                scope_logs: vec![ScopeLogs {
-                    log_records: vec![
-                        LogRecord::build().severity_text("hello world").finish(),
-                        LogRecord::build().finish(),
-                        LogRecord::build().severity_text("goodbye world").finish(),
-                    ],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        };
+    macro_rules! test_engine_set_field_tests {
+    ($($name:ident: $value:expr,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let (log_records, query, validation) = $value;
+                let logs = LogsData {
+                    resource_logs: vec![ResourceLogs {
+                        scope_logs: vec![ScopeLogs {
+                            log_records,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                };
 
-        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
+                let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
 
-        let logs = match otap_batch {
-            OtapArrowRecords::Logs(l) => l,
-            _ => panic!(),
-        };
+                let logs = match otap_batch {
+                    OtapArrowRecords::Logs(l) => l,
+                    _ => panic!(),
+                };
 
-        assert_eq!(
-            3,
-            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
-        );
-        assert_eq!(
-            0,
-            logs.get(ArrowPayloadType::LogAttrs)
-                .map_or(0, |v| v.num_rows())
-        );
+                assert_eq!(
+                    3,
+                    logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
+                );
+                assert_eq!(
+                    0,
+                    logs.get(ArrowPayloadType::LogAttrs)
+                        .map_or(0, |v| v.num_rows())
+                );
 
-        let pipeline = parse_kql_logs_query_into_pipeline(
-            "source | extend severity_text = 'hello world'",
-            None,
-        )
-        .unwrap();
+                let pipeline = parse_kql_logs_query_into_pipeline(
+                    query,
+                    None,
+                )
+                .unwrap();
 
-        println!("{pipeline}");
+                println!("{pipeline}");
 
-        let results = process_otap_logs_using_pipeline(
-            &pipeline,
-            &OtapLogRecordBatchFactory::new_with_options(Some(
-                ColumnarEngineDiagnosticLevel::Verbose,
-            )),
-            logs,
-        )
-        .unwrap();
+                let results = process_otap_logs_using_pipeline(
+                    &pipeline,
+                    &OtapLogRecordBatchFactory::new_with_options(Some(
+                        ColumnarEngineDiagnosticLevel::Verbose,
+                    )),
+                    logs,
+                )
+                .unwrap();
 
-        println!("{results}");
+                println!("{results}");
 
-        assert_eq!(0, results.dropped_record_count);
-        assert_eq!(3, results.included_record_count);
+                assert_eq!(0, results.dropped_record_count);
+                assert_eq!(3, results.included_record_count);
 
-        let final_batch = results.included_records;
+                let final_batch = results.included_records;
 
-        assert_eq!(
-            3,
-            final_batch
-                .get(ArrowPayloadType::Logs)
-                .map_or(0, |v| v.num_rows())
-        );
-        assert_eq!(
-            0,
-            final_batch
-                .get(ArrowPayloadType::LogAttrs)
-                .map_or(0, |v| v.num_rows())
-        );
+                assert_eq!(
+                    3,
+                    final_batch
+                        .get(ArrowPayloadType::Logs)
+                        .map_or(0, |v| v.num_rows())
+                );
+                assert_eq!(
+                    0,
+                    final_batch
+                        .get(ArrowPayloadType::LogAttrs)
+                        .map_or(0, |v| v.num_rows())
+                );
 
-        if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
-            assert_eq!(
-                "hello world",
-                logs.resource_logs[0].scope_logs[0].log_records[0].severity_text
-            );
-            assert_eq!(
-                "hello world",
-                logs.resource_logs[0].scope_logs[0].log_records[1].severity_text
-            );
-            assert_eq!(
-                "hello world",
-                logs.resource_logs[0].scope_logs[0].log_records[2].severity_text
-            );
-        } else {
-            panic!()
-        }
+                if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
+                    validation(&logs.resource_logs[0].scope_logs[0].log_records);
+                } else {
+                    panic!()
+                }
+            }
+        )*
     }
+}
 
-    #[test]
-    fn test_engine_set_severity_text_column_doesnt_exist() {
-        let logs = LogsData {
-            resource_logs: vec![ResourceLogs {
-                scope_logs: vec![ScopeLogs {
-                    log_records: vec![
-                        LogRecord::build().finish(),
-                        LogRecord::build().finish(),
-                        LogRecord::build().finish(),
-                    ],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        };
-
-        let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
-
-        let logs = match otap_batch {
-            OtapArrowRecords::Logs(l) => l,
-            _ => panic!(),
-        };
-
-        assert_eq!(
-            3,
-            logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
-        );
-        assert_eq!(
-            0,
-            logs.get(ArrowPayloadType::LogAttrs)
-                .map_or(0, |v| v.num_rows())
-        );
-
-        let pipeline = parse_kql_logs_query_into_pipeline(
+    test_engine_set_field_tests! {
+        test_engine_set_severity_text_column_exists: (
+            vec![
+                LogRecord::build().severity_text("hello world").finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().severity_text("goodbye world").finish(),
+            ],
             "source | extend severity_text = 'hello world'",
-            None,
-        )
-        .unwrap();
-
-        println!("{pipeline}");
-
-        let results = process_otap_logs_using_pipeline(
-            &pipeline,
-            &OtapLogRecordBatchFactory::new_with_options(Some(
-                ColumnarEngineDiagnosticLevel::Verbose,
-            )),
-            logs,
-        )
-        .unwrap();
-
-        println!("{results}");
-
-        assert_eq!(0, results.dropped_record_count);
-        assert_eq!(3, results.included_record_count);
-
-        let final_batch = results.included_records;
-
-        assert_eq!(
-            3,
-            final_batch
-                .get(ArrowPayloadType::Logs)
-                .map_or(0, |v| v.num_rows())
-        );
-        assert_eq!(
-            0,
-            final_batch
-                .get(ArrowPayloadType::LogAttrs)
-                .map_or(0, |v| v.num_rows())
-        );
-
-        if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
-            assert_eq!(
-                "hello world",
-                logs.resource_logs[0].scope_logs[0].log_records[0].severity_text
-            );
-            assert_eq!(
-                "hello world",
-                logs.resource_logs[0].scope_logs[0].log_records[1].severity_text
-            );
-            assert_eq!(
-                "hello world",
-                logs.resource_logs[0].scope_logs[0].log_records[2].severity_text
-            );
-        } else {
-            panic!()
-        }
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    "hello world",
+                    logs[0].severity_text);
+                assert_eq!(
+                    "hello world",
+                    logs[1].severity_text);
+                assert_eq!(
+                    "hello world",
+                    logs[2].severity_text);
+            }),
+        test_engine_set_severity_text_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend severity_text = 'hello world'",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    "hello world",
+                    logs[0].severity_text);
+                assert_eq!(
+                    "hello world",
+                    logs[1].severity_text);
+                assert_eq!(
+                    "hello world",
+                    logs[2].severity_text);
+            }),
+        test_engine_set_event_name_column_exists: (
+            vec![
+                LogRecord::build().event_name("event1").finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().event_name("event2").finish(),
+            ],
+            "source | extend event_name = 'my_event'",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    "my_event",
+                    logs[0].event_name);
+                assert_eq!(
+                    "my_event",
+                    logs[1].event_name);
+                assert_eq!(
+                    "my_event",
+                    logs[2].event_name);
+            }),
+        test_engine_set_event_name_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend event_name = 'my_event'",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    "my_event",
+                    logs[0].event_name);
+                assert_eq!(
+                    "my_event",
+                    logs[1].event_name);
+                assert_eq!(
+                    "my_event",
+                    logs[2].event_name);
+            }),
     }
 
     #[test]
