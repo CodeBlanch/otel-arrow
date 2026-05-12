@@ -141,6 +141,41 @@ impl<'a> DictionaryValueArray<'a> {
             DictionaryValueArray::Boolean => (StringArray::from(vec!["false", "true"]), None),
         }
     }
+
+    pub fn transform_into_int_32_array(
+        self,
+    ) -> (
+        PrimitiveArray<Int32Type>,
+        Option<AHashMap<usize, Option<usize>>>,
+    ) {
+        match self {
+            DictionaryValueArray::Array(a) => {
+                if let Some(s) = a.as_primitive_opt::<Int32Type>() {
+                    (s.clone(), None)
+                } else {
+                    let (values, lookup) = transform_array_into_set(&mut |v| v.to_int_32(), a);
+
+                    (
+                        PrimitiveArray::<Int32Type>::from(values.into_iter().collect::<Vec<_>>()),
+                        Some(lookup),
+                    )
+                }
+            }
+            DictionaryValueArray::Vec(a) => {
+                let length = a.len();
+                let values = Rc::unwrap_or_clone(a).into_iter();
+
+                transform_iter_into_int_32_array(length, values)
+            }
+            DictionaryValueArray::Set(a) => {
+                let length = a.len();
+                let values = Rc::unwrap_or_clone(a).into_iter();
+
+                transform_iter_into_int_32_array(length, values)
+            }
+            DictionaryValueArray::Boolean => (PrimitiveArray::<Int32Type>::from(vec![0, 1]), None),
+        }
+    }
 }
 
 impl PartialEq for DictionaryValueArray<'_> {
@@ -550,6 +585,21 @@ fn transform_iter_into_string_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
             )
         },
         |value| Some(value.into()),
+    )
+}
+
+fn transform_iter_into_int_32_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
+    length: usize,
+    values: T,
+) -> (
+    PrimitiveArray<Int32Type>,
+    Option<AHashMap<usize, Option<usize>>>,
+) {
+    transform_iter_into_array(
+        length,
+        values,
+        |set| PrimitiveArray::<Int32Type>::from(set.into_iter().collect::<Vec<_>>()),
+        |value| value.to_int_32(),
     )
 }
 

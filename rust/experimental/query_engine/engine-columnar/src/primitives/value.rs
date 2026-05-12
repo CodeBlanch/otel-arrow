@@ -60,6 +60,35 @@ pub enum ValueOrRef<'a> {
     TimeSpan(TimeDelta),
 }
 
+impl<'a> ValueOrRef<'a> {
+    pub fn to_string(self) -> StringValueOrRef<'a> {
+        self.into()
+    }
+}
+
+impl ValueOrRef<'_> {
+    pub fn to_int_32(self) -> Option<i32> {
+        let v = match self {
+            ValueOrRef::Null => {
+                return None;
+            }
+            ValueOrRef::Integer(i) => i,
+            v => match v.to_value().convert_to_integer() {
+                None => {
+                    return None;
+                }
+                Some(v) => v,
+            },
+        };
+
+        if v <= i32::MAX as i64 {
+            Some(v as i32)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MapValueOrRef<'a> {
     Ref(&'a (dyn MapValue + 'a)),

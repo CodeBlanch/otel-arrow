@@ -1023,6 +1023,42 @@ mod tests {
                     "my_event",
                     logs[2].event_name);
             }),
+        test_engine_set_severity_number_column_exists: (
+            vec![
+                LogRecord::build().severity_number(0).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().severity_number(1).finish(),
+            ],
+            "source | extend severity_number = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].severity_number);
+                assert_eq!(
+                    18,
+                    logs[1].severity_number);
+                assert_eq!(
+                    18,
+                    logs[2].severity_number);
+            }),
+        test_engine_set_severity_number_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend severity_number = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].severity_number);
+                assert_eq!(
+                    18,
+                    logs[1].severity_number);
+                assert_eq!(
+                    18,
+                    logs[2].severity_number);
+            }),
     }
 
     #[test]

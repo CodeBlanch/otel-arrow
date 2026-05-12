@@ -252,6 +252,19 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         consts::ATTRIBUTES => {
                             todo!()
                         }
+                        consts::SEVERITY_NUMBER => {
+                            if l > 1 {
+                                return Err("Invalid accessor path specified");
+                            }
+
+                            set_column(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::SEVERITY_NUMBER,
+                                value,
+                                adaptive_int_array_transform,
+                            )
+                        }
                         consts::SEVERITY_TEXT => {
                             if l > 1 {
                                 return Err("Invalid accessor path specified");
@@ -331,6 +344,24 @@ fn adaptive_string_array_transform(
     values: DictionaryValueArray,
 ) -> Arc<dyn Array> {
     let (transformed_values, lookup) = values.transform_into_string_array();
+
+    match transformed_values.len() {
+        v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
+            keys.transform_into_key_array(lookup),
+            Arc::new(transformed_values),
+        )),
+        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
+            keys.transform_into_key_array(lookup),
+            Arc::new(transformed_values),
+        )),
+    }
+}
+
+fn adaptive_int_array_transform(
+    keys: DictionaryKeyArray,
+    values: DictionaryValueArray,
+) -> Arc<dyn Array> {
+    let (transformed_values, lookup) = values.transform_into_int_32_array();
 
     match transformed_values.len() {
         v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
@@ -452,21 +483,39 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(severity_number_column) =
                         logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
                 {
-                    logs.column(severity_number_column.0)
-                        .as_dictionary::<UInt8Type>()
-                        .downcast_dict::<Int64Array>()
-                        .expect("severity_number values were an unexpected type")
-                        .into()
+                    let severity_number_array = logs.column(severity_number_column.0);
+                    match severity_number_array.data_type() {
+                        DataType::UInt8 => severity_number_array
+                            .as_dictionary::<UInt8Type>()
+                            .downcast_dict::<Int32Array>()
+                            .expect("severity_number values were an unexpected type")
+                            .into(),
+                        DataType::UInt16 => severity_number_array
+                            .as_dictionary::<UInt16Type>()
+                            .downcast_dict::<Int32Array>()
+                            .expect("severity_number values were an unexpected type")
+                            .into(),
+                        d => panic!("severity_number values with '{d}' keys are not supported"),
+                    }
                 }
                 consts::SEVERITY_TEXT
                     if let Some(severity_text_column) =
                         logs_schema.column_with_name(consts::SEVERITY_TEXT) =>
                 {
-                    logs.column(severity_text_column.0)
-                        .as_dictionary::<UInt8Type>()
-                        .downcast_dict::<StringArray>()
-                        .expect("severity_text values were an unexpected type")
-                        .into()
+                    let severity_text_array = logs.column(severity_text_column.0);
+                    match severity_text_array.data_type() {
+                        DataType::UInt8 => severity_text_array
+                            .as_dictionary::<UInt8Type>()
+                            .downcast_dict::<StringArray>()
+                            .expect("severity_text values were an unexpected type")
+                            .into(),
+                        DataType::UInt16 => severity_text_array
+                            .as_dictionary::<UInt16Type>()
+                            .downcast_dict::<StringArray>()
+                            .expect("severity_text values were an unexpected type")
+                            .into(),
+                        d => panic!("severity_text values with '{d}' keys are not supported"),
+                    }
                 }
                 consts::BODY
                     if let Some(body) = self
@@ -505,11 +554,20 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(event_name_column) =
                         logs_schema.column_with_name(consts::EVENT_NAME) =>
                 {
-                    logs.column(event_name_column.0)
-                        .as_dictionary::<UInt8Type>()
-                        .downcast_dict::<StringArray>()
-                        .expect("event_name values were an unexpected type")
-                        .into()
+                    let event_name_array = logs.column(event_name_column.0);
+                    match event_name_array.data_type() {
+                        DataType::UInt8 => event_name_array
+                            .as_dictionary::<UInt8Type>()
+                            .downcast_dict::<StringArray>()
+                            .expect("event_name values were an unexpected type")
+                            .into(),
+                        DataType::UInt16 => event_name_array
+                            .as_dictionary::<UInt16Type>()
+                            .downcast_dict::<StringArray>()
+                            .expect("event_name values were an unexpected type")
+                            .into(),
+                        d => panic!("event_name values with '{d}' keys are not supported"),
+                    }
                 }
                 _ => return None,
             };
