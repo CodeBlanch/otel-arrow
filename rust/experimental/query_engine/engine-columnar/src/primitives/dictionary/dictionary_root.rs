@@ -1,10 +1,14 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::{Display, Write};
+use std::{
+    fmt::{Display, Write},
+    rc::Rc,
+};
 
 use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
+use roaring::RoaringBitmap;
 
 use crate::*;
 
@@ -123,6 +127,40 @@ impl<'a> Dictionary<'a> {
 
         ValueOrRef::Null
     }
+
+    pub fn with_values(self, key_filter: RoaringBitmap, values: &Dictionary<'a>) -> Dictionary<'a> {
+        let (source_keys, source_values) = self.into_parts();
+
+        match source_keys.data_type() {
+            DataType::UInt8 => {
+                with_values_typed::<UInt8Type>(source_keys, source_values, key_filter, values)
+            }
+            DataType::UInt16 => {
+                with_values_typed::<UInt16Type>(source_keys, source_values, key_filter, values)
+            }
+            DataType::UInt32 => {
+                with_values_typed::<UInt32Type>(source_keys, source_values, key_filter, values)
+            }
+            DataType::UInt64 => {
+                with_values_typed::<UInt64Type>(source_keys, source_values, key_filter, values)
+            }
+
+            DataType::Int8 => {
+                with_values_typed::<Int8Type>(source_keys, source_values, key_filter, values)
+            }
+            DataType::Int16 => {
+                with_values_typed::<Int16Type>(source_keys, source_values, key_filter, values)
+            }
+            DataType::Int32 => {
+                with_values_typed::<Int32Type>(source_keys, source_values, key_filter, values)
+            }
+            DataType::Int64 => {
+                with_values_typed::<Int64Type>(source_keys, source_values, key_filter, values)
+            }
+
+            d => panic!("Key type '{d}' is not supported"),
+        }
+    }
 }
 
 impl Display for Dictionary<'_> {
@@ -179,4 +217,50 @@ impl From<RecordTableDictionaryValueArray> for DictionaryValueArray<'static> {
             RecordTableDictionaryValueArray::Boolean => DictionaryValueArray::Boolean,
         }
     }
+}
+
+fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
+    source_keys: DictionaryKeyArray,
+    source_values: DictionaryValueArray<'a>,
+    key_filter: RoaringBitmap,
+    values: &Dictionary<'a>,
+) -> Dictionary<'a> {
+    let (mut source_key_builder, mut source_values) = match source_values {
+        DictionaryValueArray::Set(s) => (
+            source_keys.transform_into_key_builder::<K>(None),
+            Rc::unwrap_or_clone(s),
+        ),
+        v => {
+            let (values, lookup) = v.transform_into_set(&mut |v| {
+                if matches!(v, ValueOrRef::Null) {
+                    None
+                } else {
+                    Some(v)
+                }
+            });
+
+            (source_keys.transform_into_key_builder(Some(lookup)), values)
+        }
+    };
+
+    let mut source_key_writer = source_key_builder.get_writer();
+
+    for key_index in key_filter {
+        let key_index = key_index as usize;
+
+        let value = values.get_value(key_index);
+
+        if matches!(value, ValueOrRef::Null) {
+            unsafe { source_key_writer.set_null(key_index) }
+        } else {
+            let (value_index, _) = source_values.insert_full(value);
+
+            unsafe {
+                source_key_writer.set_value_index(key_index, value_index);
+                source_key_writer.set_nonnull(key_index);
+            }
+        }
+    }
+
+    Dictionary::new(source_key_builder.finish().into(), source_values.into())
 }

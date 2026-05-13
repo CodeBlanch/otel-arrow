@@ -1,14 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use ahash::AHashMap;
-use arrow::{
-    array::*,
-    buffer::{MutableBuffer, NullBuffer},
-    datatypes::*,
-};
+use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
 
 use crate::dictionary_transform::push_null;
 
@@ -123,38 +119,45 @@ impl DictionaryKeyArray {
         self,
         value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
     ) -> PrimitiveArray<KOutput> {
+        self.transform_into_key_builder(value_index_lookup).finish()
+    }
+
+    pub(crate) fn transform_into_key_builder<KOutput: ArrowDictionaryKeyType>(
+        self,
+        value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
+    ) -> KeyArrayBuilder<KOutput> {
         match self {
             DictionaryKeyArray::KeyArray(array) => match array.data_type() {
-                DataType::UInt8 => transform_key_array_into_key_array(
+                DataType::UInt8 => transform_key_array_into_key_builder(
                     array.as_primitive::<UInt8Type>(),
                     value_index_lookup,
                 ),
-                DataType::UInt16 => transform_key_array_into_key_array(
+                DataType::UInt16 => transform_key_array_into_key_builder(
                     array.as_primitive::<UInt16Type>(),
                     value_index_lookup,
                 ),
-                DataType::UInt32 => transform_key_array_into_key_array(
+                DataType::UInt32 => transform_key_array_into_key_builder(
                     array.as_primitive::<UInt32Type>(),
                     value_index_lookup,
                 ),
-                DataType::UInt64 => transform_key_array_into_key_array(
+                DataType::UInt64 => transform_key_array_into_key_builder(
                     array.as_primitive::<UInt64Type>(),
                     value_index_lookup,
                 ),
 
-                DataType::Int8 => transform_key_array_into_key_array(
+                DataType::Int8 => transform_key_array_into_key_builder(
                     array.as_primitive::<Int8Type>(),
                     value_index_lookup,
                 ),
-                DataType::Int16 => transform_key_array_into_key_array(
+                DataType::Int16 => transform_key_array_into_key_builder(
                     array.as_primitive::<Int16Type>(),
                     value_index_lookup,
                 ),
-                DataType::Int32 => transform_key_array_into_key_array(
+                DataType::Int32 => transform_key_array_into_key_builder(
                     array.as_primitive::<Int32Type>(),
                     value_index_lookup,
                 ),
-                DataType::Int64 => transform_key_array_into_key_array(
+                DataType::Int64 => transform_key_array_into_key_builder(
                     array.as_primitive::<Int64Type>(),
                     value_index_lookup,
                 ),
@@ -165,13 +168,8 @@ impl DictionaryKeyArray {
                 data_type: _,
                 values,
             } => {
-                let key_length = values.len();
-                let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
-
-                let mut key_buffer =
-                    MutableBuffer::from_len_zeroed(size_of::<KOutput::Native>() * key_length);
-                let key_builder = key_buffer.typed_data_mut::<KOutput::Native>().as_mut_ptr();
-                let mut null_buffer = None;
+                let mut builder = KeyArrayBuilder::<KOutput>::new(values.len());
+                let mut writer = builder.get_writer();
 
                 let true_value_index =
                     <KOutput as ArrowPrimitiveType>::Native::from_usize(1).unwrap();
@@ -179,105 +177,86 @@ impl DictionaryKeyArray {
                 for (key_index, v) in values.as_boolean().into_iter().enumerate() {
                     if let Some(v) = v {
                         if v {
-                            unsafe { *key_builder.add(key_index) = true_value_index };
+                            unsafe { writer.set_value_index_typed(key_index, true_value_index) }
                         }
                     } else {
-                        push_null(&mut null_buffer, key_index, key_bit_length);
+                        unsafe { writer.set_null(key_index) }
                     }
                 }
 
-                PrimitiveArray::<KOutput>::new(
-                    key_buffer.into(),
-                    null_buffer
-                        .and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
-                )
+                builder
             }
             DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
             } => {
-                let mut key_buffer =
-                    MutableBuffer::from_len_zeroed(size_of::<KOutput::Native>() * length);
-                let key_builder = key_buffer.typed_data_mut::<KOutput::Native>().as_mut_ptr();
+                let mut builder = KeyArrayBuilder::<KOutput>::new(length);
+                let mut writer = builder.get_writer();
 
                 for key_index in 0..length {
-                    unsafe {
-                        *key_builder.add(key_index) =
-                            <KOutput as ArrowPrimitiveType>::Native::from_usize(key_index)
-                                .expect("key index converted to output size")
-                    };
+                    unsafe { writer.set_value_index(key_index, key_index) };
                 }
 
-                PrimitiveArray::<KOutput>::new(key_buffer.into(), None)
+                builder
             }
             DictionaryKeyArray::SingleValue {
                 data_type: _,
                 length,
                 value_index,
             } => {
-                let mut key_buffer =
-                    MutableBuffer::from_len_zeroed(size_of::<KOutput::Native>() * length);
-                let mut null_buffer = None;
-
                 if let Some(value_index) = value_index {
-                    let key_builder = key_buffer.typed_data_mut::<KOutput::Native>().as_mut_ptr();
+                    let mut builder = KeyArrayBuilder::<KOutput>::new(length);
+                    let mut writer = builder.get_writer();
                     let value_index =
                         <KOutput as ArrowPrimitiveType>::Native::from_usize(value_index)
                             .expect("value index converted to output size");
                     for key_index in 0..length {
-                        unsafe { *key_builder.add(key_index) = value_index };
+                        unsafe { writer.set_value_index_typed(key_index, value_index) };
                     }
+                    builder
                 } else {
-                    null_buffer = Some(NullBuffer::new_null(length));
+                    KeyArrayBuilder::<KOutput>::new_null(length)
                 }
-
-                PrimitiveArray::<KOutput>::new(key_buffer.into(), null_buffer)
             }
         }
     }
 }
 
-fn transform_key_array_into_key_array<
+fn transform_key_array_into_key_builder<
     KInput: ArrowDictionaryKeyType,
     KOutput: ArrowDictionaryKeyType,
 >(
     keys: &PrimitiveArray<KInput>,
     value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
-) -> PrimitiveArray<KOutput> {
-    let key_length = keys.len();
-    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
-
-    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<KOutput::Native>() * key_length);
-    let key_builder = key_buffer.typed_data_mut::<KOutput::Native>().as_mut_ptr();
-    let mut null_buffer = None;
+) -> KeyArrayBuilder<KOutput> {
+    let mut builder = KeyArrayBuilder::<KOutput>::new(keys.len());
+    let mut writer = builder.get_writer();
 
     for (key_index, value_index) in keys.into_iter().enumerate() {
         if let Some(value_index) = value_index {
-            if let Some(transformed_value_index) = value_index_lookup
-                .as_ref()
-                .and_then(|v| {
-                    v.get(&<KInput as ArrowPrimitiveType>::Native::as_usize(
+            let transformed_value_index = match value_index_lookup.as_ref() {
+                Some(lookup) => lookup
+                    .get(&<KInput as ArrowPrimitiveType>::Native::as_usize(
                         value_index,
                     ))
-                })
-                .and_then(|v| *v)
-            {
+                    .and_then(|v| *v),
+                None => Some(<KInput as ArrowPrimitiveType>::Native::as_usize(
+                    value_index,
+                )),
+            };
+
+            if let Some(transformed_value_index) = transformed_value_index {
                 unsafe {
-                    *key_builder.add(key_index) =
-                        <KOutput as ArrowPrimitiveType>::Native::from_usize(transformed_value_index)
-                            .expect("transformed value index converted to output size")
+                    writer.set_value_index(key_index, transformed_value_index);
                 };
                 continue;
             }
         }
 
-        push_null(&mut null_buffer, key_index, key_bit_length);
+        unsafe { writer.set_null(key_index) };
     }
 
-    PrimitiveArray::<KOutput>::new(
-        key_buffer.into(),
-        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
-    )
+    builder
 }
 
 impl<T: ArrowDictionaryKeyType> From<PrimitiveArray<T>> for DictionaryKeyArray {
@@ -363,4 +342,89 @@ fn get_bool_array_value_index_for_key_index(
         true => 1,
         false => 0,
     })
+}
+
+pub(crate) struct KeyArrayBuilder<K: ArrowDictionaryKeyType> {
+    key_length: usize,
+    key_bit_length: usize,
+    key_buffer: MutableBuffer,
+    null_buffer: Option<MutableBuffer>,
+    marker: PhantomData<K>,
+}
+
+impl<K: ArrowDictionaryKeyType> KeyArrayBuilder<K> {
+    pub fn new(key_length: usize) -> KeyArrayBuilder<K> {
+        let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
+
+        Self {
+            key_length,
+            key_bit_length,
+            key_buffer: MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length),
+            null_buffer: None,
+            marker: Default::default(),
+        }
+    }
+
+    pub fn new_null(key_length: usize) -> KeyArrayBuilder<K> {
+        let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
+
+        Self {
+            key_length,
+            key_bit_length,
+            key_buffer: MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length),
+            null_buffer: Some(MutableBuffer::from_len_zeroed(key_bit_length)),
+            marker: Default::default(),
+        }
+    }
+
+    pub fn get_writer(&mut self) -> KeyArrayWriter<'_, K> {
+        KeyArrayWriter {
+            key_bit_length: self.key_bit_length,
+            key_builder: self.key_buffer.typed_data_mut::<K::Native>(),
+            null_buffer: &mut self.null_buffer,
+        }
+    }
+
+    pub fn finish(self) -> PrimitiveArray<K> {
+        PrimitiveArray::<K>::new(
+            self.key_buffer.into(),
+            self.null_buffer
+                .and_then(|v| NullBufferBuilder::new_from_buffer(v, self.key_length).finish()),
+        )
+    }
+}
+
+pub(crate) struct KeyArrayWriter<'a, K: ArrowDictionaryKeyType> {
+    key_bit_length: usize,
+    key_builder: &'a mut [K::Native],
+    null_buffer: &'a mut Option<MutableBuffer>,
+}
+
+impl<'a, K: ArrowDictionaryKeyType> KeyArrayWriter<'a, K> {
+    pub unsafe fn set_value_index(&mut self, key_index: usize, value_index: usize) {
+        unsafe {
+            *self.key_builder.as_mut_ptr().add(key_index) =
+                <K as ArrowPrimitiveType>::Native::from_usize(value_index)
+                    .expect("transformed value index converted to output size")
+        }
+    }
+
+    pub unsafe fn set_value_index_typed(&mut self, key_index: usize, value_index: K::Native) {
+        unsafe { *self.key_builder.as_mut_ptr().add(key_index) = value_index }
+    }
+
+    pub unsafe fn set_null(&mut self, key_index: usize) {
+        unsafe { push_null(self.null_buffer, key_index, self.key_bit_length) }
+    }
+
+    pub unsafe fn set_nonnull(&mut self, key_index: usize) {
+        if let Some(nulls) = self.null_buffer {
+            let ptr = nulls.typed_data_mut::<u8>().as_mut_ptr();
+
+            let i = key_index / 8;
+            let b = 1 << (key_index % 8);
+
+            unsafe { *ptr.add(i) |= b };
+        }
+    }
 }

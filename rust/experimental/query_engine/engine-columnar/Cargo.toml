@@ -15,6 +15,7 @@ chrono = { workspace = true }
 half = { workspace = true }
 indexmap = { workspace = true }
 regex = { workspace = true }
+roaring = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

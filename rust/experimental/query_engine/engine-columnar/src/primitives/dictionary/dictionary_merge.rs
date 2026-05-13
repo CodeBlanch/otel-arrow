@@ -4,10 +4,10 @@
 use std::collections::hash_map::Entry;
 
 use ahash::{AHashMap, RandomState};
-use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
+use arrow::{array::*, datatypes::*};
 use indexmap::IndexSet;
 
-use crate::{dictionary_transform::push_null, *};
+use crate::*;
 
 pub(crate) fn merge<'a, FMerge, const COUNT: usize>(
     values: [Dictionary<'a>; COUNT],
@@ -63,11 +63,8 @@ where
     > = AHashMap::new();
     let mut merged_values = IndexSet::with_hasher(RandomState::new());
 
-    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_count);
-    let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
-
-    let key_bit_length = arrow::util::bit_util::ceil(key_count, 8);
-    let mut null_buffer = None;
+    let mut key_builder = KeyArrayBuilder::<K>::new(key_count);
+    let mut key_writer = key_builder.get_writer();
 
     for key_index in 0..key_count {
         let mut value_indices = [None; COUNT];
@@ -78,10 +75,10 @@ where
         match visited_values.entry(value_indices) {
             Entry::Occupied(occupied) => match occupied.get() {
                 Some(v) => {
-                    unsafe { *key_builder.add(key_index) = *v };
+                    unsafe { key_writer.set_value_index_typed(key_index, *v) };
                 }
                 None => {
-                    push_null(&mut null_buffer, key_index, key_bit_length);
+                    unsafe { key_writer.set_null(key_index) };
                 }
             },
             Entry::Vacant(vacant) => {
@@ -94,7 +91,7 @@ where
                 match merge(values_to_merge) {
                     ValueOrRef::Null => {
                         vacant.insert(None);
-                        push_null(&mut null_buffer, key_index, key_bit_length);
+                        unsafe { key_writer.set_null(key_index) };
                     }
                     v => {
                         let (merged_value_index, _) = merged_values.insert_full(v);
@@ -102,21 +99,16 @@ where
                             <K as ArrowPrimitiveType>::Native::from_usize(merged_value_index)
                                 .unwrap();
                         vacant.insert(Some(native_merged_value_index));
-                        unsafe { *key_builder.add(key_index) = native_merged_value_index };
+                        unsafe {
+                            key_writer.set_value_index_typed(key_index, native_merged_value_index)
+                        };
                     }
                 }
             }
         }
     }
 
-    Dictionary::new(
-        PrimitiveArray::<K>::new(
-            key_buffer.into(),
-            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_count).finish()),
-        )
-        .into(),
-        merged_values.into(),
-    )
+    Dictionary::new(key_builder.finish().into(), merged_values.into())
 }
 
 #[cfg(test)]

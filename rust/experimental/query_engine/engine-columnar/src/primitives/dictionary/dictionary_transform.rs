@@ -50,7 +50,7 @@ impl<'a> Dictionary<'a> {
                             unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                         }
                     } else {
-                        push_null(&mut null_buffer, key_index, key_bit_length);
+                        unsafe { push_null(&mut null_buffer, key_index, key_bit_length) };
                     }
                 }
 
@@ -241,7 +241,7 @@ where
                     unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                 }
             } else {
-                push_null(&mut null_buffer, key_index, key_bit_length);
+                unsafe { push_null(&mut null_buffer, key_index, key_bit_length) };
             }
         }
     } else {
@@ -257,7 +257,7 @@ where
                     unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                 }
             } else {
-                push_null(&mut null_buffer, key_index, key_bit_length);
+                unsafe { push_null(&mut null_buffer, key_index, key_bit_length) };
             }
         }
     }
@@ -268,7 +268,7 @@ where
     )
 }
 
-pub(crate) fn push_null(
+pub(crate) unsafe fn push_null(
     null_buffer: &mut Option<MutableBuffer>,
     index: usize,
     key_bit_length: usize,
@@ -349,11 +349,9 @@ where
     FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     let key_length = keys.len();
-    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
 
-    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length);
-    let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
-    let mut null_buffer = None;
+    let mut key_builder = KeyArrayBuilder::<K>::new(key_length);
+    let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
         values.transform_into_set(&mut |v| match transform(v) {
@@ -367,10 +365,7 @@ where
         if let Some(value_index) = value_index.map(<K as ArrowPrimitiveType>::Native::as_usize)
             && let Some(Some(transformed_value_index)) = value_index_lookup.get(&value_index)
         {
-            unsafe {
-                *key_builder.add(key_index) =
-                    <K as ArrowPrimitiveType>::Native::from_usize(*transformed_value_index).unwrap()
-            };
+            unsafe { key_writer.set_value_index(key_index, *transformed_value_index) };
             continue;
         }
 
@@ -396,21 +391,14 @@ where
         };
 
         if has_value_index {
-            unsafe { *key_builder.add(key_index) = value_index };
+            unsafe { key_writer.set_value_index_typed(key_index, value_index) };
             continue;
         }
 
-        push_null(&mut null_buffer, key_index, key_bit_length);
+        unsafe { key_writer.set_null(key_index) };
     }
 
-    Dictionary::new(
-        PrimitiveArray::<K>::new(
-            key_buffer.into(),
-            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
-        )
-        .into(),
-        transformed_values.into(),
-    )
+    Dictionary::new(key_builder.finish().into(), transformed_values.into())
 }
 
 fn transform_any_typed_keyless<'a, K: ArrowDictionaryKeyType, FTransform>(
@@ -421,11 +409,8 @@ fn transform_any_typed_keyless<'a, K: ArrowDictionaryKeyType, FTransform>(
 where
     FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
-    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
-
-    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length);
-    let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
-    let mut null_buffer = None;
+    let mut key_builder = KeyArrayBuilder::<K>::new(key_length);
+    let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
         values.transform_into_set(&mut |v| match transform(v) {
@@ -437,10 +422,7 @@ where
 
     for key_index in 0..key_length {
         if let Some(Some(transformed_value_index)) = value_index_lookup.get(&key_index) {
-            unsafe {
-                *key_builder.add(key_index) =
-                    <K as ArrowPrimitiveType>::Native::from_usize(*transformed_value_index).unwrap()
-            };
+            unsafe { key_writer.set_value_index(key_index, *transformed_value_index) };
             continue;
         }
 
@@ -466,19 +448,12 @@ where
         };
 
         if has_value_index {
-            unsafe { *key_builder.add(key_index) = value_index };
+            unsafe { key_writer.set_value_index_typed(key_index, value_index) };
             continue;
         }
 
-        push_null(&mut null_buffer, key_index, key_bit_length);
+        unsafe { key_writer.set_null(key_index) };
     }
 
-    Dictionary::new(
-        PrimitiveArray::<K>::new(
-            key_buffer.into(),
-            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
-        )
-        .into(),
-        transformed_values.into(),
-    )
+    Dictionary::new(key_builder.finish().into(), transformed_values.into())
 }

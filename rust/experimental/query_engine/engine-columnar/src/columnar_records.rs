@@ -35,6 +35,7 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
 pub enum SelectionPath<'a> {
     Key(StringValueOrRef<'a>),
     Index(ArrayValueOrRef<'a>),
+    Dictionary(Dictionary<'a>),
 }
 
 pub trait ColumnarRecords: RecordTable

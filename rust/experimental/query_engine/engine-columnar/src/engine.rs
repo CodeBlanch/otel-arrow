@@ -248,7 +248,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                 ResolvedScalarValue::Dictionary(d) => {
                                     ResolvedSingleOrDictionaryValue::Dictionary(d)
                                 }
-                                ResolvedScalarValue::Table(t) => {
+                                ResolvedScalarValue::Table(_) => {
                                     // In order to set a table it needs to be converted to a map per record
                                     todo!()
                                 }

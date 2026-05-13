@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use ahash::RandomState;
-use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
+use arrow::datatypes::*;
 use data_engine_expressions::*;
 use indexmap::IndexSet;
 
 use crate::{
-    dictionary_transform::push_null, execution_context::ExecutionContext, resolved_value::*,
-    scalars::execute_scalar_expression, *,
+    execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
 pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
@@ -143,8 +142,9 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
     };
 
     for selector in selectors {
-        let ret = execute_scalar_expression(execution_context, selector).map_into(
-            |single| match single {
+        let ret = execute_scalar_expression(execution_context, selector).map_into_with_state(
+            &mut path,
+            |path, single| match single {
                 ValueOrRef::String(key) => {
                     path.push(SelectionPath::Key(key));
                     Ok(())
@@ -162,11 +162,17 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
                     Err(())
                 }
             },
-            |dictionary| {
-                todo!()
+            |path, dictionary| {
+                path.push(SelectionPath::Dictionary(dictionary));
+                Ok(())
             },
-            |table| {
-                todo!()
+            |_, _| {
+                execution_context.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    selector,
+                    || "Unexpected scalar expression with Map value type encountered in accessor expression".into(),
+                );
+                Err(())
             });
 
         if ret.is_err() {
@@ -185,11 +191,8 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
 ) -> ResolvedScalarValue<'pipeline, 'a> {
     let key_count = selector.len();
 
-    let mut key_buffer = MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_count);
-    let key_builder = key_buffer.typed_data_mut::<K::Native>().as_mut_ptr();
-
-    let key_bit_length = arrow::util::bit_util::ceil(key_count, 8);
-    let mut null_buffer = None;
+    let mut key_builder = KeyArrayBuilder::<K>::new(key_count);
+    let mut key_writer = key_builder.get_writer();
 
     let mut values = IndexSet::with_hasher(RandomState::new());
 
@@ -228,13 +231,10 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     }
                 };
                 if let ValueOrRef::Null = value {
-                    push_null(&mut null_buffer, key_index, key_bit_length);
+                    unsafe { key_writer.set_null(key_index) }
                 } else {
                     let (index, _) = values.insert_full(value);
-                    unsafe {
-                        *key_builder.add(key_index) =
-                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap()
-                    };
+                    unsafe { key_writer.set_value_index(key_index, index) };
                 }
             }
             Value::Integer(index) => {
@@ -279,13 +279,10 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     }
                 };
                 if let ValueOrRef::Null = value {
-                    push_null(&mut null_buffer, key_index, key_bit_length);
+                    unsafe { key_writer.set_null(key_index) };
                 } else {
                     let (index, _) = values.insert_full(value);
-                    unsafe {
-                        *key_builder.add(key_index) =
-                            <K as ArrowPrimitiveType>::Native::from_usize(index).unwrap()
-                    };
+                    unsafe { key_writer.set_value_index(key_index, index) };
                 }
             }
             v => {
@@ -294,17 +291,10 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     selector_expression,
                     || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
                 );
-                push_null(&mut null_buffer, key_index, key_bit_length);
+                unsafe { key_writer.set_null(key_index) };
             }
         }
     }
 
-    ResolvedScalarValue::Dictionary(Dictionary::new(
-        PrimitiveArray::<K>::new(
-            key_buffer.into(),
-            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_count).finish()),
-        )
-        .into(),
-        values.into(),
-    ))
+    ResolvedScalarValue::Dictionary(Dictionary::new(key_builder.finish().into(), values.into()))
 }

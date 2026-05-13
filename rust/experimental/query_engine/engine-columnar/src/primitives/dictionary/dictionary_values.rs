@@ -72,7 +72,13 @@ impl<'a> DictionaryValueArray<'a> {
                 a.len(),
                 Rc::unwrap_or_clone(a).into_iter().enumerate(),
             ),
-            DictionaryValueArray::Boolean => todo!(),
+            DictionaryValueArray::Boolean => transform_iter_into_set(
+                transform,
+                2,
+                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)]
+                    .into_iter()
+                    .enumerate(),
+            ),
         }
     }
 

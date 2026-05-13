@@ -21,6 +21,7 @@ use otap_df_pdata::{
     otap::raw_batch_store::POSITION_LOOKUP, proto::opentelemetry::arrow::v1::ArrowPayloadType,
     schema::consts,
 };
+use roaring::RoaringBitmap;
 
 use crate::{
     filter::{IdBitmap, filter_child_batch},
@@ -247,54 +248,124 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         match path.len() {
             0 => Err("Log record cannot be set directly"),
             l => {
-                if let SelectionPath::Key(root_key) = &path[0] {
-                    match get_log_record_schema().normalize_key(root_key.get_value()) {
-                        consts::ATTRIBUTES => {
-                            todo!()
-                        }
-                        consts::SEVERITY_NUMBER => {
-                            if l > 1 {
-                                return Err("Invalid accessor path specified");
+                match &path[0] {
+                    SelectionPath::Key(root_key) => {
+                        match get_log_record_schema().normalize_key(root_key.get_value()) {
+                            consts::ATTRIBUTES => {
+                                todo!()
                             }
+                            consts::SEVERITY_NUMBER => {
+                                if l > 1 {
+                                    return Err("Invalid accessor path specified");
+                                }
 
-                            set_column(
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::SEVERITY_NUMBER,
-                                value,
-                                adaptive_int_array_transform,
-                            )
-                        }
-                        consts::SEVERITY_TEXT => {
-                            if l > 1 {
-                                return Err("Invalid accessor path specified");
+                                set_column(
+                                    batches,
+                                    POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                    consts::SEVERITY_NUMBER,
+                                    value,
+                                    adaptive_int_32_array_writer,
+                                );
+
+                                Ok(())
                             }
+                            consts::SEVERITY_TEXT => {
+                                if l > 1 {
+                                    return Err("Invalid accessor path specified");
+                                }
 
-                            set_column(
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::SEVERITY_TEXT,
-                                value,
-                                adaptive_string_array_transform,
-                            )
-                        }
-                        consts::EVENT_NAME => {
-                            if l > 1 {
-                                return Err("Invalid accessor path specified");
+                                set_column(
+                                    batches,
+                                    POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                    consts::SEVERITY_TEXT,
+                                    value,
+                                    adaptive_string_array_writer,
+                                );
+
+                                Ok(())
                             }
+                            consts::EVENT_NAME => {
+                                if l > 1 {
+                                    return Err("Invalid accessor path specified");
+                                }
 
-                            set_column(
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::EVENT_NAME,
-                                value,
-                                adaptive_string_array_transform,
-                            )
+                                set_column(
+                                    batches,
+                                    POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                    consts::EVENT_NAME,
+                                    value,
+                                    adaptive_string_array_writer,
+                                );
+
+                                Ok(())
+                            }
+                            _ => Err("Unknown key specified on accessor path"),
                         }
-                        _ => Err("Unknown key specified on accessor path"),
                     }
-                } else {
-                    Err("Accessor path did not refer to a valid string key on log record")
+                    SelectionPath::Dictionary(root_keys) => {
+                        let key_length = root_keys.len();
+
+                        let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
+                            AHashMap::with_capacity(key_length);
+
+                        for key_index in 0..key_length {
+                            if let ValueOrRef::String(key) = root_keys.get_value(key_index) {
+                                match plan.entry(key) {
+                                    Entry::Occupied(mut o) => {
+                                        o.get_mut()
+                                            .try_push(key_index as u32)
+                                            .expect("key_index pushed");
+                                    }
+                                    Entry::Vacant(v) => {
+                                        v.insert(RoaringBitmap::from([key_index as u32]));
+                                    }
+                                };
+                            }
+                        }
+
+                        for (key, key_filter) in plan.into_iter() {
+                            match get_log_record_schema().normalize_key(key.get_value()) {
+                                consts::SEVERITY_TEXT => {
+                                    if l > 1 {
+                                        //return Err("Invalid accessor path specified");
+                                        continue;
+                                    }
+
+                                    set_column_with_values(
+                                        batches,
+                                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                        consts::SEVERITY_TEXT,
+                                        adaptive_string_array_reader,
+                                        key_filter,
+                                        &value,
+                                        adaptive_string_array_writer,
+                                    );
+                                }
+                                consts::EVENT_NAME => {
+                                    if l > 1 {
+                                        //return Err("Invalid accessor path specified");
+                                        continue;
+                                    }
+
+                                    set_column_with_values(
+                                        batches,
+                                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                        consts::EVENT_NAME,
+                                        adaptive_string_array_reader,
+                                        key_filter,
+                                        &value,
+                                        adaptive_string_array_writer,
+                                    );
+                                }
+                                _ => {
+                                    // todo: Log?
+                                }
+                            }
+                        }
+
+                        Ok(())
+                    }
+                    _ => Err("Accessor path did not refer to a valid string key on log record"),
                 }
             }
         }
@@ -309,12 +380,12 @@ fn set_column<
     batch_position: usize,
     column_name: &str,
     value: Dictionary,
-    transform_value: FTransform,
-) -> Result<(), &'static str> {
+    primitive_array_transform: FTransform,
+) {
     if let Some(logs_batch) = batches[batch_position].take() {
         let (keys, values) = value.into_parts();
 
-        let values = transform_value(keys, values);
+        let values = primitive_array_transform(keys, values);
 
         let (mut schema, mut columns, count) = logs_batch.into_parts();
 
@@ -335,11 +406,73 @@ fn set_column<
         batches[batch_position] =
             Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
     }
-
-    Ok(())
 }
 
-fn adaptive_string_array_transform(
+fn set_column_with_values<
+    FDictionaryTransform: Fn(&Arc<dyn Array>) -> RecordTableDictionary,
+    FArrayTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+    const BATCH_SIZE: usize,
+>(
+    batches: &mut [Option<RecordBatch>; BATCH_SIZE],
+    batch_position: usize,
+    column_name: &str,
+    dictionary_transform: FDictionaryTransform,
+    key_filter: RoaringBitmap,
+    values: &Dictionary,
+    primitive_array_transform: FArrayTransform,
+) {
+    if let Some(logs_batch) = batches[batch_position].take() {
+        let key_length = logs_batch.num_rows();
+        let (mut schema, mut columns, count) = logs_batch.into_parts();
+
+        let existing_values = if let Some((column_id, _)) = schema.column_with_name(column_name) {
+            dictionary_transform(&columns[column_id]).into()
+        } else {
+            Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
+        };
+
+        let merged_values = existing_values.with_values(key_filter, values);
+
+        let (keys, values) = merged_values.into_parts();
+
+        let column_values = primitive_array_transform(keys, values);
+
+        let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
+
+        let field = Field::new(column_name, column_values.data_type().clone(), true);
+
+        if let Some((column_id, _)) = schema.column_with_name(column_name) {
+            *schema_builder.field_mut(column_id) = field.into();
+            columns[column_id] = column_values;
+        } else {
+            schema_builder.push(field);
+            columns.push(column_values);
+        }
+
+        schema = Arc::new(schema_builder.finish());
+
+        batches[batch_position] =
+            Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+    }
+}
+
+fn adaptive_string_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+    match array.data_type() {
+        DataType::UInt8 => array
+            .as_dictionary::<UInt8Type>()
+            .downcast_dict::<StringArray>()
+            .expect("array values were an unexpected type")
+            .into(),
+        DataType::UInt16 => array
+            .as_dictionary::<UInt16Type>()
+            .downcast_dict::<StringArray>()
+            .expect("array values were an unexpected type")
+            .into(),
+        d => panic!("array values with '{d}' keys are not supported"),
+    }
+}
+
+fn adaptive_string_array_writer(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray,
 ) -> Arc<dyn Array> {
@@ -357,7 +490,7 @@ fn adaptive_string_array_transform(
     }
 }
 
-fn adaptive_int_array_transform(
+fn adaptive_int_32_array_writer(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray,
 ) -> Arc<dyn Array> {
@@ -502,20 +635,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(severity_text_column) =
                         logs_schema.column_with_name(consts::SEVERITY_TEXT) =>
                 {
-                    let severity_text_array = logs.column(severity_text_column.0);
-                    match severity_text_array.data_type() {
-                        DataType::UInt8 => severity_text_array
-                            .as_dictionary::<UInt8Type>()
-                            .downcast_dict::<StringArray>()
-                            .expect("severity_text values were an unexpected type")
-                            .into(),
-                        DataType::UInt16 => severity_text_array
-                            .as_dictionary::<UInt16Type>()
-                            .downcast_dict::<StringArray>()
-                            .expect("severity_text values were an unexpected type")
-                            .into(),
-                        d => panic!("severity_text values with '{d}' keys are not supported"),
-                    }
+                    adaptive_string_array_reader(logs.column(severity_text_column.0))
                 }
                 consts::BODY
                     if let Some(body) = self
@@ -554,20 +674,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(event_name_column) =
                         logs_schema.column_with_name(consts::EVENT_NAME) =>
                 {
-                    let event_name_array = logs.column(event_name_column.0);
-                    match event_name_array.data_type() {
-                        DataType::UInt8 => event_name_array
-                            .as_dictionary::<UInt8Type>()
-                            .downcast_dict::<StringArray>()
-                            .expect("event_name values were an unexpected type")
-                            .into(),
-                        DataType::UInt16 => event_name_array
-                            .as_dictionary::<UInt16Type>()
-                            .downcast_dict::<StringArray>()
-                            .expect("event_name values were an unexpected type")
-                            .into(),
-                        d => panic!("event_name values with '{d}' keys are not supported"),
-                    }
+                    adaptive_string_array_reader(logs.column(event_name_column.0))
                 }
                 _ => return None,
             };
@@ -631,20 +738,12 @@ impl RecordTable for OtapScope<'_> {
             consts::NAME | "Name"
                 if let Some(name_column) = self.scope_struct.column_by_name("name") =>
             {
-                name_column
-                    .as_dictionary::<UInt8Type>()
-                    .downcast_dict::<StringArray>()
-                    .expect("scope name values were an unexpected type")
-                    .into()
+                adaptive_string_array_reader(name_column)
             }
             consts::VERSION | "Version"
                 if let Some(version_column) = self.scope_struct.column_by_name("version") =>
             {
-                version_column
-                    .as_dictionary::<UInt8Type>()
-                    .downcast_dict::<StringArray>()
-                    .expect("scope version values were an unexpected type")
-                    .into()
+                adaptive_string_array_reader(version_column)
             }
             _ => return None,
         };
@@ -745,19 +844,21 @@ impl<'record> OtapAttributes<'record> {
             let mut id_map_length = ids.len();
             let mut id_map_buffer = MutableBuffer::from_len_zeroed(id_map_length * 2);
             let mut id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
-            for (record_index, id) in ids.iter().flatten().enumerate() {
-                let id = id as usize;
-                if id >= id_map_length {
-                    // If the data is malformed or a filter was run there
-                    // could be parent ids greater than the number of
-                    // records. In this case we need additional capacity to
-                    // make the lookup array the correct size.
-                    let additional_capacity = id - id_map_length + 1;
-                    id_map_buffer.extend_zeros(additional_capacity * 2);
-                    id_map_length += additional_capacity;
-                    id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
+            for (record_index, id) in ids.iter().enumerate() {
+                if let Some(id) = id {
+                    let id = id as usize;
+                    if id >= id_map_length {
+                        // If the data is malformed or a filter was run there
+                        // could be parent ids greater than the number of
+                        // records. In this case we need additional capacity to
+                        // make the lookup array the correct size.
+                        let additional_capacity = id - id_map_length + 1;
+                        id_map_buffer.extend_zeros(additional_capacity * 2);
+                        id_map_length += additional_capacity;
+                        id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
+                    }
+                    unsafe { *id_map.add(id) = record_index as u16 };
                 }
-                unsafe { *id_map.add(id) = record_index as u16 };
             }
             PrimitiveArray::<UInt16Type>::new(id_map_buffer.into(), None)
         })
