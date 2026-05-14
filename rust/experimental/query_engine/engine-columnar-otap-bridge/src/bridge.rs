@@ -1048,7 +1048,79 @@ mod tests {
                     18,
                     logs[2].severity_number);
             }),
-        test_engine_set_dynamic_column: (
+        test_engine_set_time_unix_nano_column_exists: (
+            vec![
+                LogRecord::build().time_unix_nano(1u64).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().time_unix_nano(18u64).finish(),
+            ],
+            "source | extend time_unix_nano = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[1].time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[2].time_unix_nano);
+            }),
+        test_engine_set_time_unix_nano_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend time_unix_nano = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[1].time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[2].time_unix_nano);
+            }),
+        test_engine_set_observed_time_unix_nano_column_exists: (
+            vec![
+                LogRecord::build().observed_time_unix_nano(1u64).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().observed_time_unix_nano(18u64).finish(),
+            ],
+            "source | extend observed_time_unix_nano = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].observed_time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[1].observed_time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[2].observed_time_unix_nano);
+            }),
+        test_engine_set_observed_time_unix_nano_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend observed_time_unix_nano = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].observed_time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[1].observed_time_unix_nano);
+                assert_eq!(
+                    18,
+                    logs[2].observed_time_unix_nano);
+            }),
+        test_engine_set_dynamic_string_column: (
             vec![
                 LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_text".into())) }) }]).finish(),
                 LogRecord::build().finish(),
@@ -1062,6 +1134,36 @@ mod tests {
                 assert_eq!(
                     "hello world",
                     logs[2].event_name);
+            }),
+        test_engine_set_dynamic_int_32_column: (
+            vec![
+                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_number".into())) }) }]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_number".into())) }) }]).finish(),
+            ],
+            "source | extend source[some_attr] = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].severity_number);
+                assert_eq!(
+                    18,
+                    logs[2].severity_number);
+            }),
+        test_engine_set_dynamic_timestamp_column: (
+            vec![
+                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("time_unix_nano".into())) }) }]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("observed_time_unix_nano".into())) }) }]).finish(),
+            ],
+            "source | extend source[some_attr] = 1",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    1,
+                    logs[0].time_unix_nano);
+                assert_eq!(
+                    1,
+                    logs[2].observed_time_unix_nano);
             }),
     }
 

@@ -257,6 +257,44 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 consts::ATTRIBUTES => {
                     todo!()
                 }
+                consts::TIME_UNIX_NANO => {
+                    if path_length > 0 {
+                        return log_invalid_column_access(
+                            diagnostic_receiver,
+                            *expression,
+                            consts::TIME_UNIX_NANO,
+                        );
+                    }
+
+                    set_column(
+                        batches,
+                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                        consts::TIME_UNIX_NANO,
+                        value,
+                        timestamp_nanosecond_array_writer,
+                    );
+
+                    ColumnarRecordsWriteResult::Success
+                }
+                consts::OBSERVED_TIME_UNIX_NANO => {
+                    if path_length > 0 {
+                        return log_invalid_column_access(
+                            diagnostic_receiver,
+                            *expression,
+                            consts::OBSERVED_TIME_UNIX_NANO,
+                        );
+                    }
+
+                    set_column(
+                        batches,
+                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                        consts::OBSERVED_TIME_UNIX_NANO,
+                        value,
+                        timestamp_nanosecond_array_writer,
+                    );
+
+                    ColumnarRecordsWriteResult::Success
+                }
                 consts::SEVERITY_NUMBER => {
                     if path_length > 0 {
                         return log_invalid_column_access(
@@ -271,7 +309,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                         consts::SEVERITY_NUMBER,
                         value,
-                        adaptive_int_32_array_writer,
+                        adaptive_int_32_dictionary_writer,
                     );
 
                     ColumnarRecordsWriteResult::Success
@@ -290,7 +328,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                         consts::SEVERITY_TEXT,
                         value,
-                        adaptive_string_array_writer,
+                        adaptive_string_dictionary_writer,
                     );
 
                     ColumnarRecordsWriteResult::Success
@@ -309,7 +347,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                         consts::EVENT_NAME,
                         value,
-                        adaptive_string_array_writer,
+                        adaptive_string_dictionary_writer,
                     );
 
                     ColumnarRecordsWriteResult::Success
@@ -352,6 +390,50 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
                 for (key, key_filter) in plan.into_iter() {
                     match get_log_record_schema().normalize_key(key.get_value()) {
+                        consts::TIME_UNIX_NANO => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::TIME_UNIX_NANO,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::TIME_UNIX_NANO,
+                                timestamp_nanosecond_array_reader,
+                                key_filter,
+                                &value,
+                                timestamp_nanosecond_array_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
+                        consts::OBSERVED_TIME_UNIX_NANO => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::OBSERVED_TIME_UNIX_NANO,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::OBSERVED_TIME_UNIX_NANO,
+                                timestamp_nanosecond_array_reader,
+                                key_filter,
+                                &value,
+                                timestamp_nanosecond_array_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
                         consts::SEVERITY_NUMBER => {
                             if path_length > 0 {
                                 log_invalid_column_access(
@@ -366,10 +448,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_NUMBER,
-                                adaptive_int_32_array_reader,
+                                adaptive_int_32_dictionary_reader,
                                 key_filter,
                                 &value,
-                                adaptive_int_32_array_writer,
+                                adaptive_int_32_dictionary_writer,
                             );
 
                             written_data_count += 1;
@@ -388,10 +470,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_TEXT,
-                                adaptive_string_array_reader,
+                                adaptive_string_dictionary_reader,
                                 key_filter,
                                 &value,
-                                adaptive_string_array_writer,
+                                adaptive_string_dictionary_writer,
                             );
 
                             written_data_count += 1;
@@ -410,10 +492,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::EVENT_NAME,
-                                adaptive_string_array_reader,
+                                adaptive_string_dictionary_reader,
                                 key_filter,
                                 &value,
-                                adaptive_string_array_writer,
+                                adaptive_string_dictionary_writer,
                             );
 
                             written_data_count += 1;
@@ -548,7 +630,7 @@ fn set_column_with_values<
     }
 }
 
-fn adaptive_string_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+fn adaptive_string_dictionary_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
     match array.data_type() {
         DataType::UInt8 => array
             .as_dictionary::<UInt8Type>()
@@ -564,7 +646,7 @@ fn adaptive_string_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary
     }
 }
 
-fn adaptive_string_array_writer(
+fn adaptive_string_dictionary_writer(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray,
 ) -> Arc<dyn Array> {
@@ -582,7 +664,7 @@ fn adaptive_string_array_writer(
     }
 }
 
-fn adaptive_int_32_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+fn adaptive_int_32_dictionary_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
     match array.data_type() {
         DataType::UInt8 => array
             .as_dictionary::<UInt8Type>()
@@ -598,7 +680,7 @@ fn adaptive_int_32_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary
     }
 }
 
-fn adaptive_int_32_array_writer(
+fn adaptive_int_32_dictionary_writer(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray,
 ) -> Arc<dyn Array> {
@@ -614,6 +696,47 @@ fn adaptive_int_32_array_writer(
             Arc::new(transformed_values),
         )),
     }
+}
+
+fn timestamp_nanosecond_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+    RecordTableDictionary::from_array::<UInt16Type, _>(
+        array.as_primitive::<TimestampNanosecondType>(),
+    )
+}
+
+fn timestamp_nanosecond_array_writer(
+    keys: DictionaryKeyArray,
+    values: DictionaryValueArray,
+) -> Arc<dyn Array> {
+    let (transformed_values, lookup) = values.transform_into_timestamp_nanoseconds_array();
+
+    let key_length = keys.len();
+
+    if transformed_values.len() == key_length {
+        return Arc::new(transformed_values);
+    }
+
+    let mut builder = PrimitiveBuilder::<TimestampNanosecondType>::with_capacity(key_length);
+
+    for key_index in 0..key_length {
+        if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
+            let transformed_value_index = match lookup.as_ref() {
+                Some(lookup) => lookup.get(&value_index).and_then(|v| *v),
+                None => Some(value_index),
+            };
+
+            if let Some(transformed_value_index) = transformed_value_index {
+                builder.append_value(unsafe {
+                    transformed_values.value_unchecked(transformed_value_index)
+                });
+                continue;
+            }
+        }
+
+        builder.append_null();
+    }
+
+    Arc::new(builder.finish())
 }
 
 #[derive(Debug)]
@@ -706,31 +829,25 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(time_unix_nano_column) =
                         logs_schema.column_with_name(consts::TIME_UNIX_NANO) =>
                 {
-                    RecordTableDictionary::from_array::<UInt16Type, _>(
-                        logs.column(time_unix_nano_column.0)
-                            .as_primitive::<TimestampNanosecondType>(),
-                    )
+                    timestamp_nanosecond_array_reader(logs.column(time_unix_nano_column.0))
                 }
                 consts::OBSERVED_TIME_UNIX_NANO
                     if let Some(observed_time_unix_nano_column) =
                         logs_schema.column_with_name(consts::OBSERVED_TIME_UNIX_NANO) =>
                 {
-                    RecordTableDictionary::from_array::<UInt16Type, _>(
-                        logs.column(observed_time_unix_nano_column.0)
-                            .as_primitive::<TimestampNanosecondType>(),
-                    )
+                    timestamp_nanosecond_array_reader(logs.column(observed_time_unix_nano_column.0))
                 }
                 consts::SEVERITY_NUMBER
                     if let Some(severity_number_column) =
                         logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
                 {
-                    adaptive_int_32_array_reader(logs.column(severity_number_column.0))
+                    adaptive_int_32_dictionary_reader(logs.column(severity_number_column.0))
                 }
                 consts::SEVERITY_TEXT
                     if let Some(severity_text_column) =
                         logs_schema.column_with_name(consts::SEVERITY_TEXT) =>
                 {
-                    adaptive_string_array_reader(logs.column(severity_text_column.0))
+                    adaptive_string_dictionary_reader(logs.column(severity_text_column.0))
                 }
                 consts::BODY
                     if let Some(body) = self
@@ -769,7 +886,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(event_name_column) =
                         logs_schema.column_with_name(consts::EVENT_NAME) =>
                 {
-                    adaptive_string_array_reader(logs.column(event_name_column.0))
+                    adaptive_string_dictionary_reader(logs.column(event_name_column.0))
                 }
                 _ => return None,
             };
@@ -833,12 +950,12 @@ impl RecordTable for OtapScope<'_> {
             consts::NAME | "Name"
                 if let Some(name_column) = self.scope_struct.column_by_name("name") =>
             {
-                adaptive_string_array_reader(name_column)
+                adaptive_string_dictionary_reader(name_column)
             }
             consts::VERSION | "Version"
                 if let Some(version_column) = self.scope_struct.column_by_name("version") =>
             {
-                adaptive_string_array_reader(version_column)
+                adaptive_string_dictionary_reader(version_column)
             }
             _ => return None,
         };

@@ -10,7 +10,7 @@ use arrow::{
     datatypes::*,
 };
 use chrono::{TimeZone, Utc};
-use data_engine_expressions::StringValue;
+use data_engine_expressions::{AsValue, StringValue};
 use indexmap::IndexSet;
 
 use crate::*;
@@ -180,6 +180,53 @@ impl<'a> DictionaryValueArray<'a> {
                 transform_iter_into_int_32_array(length, values)
             }
             DictionaryValueArray::Boolean => (PrimitiveArray::<Int32Type>::from(vec![0, 1]), None),
+        }
+    }
+
+    pub fn transform_into_timestamp_nanoseconds_array(
+        self,
+    ) -> (
+        PrimitiveArray<TimestampNanosecondType>,
+        Option<AHashMap<usize, Option<usize>>>,
+    ) {
+        match self {
+            DictionaryValueArray::Array(a) => {
+                if let Some(s) = a.as_primitive_opt::<TimestampNanosecondType>() {
+                    (s.clone(), None)
+                } else {
+                    let (values, lookup) = transform_array_into_set(
+                        &mut |v| {
+                            v.to_value()
+                                .convert_to_datetime()
+                                .and_then(|v| v.timestamp_nanos_opt())
+                        },
+                        a,
+                    );
+
+                    (
+                        PrimitiveArray::<TimestampNanosecondType>::from(
+                            values.into_iter().collect::<Vec<_>>(),
+                        ),
+                        Some(lookup),
+                    )
+                }
+            }
+            DictionaryValueArray::Vec(a) => {
+                let length = a.len();
+                let values = Rc::unwrap_or_clone(a).into_iter();
+
+                transform_iter_into_timestamp_nanoseconds_array(length, values)
+            }
+            DictionaryValueArray::Set(a) => {
+                let length = a.len();
+                let values = Rc::unwrap_or_clone(a).into_iter();
+
+                transform_iter_into_timestamp_nanoseconds_array(length, values)
+            }
+            DictionaryValueArray::Boolean => (
+                PrimitiveArray::<TimestampNanosecondType>::from(vec![0, 1]),
+                None,
+            ),
         }
     }
 }
@@ -606,6 +653,26 @@ fn transform_iter_into_int_32_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
         values,
         |set| PrimitiveArray::<Int32Type>::from(set.into_iter().collect::<Vec<_>>()),
         |value| value.to_int_32(),
+    )
+}
+
+fn transform_iter_into_timestamp_nanoseconds_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
+    length: usize,
+    values: T,
+) -> (
+    PrimitiveArray<TimestampNanosecondType>,
+    Option<AHashMap<usize, Option<usize>>>,
+) {
+    transform_iter_into_array(
+        length,
+        values,
+        |set| PrimitiveArray::<TimestampNanosecondType>::from(set.into_iter().collect::<Vec<_>>()),
+        |value| {
+            value
+                .to_value()
+                .convert_to_datetime()
+                .and_then(|v| v.timestamp_nanos_opt())
+        },
     )
 }
 
