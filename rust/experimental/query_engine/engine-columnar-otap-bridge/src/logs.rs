@@ -5,6 +5,7 @@ use std::{
     cell::{OnceCell, RefCell},
     collections::hash_map::Entry,
     fmt::Display,
+    hash::Hash,
     sync::Arc,
 };
 
@@ -309,7 +310,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                         consts::SEVERITY_NUMBER,
                         value,
-                        adaptive_int_32_dictionary_writer,
+                        adaptive_int_dictionary_writer::<Int32Type>,
                     );
 
                     ColumnarRecordsWriteResult::Success
@@ -329,6 +330,25 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         consts::SEVERITY_TEXT,
                         value,
                         adaptive_string_dictionary_writer,
+                    );
+
+                    ColumnarRecordsWriteResult::Success
+                }
+                consts::FLAGS => {
+                    if path_length > 0 {
+                        return log_invalid_column_access(
+                            diagnostic_receiver,
+                            *expression,
+                            consts::FLAGS,
+                        );
+                    }
+
+                    set_column(
+                        batches,
+                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                        consts::FLAGS,
+                        value,
+                        int_array_writer::<UInt32Type>,
                     );
 
                     ColumnarRecordsWriteResult::Success
@@ -448,10 +468,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_NUMBER,
-                                adaptive_int_32_dictionary_reader,
+                                adaptive_int_dictionary_reader::<Int32Type>,
                                 key_filter,
                                 &value,
-                                adaptive_int_32_dictionary_writer,
+                                adaptive_int_dictionary_writer::<Int32Type>,
                             );
 
                             written_data_count += 1;
@@ -474,6 +494,28 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 key_filter,
                                 &value,
                                 adaptive_string_dictionary_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
+                        consts::FLAGS => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::FLAGS,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::FLAGS,
+                                int_array_reader::<UInt32Type>,
+                                key_filter,
+                                &value,
+                                int_array_writer::<UInt32Type>,
                             );
 
                             written_data_count += 1;
@@ -664,27 +706,33 @@ fn adaptive_string_dictionary_writer(
     }
 }
 
-fn adaptive_int_32_dictionary_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+fn adaptive_int_dictionary_reader<T: ArrowPrimitiveType>(
+    array: &Arc<dyn Array>,
+) -> RecordTableDictionary {
     match array.data_type() {
         DataType::UInt8 => array
             .as_dictionary::<UInt8Type>()
-            .downcast_dict::<Int32Array>()
+            .downcast_dict::<PrimitiveArray<T>>()
             .expect("array values were an unexpected type")
             .into(),
         DataType::UInt16 => array
             .as_dictionary::<UInt16Type>()
-            .downcast_dict::<Int32Array>()
+            .downcast_dict::<PrimitiveArray<T>>()
             .expect("array values were an unexpected type")
             .into(),
         d => panic!("array values with '{d}' keys are not supported"),
     }
 }
 
-fn adaptive_int_32_dictionary_writer(
+fn adaptive_int_dictionary_writer<T: ArrowPrimitiveType>(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray,
-) -> Arc<dyn Array> {
-    let (transformed_values, lookup) = values.transform_into_int_32_array();
+) -> Arc<dyn Array>
+where
+    T::Native: Hash + Eq + TryFrom<i64>,
+    PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
+{
+    let (transformed_values, lookup) = values.transform_into_int_array::<T>();
 
     match transformed_values.len() {
         v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
@@ -717,6 +765,49 @@ fn timestamp_nanosecond_array_writer(
     }
 
     let mut builder = PrimitiveBuilder::<TimestampNanosecondType>::with_capacity(key_length);
+
+    for key_index in 0..key_length {
+        if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
+            let transformed_value_index = match lookup.as_ref() {
+                Some(lookup) => lookup.get(&value_index).and_then(|v| *v),
+                None => Some(value_index),
+            };
+
+            if let Some(transformed_value_index) = transformed_value_index {
+                builder.append_value(unsafe {
+                    transformed_values.value_unchecked(transformed_value_index)
+                });
+                continue;
+            }
+        }
+
+        builder.append_null();
+    }
+
+    Arc::new(builder.finish())
+}
+
+fn int_array_reader<T: ArrowPrimitiveType>(array: &Arc<dyn Array>) -> RecordTableDictionary {
+    RecordTableDictionary::from_array::<UInt16Type, _>(array.as_primitive::<T>())
+}
+
+fn int_array_writer<T: ArrowPrimitiveType>(
+    keys: DictionaryKeyArray,
+    values: DictionaryValueArray,
+) -> Arc<dyn Array>
+where
+    T::Native: Hash + Eq + TryFrom<i64>,
+    PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
+{
+    let (transformed_values, lookup) = values.transform_into_int_array::<T>();
+
+    let key_length = keys.len();
+
+    if transformed_values.len() == key_length {
+        return Arc::new(transformed_values);
+    }
+
+    let mut builder = PrimitiveBuilder::<T>::with_capacity(key_length);
 
     for key_index in 0..key_length {
         if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
@@ -841,7 +932,9 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(severity_number_column) =
                         logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
                 {
-                    adaptive_int_32_dictionary_reader(logs.column(severity_number_column.0))
+                    adaptive_int_dictionary_reader::<Int32Type>(
+                        logs.column(severity_number_column.0),
+                    )
                 }
                 consts::SEVERITY_TEXT
                     if let Some(severity_text_column) =
@@ -878,9 +971,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                 consts::FLAGS
                     if let Some(flags_column) = logs_schema.column_with_name(consts::FLAGS) =>
                 {
-                    RecordTableDictionary::from_array::<UInt16Type, _>(
-                        logs.column(flags_column.0).as_primitive::<UInt32Type>(),
-                    )
+                    int_array_reader::<UInt32Type>(logs.column(flags_column.0))
                 }
                 consts::EVENT_NAME
                     if let Some(event_name_column) =

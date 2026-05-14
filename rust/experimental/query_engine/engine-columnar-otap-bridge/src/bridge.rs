@@ -281,7 +281,7 @@ mod tests {
         AnyValue, InstrumentationScope, KeyValue, any_value::Value,
     };
     use otap_df_pdata::proto::opentelemetry::logs::v1::{
-        LogRecord, LogsData, ResourceLogs, ScopeLogs,
+        LogRecord, LogRecordFlags, LogsData, ResourceLogs, ScopeLogs,
     };
     use otap_df_pdata::proto::opentelemetry::resource::v1::Resource;
     use otap_df_pdata::testing::round_trip::{otap_to_otlp, otlp_to_otap, to_otap_logs};
@@ -1120,6 +1120,42 @@ mod tests {
                     18,
                     logs[2].observed_time_unix_nano);
             }),
+        test_engine_set_flags_column_exists: (
+            vec![
+                LogRecord::build().flags(LogRecordFlags::TraceFlagsMask).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().flags(LogRecordFlags::TraceFlagsMask).finish(),
+            ],
+            "source | extend flags = 1",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    1,
+                    logs[0].flags);
+                assert_eq!(
+                    1,
+                    logs[1].flags);
+                assert_eq!(
+                    1,
+                    logs[2].flags);
+            }),
+        test_engine_set_flags_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend flags = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    18,
+                    logs[0].flags);
+                assert_eq!(
+                    18,
+                    logs[1].flags);
+                assert_eq!(
+                    18,
+                    logs[2].flags);
+            }),
         test_engine_set_dynamic_string_column: (
             vec![
                 LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_text".into())) }) }]).finish(),
@@ -1135,11 +1171,11 @@ mod tests {
                     "hello world",
                     logs[2].event_name);
             }),
-        test_engine_set_dynamic_int_32_column: (
+        test_engine_set_dynamic_int_column: (
             vec![
                 LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_number".into())) }) }]).finish(),
                 LogRecord::build().finish(),
-                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_number".into())) }) }]).finish(),
+                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("flags".into())) }) }]).finish(),
             ],
             "source | extend source[some_attr] = 18",
             |logs: &Vec<LogRecord>| {
@@ -1148,7 +1184,7 @@ mod tests {
                     logs[0].severity_number);
                 assert_eq!(
                     18,
-                    logs[2].severity_number);
+                    logs[2].flags);
             }),
         test_engine_set_dynamic_timestamp_column: (
             vec![

@@ -67,7 +67,10 @@ impl<'a> ValueOrRef<'a> {
 }
 
 impl ValueOrRef<'_> {
-    pub fn to_int_32(self) -> Option<i32> {
+    pub fn to_int<T>(self) -> Option<T>
+    where
+        T: TryFrom<i64>,
+    {
         let v = match self {
             ValueOrRef::Null => {
                 return None;
@@ -81,11 +84,7 @@ impl ValueOrRef<'_> {
             },
         };
 
-        if v <= i32::MAX as i64 {
-            Some(v as i32)
-        } else {
-            None
-        }
+        v.try_into().ok()
     }
 }
 

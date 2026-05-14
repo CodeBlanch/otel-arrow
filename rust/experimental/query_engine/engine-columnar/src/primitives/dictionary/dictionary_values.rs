@@ -148,21 +148,23 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn transform_into_int_32_array(
+    pub fn transform_into_int_array<T: ArrowPrimitiveType>(
         self,
-    ) -> (
-        PrimitiveArray<Int32Type>,
-        Option<AHashMap<usize, Option<usize>>>,
-    ) {
+    ) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>)
+    where
+        T::Native: Hash + Eq + TryFrom<i64>,
+        PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
+    {
         match self {
             DictionaryValueArray::Array(a) => {
-                if let Some(s) = a.as_primitive_opt::<Int32Type>() {
+                if let Some(s) = a.as_primitive_opt::<T>() {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_set(&mut |v| v.to_int_32(), a);
+                    let (values, lookup) =
+                        transform_array_into_set(&mut |v| v.to_int::<T::Native>(), a);
 
                     (
-                        PrimitiveArray::<Int32Type>::from(values.into_iter().collect::<Vec<_>>()),
+                        PrimitiveArray::<T>::from(values.into_iter().collect::<Vec<_>>()),
                         Some(lookup),
                     )
                 }
@@ -171,15 +173,21 @@ impl<'a> DictionaryValueArray<'a> {
                 let length = a.len();
                 let values = Rc::unwrap_or_clone(a).into_iter();
 
-                transform_iter_into_int_32_array(length, values)
+                transform_iter_into_int_array::<_, T>(length, values)
             }
             DictionaryValueArray::Set(a) => {
                 let length = a.len();
                 let values = Rc::unwrap_or_clone(a).into_iter();
 
-                transform_iter_into_int_32_array(length, values)
+                transform_iter_into_int_array::<_, T>(length, values)
             }
-            DictionaryValueArray::Boolean => (PrimitiveArray::<Int32Type>::from(vec![0, 1]), None),
+            DictionaryValueArray::Boolean => (
+                PrimitiveArray::<T>::from(vec![
+                    T::Native::from_usize(0).unwrap(),
+                    T::Native::from_usize(1).unwrap(),
+                ]),
+                None,
+            ),
         }
     }
 
@@ -641,18 +649,26 @@ fn transform_iter_into_string_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
     )
 }
 
-fn transform_iter_into_int_32_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
+fn transform_iter_into_int_array<
+    'a,
+    TIterator: Iterator<Item = ValueOrRef<'a>>,
+    TType: ArrowPrimitiveType,
+>(
     length: usize,
-    values: T,
+    values: TIterator,
 ) -> (
-    PrimitiveArray<Int32Type>,
+    PrimitiveArray<TType>,
     Option<AHashMap<usize, Option<usize>>>,
-) {
+)
+where
+    TType::Native: Hash + Eq + TryFrom<i64>,
+    PrimitiveArray<TType>: From<Vec<<TType as ArrowPrimitiveType>::Native>>,
+{
     transform_iter_into_array(
         length,
         values,
-        |set| PrimitiveArray::<Int32Type>::from(set.into_iter().collect::<Vec<_>>()),
-        |value| value.to_int_32(),
+        |set| PrimitiveArray::<TType>::from(set.into_iter().collect::<Vec<_>>()),
+        |value| value.to_int::<TType::Native>(),
     )
 }
 
