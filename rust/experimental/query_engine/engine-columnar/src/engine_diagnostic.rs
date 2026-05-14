@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::str::FromStr;
+use std::{cell::RefCell, str::FromStr};
 
 use data_engine_expressions::*;
 
@@ -80,5 +80,65 @@ impl<'a> ColumnarEngineDiagnostic<'a> {
 
     pub fn get_message(&self) -> &str {
         &self.message
+    }
+}
+
+pub trait ColumnarEngineDiagnosticReceiver<'a> {
+    fn is_diagnostic_level_enabled(&self, diagnostic_level: ColumnarEngineDiagnosticLevel) -> bool;
+
+    fn add_diagnostic_if_enabled<F>(
+        &self,
+        diagnostic_level: ColumnarEngineDiagnosticLevel,
+        expression: &'a dyn Expression,
+        generate_message: F,
+    ) where
+        F: FnOnce() -> String;
+
+    fn add_diagnostic(&self, diagnostic: ColumnarEngineDiagnostic<'a>);
+}
+
+pub(crate) struct ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline> {
+    diagnostic_level: ColumnarEngineDiagnosticLevel,
+    diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,
+}
+
+impl<'a, 'pipeline> ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline> {
+    pub fn new(
+        diagnostic_level: ColumnarEngineDiagnosticLevel,
+        diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,
+    ) -> ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline> {
+        Self {
+            diagnostic_level,
+            diagnostics,
+        }
+    }
+}
+
+impl<'a> ColumnarEngineDiagnosticReceiver<'a> for ColumnarEngineDiagnosticReceiverImpl<'_, 'a> {
+    fn is_diagnostic_level_enabled(&self, diagnostic_level: ColumnarEngineDiagnosticLevel) -> bool {
+        diagnostic_level >= self.diagnostic_level
+    }
+
+    fn add_diagnostic_if_enabled<F>(
+        &self,
+        diagnostic_level: ColumnarEngineDiagnosticLevel,
+        expression: &'a dyn Expression,
+        generate_message: F,
+    ) where
+        F: FnOnce() -> String,
+    {
+        if diagnostic_level >= self.diagnostic_level {
+            self.diagnostics
+                .borrow_mut()
+                .push(ColumnarEngineDiagnostic::new(
+                    diagnostic_level,
+                    expression,
+                    (generate_message)(),
+                ));
+        }
+    }
+
+    fn add_diagnostic(&self, diagnostic: ColumnarEngineDiagnostic<'a>) {
+        self.diagnostics.borrow_mut().push(diagnostic);
     }
 }

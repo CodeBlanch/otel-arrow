@@ -284,15 +284,30 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                     }
                                 };
 
+                                if path.is_empty() {
+                                    execution_context.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        s,
+                                        || "Source cannot be set directly".into(),
+                                    );
+                                    continue;
+                                }
+
+                                let root = &path[0];
+                                let path = &path[1..];
+
                                 std::mem::drop(execution_context);
 
-                                let error = factory
-                                    .set(
-                                        &mut batches,
-                                        &path,
-                                        value.into_dictionary(key_data_type, key_count),
-                                    )
-                                    .err();
+                                let write_result = factory.set(
+                                    &ColumnarEngineDiagnosticReceiverImpl::new(
+                                        diagnostic_level,
+                                        &self.diagnostics,
+                                    ),
+                                    &mut batches,
+                                    root,
+                                    path,
+                                    value.into_dictionary(key_data_type, key_count),
+                                );
 
                                 execution_context = ExecutionContext::new(
                                     diagnostic_level,
@@ -305,18 +320,28 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                     //None,
                                 );
 
-                                if let Some(error) = error {
-                                    execution_context.add_diagnostic_if_enabled(
-                                        ColumnarEngineDiagnosticLevel::Warn,
-                                        s,
-                                        || format!("Data could not be set on Source: {error}"),
-                                    );
-                                } else {
-                                    execution_context.add_diagnostic_if_enabled(
-                                        ColumnarEngineDiagnosticLevel::Verbose,
-                                        s,
-                                        || "Data set on Source".into(),
-                                    );
+                                match write_result {
+                                    ColumnarRecordsWriteResult::Success => {
+                                        execution_context.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Verbose,
+                                            s,
+                                            || "Data set on Source".into(),
+                                        );
+                                    }
+                                    ColumnarRecordsWriteResult::PartialSuccess => {
+                                        execution_context.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Info,
+                                            s,
+                                            || "Data partially set on Source".into(),
+                                        );
+                                    }
+                                    ColumnarRecordsWriteResult::NotFound => {
+                                        execution_context.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Warn,
+                                            s,
+                                            || "Data could not be set on Source because path could not be found".into(),
+                                        );
+                                    }
                                 }
                             }
                             MutableValueExpression::Variable(_) => todo!(),

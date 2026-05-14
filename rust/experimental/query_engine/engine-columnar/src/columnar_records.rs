@@ -8,6 +8,7 @@ use std::{
 };
 
 use arrow::{array::*, datatypes::*};
+use data_engine_expressions::Expression;
 
 use crate::{engine_diagnostic::ColumnarEngineDiagnosticLevel, *};
 
@@ -24,18 +25,35 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; BATCH_SIZE];
 
-    fn set(
+    fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
+        diagnostic_receiver: &T,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-        path: &[SelectionPath<'_>],
+        root: &SelectionPath<'a>,
+        path: &[SelectionPath<'a>],
         value: Dictionary,
-    ) -> Result<(), &'static str>;
+    ) -> ColumnarRecordsWriteResult;
+}
+
+pub enum ColumnarRecordsWriteResult {
+    Success,
+    PartialSuccess,
+    NotFound,
 }
 
 pub enum SelectionPath<'a> {
-    Key(StringValueOrRef<'a>),
-    Index(ArrayValueOrRef<'a>),
-    Dictionary(Dictionary<'a>),
+    Key {
+        expression: &'a dyn Expression,
+        value: StringValueOrRef<'a>,
+    },
+    Index {
+        expression: &'a dyn Expression,
+        value: ArrayValueOrRef<'a>,
+    },
+    Dictionary {
+        expression: &'a dyn Expression,
+        value: Dictionary<'a>,
+    },
 }
 
 pub trait ColumnarRecords: RecordTable

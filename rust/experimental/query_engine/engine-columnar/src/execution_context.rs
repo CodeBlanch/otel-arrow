@@ -8,8 +8,7 @@ use data_engine_expressions::*;
 use crate::{engine_diagnostic::*, *};
 
 pub struct ExecutionContext<'a, 'pipeline, TRecords: ColumnarRecords> {
-    diagnostic_level: ColumnarEngineDiagnosticLevel,
-    diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,
+    diagnostics: ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline>,
     pipeline: &'pipeline PipelineExpression,
     records: Option<TRecords>,
 }
@@ -25,8 +24,7 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
         //arguments: Option<&'b dyn ExecutionContextArguments>,
     ) -> ExecutionContext<'a, 'pipeline, TRecords> {
         Self {
-            diagnostic_level,
-            diagnostics,
+            diagnostics: ColumnarEngineDiagnosticReceiverImpl::new(diagnostic_level, diagnostics),
             pipeline,
             records,
             //variables: ExecutionContextVariables::new(global_variables),
@@ -39,7 +37,8 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
         &self,
         diagnostic_level: ColumnarEngineDiagnosticLevel,
     ) -> bool {
-        diagnostic_level >= self.diagnostic_level
+        self.diagnostics
+            .is_diagnostic_level_enabled(diagnostic_level)
     }
 
     pub fn add_diagnostic_if_enabled<F>(
@@ -50,19 +49,12 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
     ) where
         F: FnOnce() -> String,
     {
-        if diagnostic_level >= self.diagnostic_level {
-            self.diagnostics
-                .borrow_mut()
-                .push(ColumnarEngineDiagnostic::new(
-                    diagnostic_level,
-                    expression,
-                    (generate_message)(),
-                ));
-        }
+        self.diagnostics
+            .add_diagnostic_if_enabled(diagnostic_level, expression, generate_message)
     }
 
     pub fn add_diagnostic(&self, diagnostic: ColumnarEngineDiagnostic<'pipeline>) {
-        self.diagnostics.borrow_mut().push(diagnostic);
+        self.diagnostics.add_diagnostic(diagnostic)
     }
 
     pub fn get_pipeline(&self) -> &'pipeline PipelineExpression {

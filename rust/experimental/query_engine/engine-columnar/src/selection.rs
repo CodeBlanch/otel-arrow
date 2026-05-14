@@ -146,11 +146,11 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
             &mut path,
             |path, single| match single {
                 ValueOrRef::String(key) => {
-                    path.push(SelectionPath::Key(key));
+                    path.push(SelectionPath::Key{ expression: selector, value: key });
                     Ok(())
                 }
                 ValueOrRef::Array(index) => {
-                    path.push(SelectionPath::Index(index));
+                    path.push(SelectionPath::Index{ expression: selector, value: index });
                     Ok(())
                 }
                 v => {
@@ -163,7 +163,7 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
                 }
             },
             |path, dictionary| {
-                path.push(SelectionPath::Dictionary(dictionary));
+                path.push(SelectionPath::Dictionary{ expression: selector, value: dictionary });
                 Ok(())
             },
             |_, _| {

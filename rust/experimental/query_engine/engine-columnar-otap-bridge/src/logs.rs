@@ -16,7 +16,7 @@ use arrow::{
     datatypes::*,
 };
 use data_engine_columnar::*;
-use data_engine_expressions::StringValue;
+use data_engine_expressions::{Expression, StringValue};
 use otap_df_pdata::{
     otap::raw_batch_store::POSITION_LOOKUP, proto::opentelemetry::arrow::v1::ArrowPayloadType,
     schema::consts,
@@ -239,137 +239,229 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         [None, None, None, None]
     }
 
-    fn set(
+    fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
+        diagnostic_receiver: &T,
         batches: &mut [Option<RecordBatch>; 4],
-        path: &[SelectionPath<'_>],
+        root: &SelectionPath<'a>,
+        path: &[SelectionPath<'a>],
         value: Dictionary,
-    ) -> Result<(), &'static str> {
-        match path.len() {
-            0 => Err("Log record cannot be set directly"),
-            l => {
-                match &path[0] {
-                    SelectionPath::Key(root_key) => {
-                        match get_log_record_schema().normalize_key(root_key.get_value()) {
-                            consts::ATTRIBUTES => {
-                                todo!()
-                            }
-                            consts::SEVERITY_NUMBER => {
-                                if l > 1 {
-                                    return Err("Invalid accessor path specified");
-                                }
+    ) -> ColumnarRecordsWriteResult {
+        let path_length = path.len();
 
-                                set_column(
-                                    batches,
-                                    POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                    consts::SEVERITY_NUMBER,
-                                    value,
-                                    adaptive_int_32_array_writer,
-                                );
-
-                                Ok(())
-                            }
-                            consts::SEVERITY_TEXT => {
-                                if l > 1 {
-                                    return Err("Invalid accessor path specified");
-                                }
-
-                                set_column(
-                                    batches,
-                                    POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                    consts::SEVERITY_TEXT,
-                                    value,
-                                    adaptive_string_array_writer,
-                                );
-
-                                Ok(())
-                            }
-                            consts::EVENT_NAME => {
-                                if l > 1 {
-                                    return Err("Invalid accessor path specified");
-                                }
-
-                                set_column(
-                                    batches,
-                                    POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                    consts::EVENT_NAME,
-                                    value,
-                                    adaptive_string_array_writer,
-                                );
-
-                                Ok(())
-                            }
-                            _ => Err("Unknown key specified on accessor path"),
-                        }
-                    }
-                    SelectionPath::Dictionary(root_keys) => {
-                        let key_length = root_keys.len();
-
-                        let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
-                            AHashMap::with_capacity(key_length);
-
-                        for key_index in 0..key_length {
-                            if let ValueOrRef::String(key) = root_keys.get_value(key_index) {
-                                match plan.entry(key) {
-                                    Entry::Occupied(mut o) => {
-                                        o.get_mut()
-                                            .try_push(key_index as u32)
-                                            .expect("key_index pushed");
-                                    }
-                                    Entry::Vacant(v) => {
-                                        v.insert(RoaringBitmap::from([key_index as u32]));
-                                    }
-                                };
-                            }
-                        }
-
-                        for (key, key_filter) in plan.into_iter() {
-                            match get_log_record_schema().normalize_key(key.get_value()) {
-                                consts::SEVERITY_TEXT => {
-                                    if l > 1 {
-                                        //return Err("Invalid accessor path specified");
-                                        continue;
-                                    }
-
-                                    set_column_with_values(
-                                        batches,
-                                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                        consts::SEVERITY_TEXT,
-                                        adaptive_string_array_reader,
-                                        key_filter,
-                                        &value,
-                                        adaptive_string_array_writer,
-                                    );
-                                }
-                                consts::EVENT_NAME => {
-                                    if l > 1 {
-                                        //return Err("Invalid accessor path specified");
-                                        continue;
-                                    }
-
-                                    set_column_with_values(
-                                        batches,
-                                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                        consts::EVENT_NAME,
-                                        adaptive_string_array_reader,
-                                        key_filter,
-                                        &value,
-                                        adaptive_string_array_writer,
-                                    );
-                                }
-                                _ => {
-                                    // todo: Log?
-                                }
-                            }
-                        }
-
-                        Ok(())
-                    }
-                    _ => Err("Accessor path did not refer to a valid string key on log record"),
+        match root {
+            SelectionPath::Key {
+                expression,
+                value: root_key,
+            } => match get_log_record_schema().normalize_key(root_key.get_value()) {
+                consts::ATTRIBUTES => {
+                    todo!()
                 }
+                consts::SEVERITY_NUMBER => {
+                    if path_length > 0 {
+                        return log_invalid_column_access(
+                            diagnostic_receiver,
+                            *expression,
+                            consts::SEVERITY_NUMBER,
+                        );
+                    }
+
+                    set_column(
+                        batches,
+                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                        consts::SEVERITY_NUMBER,
+                        value,
+                        adaptive_int_32_array_writer,
+                    );
+
+                    ColumnarRecordsWriteResult::Success
+                }
+                consts::SEVERITY_TEXT => {
+                    if path_length > 0 {
+                        return log_invalid_column_access(
+                            diagnostic_receiver,
+                            *expression,
+                            consts::SEVERITY_TEXT,
+                        );
+                    }
+
+                    set_column(
+                        batches,
+                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                        consts::SEVERITY_TEXT,
+                        value,
+                        adaptive_string_array_writer,
+                    );
+
+                    ColumnarRecordsWriteResult::Success
+                }
+                consts::EVENT_NAME => {
+                    if path_length > 0 {
+                        return log_invalid_column_access(
+                            diagnostic_receiver,
+                            *expression,
+                            consts::EVENT_NAME,
+                        );
+                    }
+
+                    set_column(
+                        batches,
+                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                        consts::EVENT_NAME,
+                        value,
+                        adaptive_string_array_writer,
+                    );
+
+                    ColumnarRecordsWriteResult::Success
+                }
+                f => {
+                    diagnostic_receiver.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Warn,
+                        *expression,
+                        || format!("Field '{f}' does not exist on log record"),
+                    );
+                    ColumnarRecordsWriteResult::NotFound
+                }
+            },
+            SelectionPath::Dictionary {
+                expression,
+                value: root_keys,
+            } => {
+                let key_length = root_keys.len();
+
+                let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
+                    AHashMap::with_capacity(key_length);
+
+                for key_index in 0..key_length {
+                    if let ValueOrRef::String(key) = root_keys.get_value(key_index) {
+                        match plan.entry(key) {
+                            Entry::Occupied(mut o) => {
+                                o.get_mut()
+                                    .try_push(key_index as u32)
+                                    .expect("key_index pushed");
+                            }
+                            Entry::Vacant(v) => {
+                                v.insert(RoaringBitmap::from([key_index as u32]));
+                            }
+                        };
+                    }
+                }
+
+                let mut written_data_count = 0;
+                let plan_count = plan.len();
+
+                for (key, key_filter) in plan.into_iter() {
+                    match get_log_record_schema().normalize_key(key.get_value()) {
+                        consts::SEVERITY_NUMBER => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::SEVERITY_NUMBER,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::SEVERITY_NUMBER,
+                                adaptive_int_32_array_reader,
+                                key_filter,
+                                &value,
+                                adaptive_int_32_array_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
+                        consts::SEVERITY_TEXT => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::SEVERITY_TEXT,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::SEVERITY_TEXT,
+                                adaptive_string_array_reader,
+                                key_filter,
+                                &value,
+                                adaptive_string_array_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
+                        consts::EVENT_NAME => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::EVENT_NAME,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::EVENT_NAME,
+                                adaptive_string_array_reader,
+                                key_filter,
+                                &value,
+                                adaptive_string_array_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
+                        f => {
+                            diagnostic_receiver.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                *expression,
+                                || format!("Field '{f}' does not exist on log record"),
+                            );
+                        }
+                    }
+                }
+
+                if written_data_count == 0 {
+                    ColumnarRecordsWriteResult::NotFound
+                } else if written_data_count == plan_count {
+                    ColumnarRecordsWriteResult::Success
+                } else {
+                    ColumnarRecordsWriteResult::PartialSuccess
+                }
+            }
+            SelectionPath::Index {
+                expression,
+                value: _,
+            } => {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    *expression,
+                    || "Log record cannot be accessed by array index".into(),
+                );
+                ColumnarRecordsWriteResult::NotFound
             }
         }
     }
+}
+
+fn log_invalid_column_access<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
+    diagnostic_receiver: &T,
+    expression: &'a dyn Expression,
+    column_name: &str,
+) -> ColumnarRecordsWriteResult {
+    diagnostic_receiver.add_diagnostic_if_enabled(
+        ColumnarEngineDiagnosticLevel::Warn,
+        expression,
+        || format!("Cannot access into field '{column_name}' on log record"),
+    );
+    ColumnarRecordsWriteResult::NotFound
 }
 
 fn set_column<
@@ -487,6 +579,22 @@ fn adaptive_string_array_writer(
             keys.transform_into_key_array(lookup),
             Arc::new(transformed_values),
         )),
+    }
+}
+
+fn adaptive_int_32_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+    match array.data_type() {
+        DataType::UInt8 => array
+            .as_dictionary::<UInt8Type>()
+            .downcast_dict::<Int32Array>()
+            .expect("array values were an unexpected type")
+            .into(),
+        DataType::UInt16 => array
+            .as_dictionary::<UInt16Type>()
+            .downcast_dict::<Int32Array>()
+            .expect("array values were an unexpected type")
+            .into(),
+        d => panic!("array values with '{d}' keys are not supported"),
     }
 }
 
@@ -616,20 +724,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(severity_number_column) =
                         logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
                 {
-                    let severity_number_array = logs.column(severity_number_column.0);
-                    match severity_number_array.data_type() {
-                        DataType::UInt8 => severity_number_array
-                            .as_dictionary::<UInt8Type>()
-                            .downcast_dict::<Int32Array>()
-                            .expect("severity_number values were an unexpected type")
-                            .into(),
-                        DataType::UInt16 => severity_number_array
-                            .as_dictionary::<UInt16Type>()
-                            .downcast_dict::<Int32Array>()
-                            .expect("severity_number values were an unexpected type")
-                            .into(),
-                        d => panic!("severity_number values with '{d}' keys are not supported"),
-                    }
+                    adaptive_int_32_array_reader(logs.column(severity_number_column.0))
                 }
                 consts::SEVERITY_TEXT
                     if let Some(severity_text_column) =
