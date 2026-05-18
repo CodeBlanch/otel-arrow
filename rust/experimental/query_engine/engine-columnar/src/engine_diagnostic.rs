@@ -57,7 +57,7 @@ pub struct ColumnarEngineDiagnostic<'a> {
 }
 
 impl<'a> ColumnarEngineDiagnostic<'a> {
-    pub(crate) fn new(
+    pub fn new(
         diagnostic_level: ColumnarEngineDiagnosticLevel,
         expression: &'a dyn Expression,
         message: String,

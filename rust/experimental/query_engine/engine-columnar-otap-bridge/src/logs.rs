@@ -269,6 +269,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::TIME_UNIX_NANO,
@@ -290,6 +292,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::OBSERVED_TIME_UNIX_NANO,
@@ -311,6 +315,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::SEVERITY_NUMBER,
@@ -336,6 +342,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::SEVERITY_TEXT,
@@ -361,6 +369,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::TRACE_ID,
@@ -388,6 +398,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::SPAN_ID,
@@ -415,6 +427,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::FLAGS,
@@ -440,6 +454,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         }
 
                         set_column(
+                            diagnostic_receiver,
+                            *expression,
                             batches,
                             POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::EVENT_NAME,
@@ -505,6 +521,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::TIME_UNIX_NANO,
@@ -529,6 +547,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::OBSERVED_TIME_UNIX_NANO,
@@ -553,6 +573,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_NUMBER,
@@ -581,6 +603,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_TEXT,
@@ -609,6 +633,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::TRACE_ID,
@@ -639,6 +665,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SPAN_ID,
@@ -669,6 +697,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::FLAGS,
@@ -697,6 +727,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                             }
 
                             set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::EVENT_NAME,
@@ -760,19 +792,40 @@ fn log_invalid_column_access<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
     ColumnarRecordsWriteResult::NotFound
 }
 
-fn set_column<FTransform, const BATCH_SIZE: usize>(
+fn set_column<
+    'a,
+    TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>,
+    FTransform,
+    const BATCH_SIZE: usize,
+>(
+    diagnostic_receiver: &TDiagnosticReceiver,
+    expression: &'a dyn Expression,
     batches: &mut [Option<RecordBatch>; BATCH_SIZE],
     batch_position: usize,
     column_name: &str,
     value: Dictionary,
-    primitive_array_transform: FTransform,
+    array_transform: FTransform,
 ) where
     FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
 {
     if let Some(logs_batch) = batches[batch_position].take() {
         let (keys, values) = value.into_parts();
 
-        let values = primitive_array_transform(keys, values);
+        let values = array_transform(keys, values);
+
+        if diagnostic_receiver.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Info) {
+            let null_count = values.null_count();
+
+            diagnostic_receiver.add_diagnostic(ColumnarEngineDiagnostic::new(
+                ColumnarEngineDiagnosticLevel::Info,
+                expression,
+                format!(
+                    "Column '{column_name}' updated [{} valid row(s), {} null row(s)]",
+                    values.len() - null_count,
+                    null_count
+                ),
+            ));
+        }
 
         let (mut schema, mut columns, count) = logs_batch.into_parts();
 
@@ -796,18 +849,25 @@ fn set_column<FTransform, const BATCH_SIZE: usize>(
 }
 
 fn set_column_with_values<
-    FDictionaryTransform: Fn(&Arc<dyn Array>) -> RecordTableDictionary,
-    FArrayTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+    'a,
+    TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>,
+    FDictionaryTransform,
+    FArrayTransform,
     const BATCH_SIZE: usize,
 >(
+    diagnostic_receiver: &TDiagnosticReceiver,
+    expression: &'a dyn Expression,
     batches: &mut [Option<RecordBatch>; BATCH_SIZE],
     batch_position: usize,
     column_name: &str,
     dictionary_transform: FDictionaryTransform,
     key_filter: RoaringBitmap,
     values: &Dictionary,
-    primitive_array_transform: FArrayTransform,
-) {
+    array_transform: FArrayTransform,
+) where
+    FDictionaryTransform: Fn(&Arc<dyn Array>) -> RecordTableDictionary,
+    FArrayTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+{
     if let Some(logs_batch) = batches[batch_position].take() {
         let key_length = logs_batch.num_rows();
         let (mut schema, mut columns, count) = logs_batch.into_parts();
@@ -822,7 +882,21 @@ fn set_column_with_values<
 
         let (keys, values) = merged_values.into_parts();
 
-        let column_values = primitive_array_transform(keys, values);
+        let column_values = array_transform(keys, values);
+
+        if diagnostic_receiver.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Info) {
+            let null_count = column_values.null_count();
+
+            diagnostic_receiver.add_diagnostic(ColumnarEngineDiagnostic::new(
+                ColumnarEngineDiagnosticLevel::Info,
+                expression,
+                format!(
+                    "Column '{column_name}' updated [{} valid row(s), {} null row(s)]",
+                    column_values.len() - null_count,
+                    null_count
+                ),
+            ));
+        }
 
         let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
 
@@ -872,12 +946,6 @@ where
     FTransform: Fn(DictionaryValueArray<'a>) -> (T, Option<AHashMap<usize, Option<usize>>>),
 {
     let (transformed_values, lookup) = transform(values);
-
-    //let transformed_keys = ;
-
-    //println!("transformed_keys {transformed_keys:?}");
-    println!("transformed_values {transformed_values:?}");
-    println!("lookup {lookup:?}");
 
     match transformed_values.len() {
         v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
