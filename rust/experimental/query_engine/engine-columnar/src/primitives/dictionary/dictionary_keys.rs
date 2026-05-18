@@ -171,17 +171,41 @@ impl DictionaryKeyArray {
                 let mut builder = KeyArrayBuilder::<KOutput>::new(values.len());
                 let mut writer = builder.get_writer();
 
-                let true_value_index =
-                    <KOutput as ArrowPrimitiveType>::Native::from_usize(1).unwrap();
+                let (false_value_index, true_value_index) = if let Some(lookup) = value_index_lookup
+                {
+                    (
+                        lookup.get(&0).and_then(|v| {
+                            v.map(|v| {
+                                <KOutput as ArrowPrimitiveType>::Native::from_usize(v).unwrap()
+                            })
+                        }),
+                        lookup.get(&1).and_then(|v| {
+                            v.map(|v| {
+                                <KOutput as ArrowPrimitiveType>::Native::from_usize(v).unwrap()
+                            })
+                        }),
+                    )
+                } else {
+                    (
+                        Some(<KOutput as ArrowPrimitiveType>::Native::from_usize(0).unwrap()),
+                        Some(<KOutput as ArrowPrimitiveType>::Native::from_usize(1).unwrap()),
+                    )
+                };
 
                 for (key_index, v) in values.as_boolean().into_iter().enumerate() {
                     if let Some(v) = v {
                         if v {
-                            unsafe { writer.set_value_index_typed(key_index, true_value_index) }
+                            if let Some(true_value_index) = true_value_index {
+                                unsafe { writer.set_value_index_typed(key_index, true_value_index) }
+                                continue;
+                            }
+                        } else if let Some(false_value_index) = false_value_index {
+                            unsafe { writer.set_value_index_typed(key_index, false_value_index) }
+                            continue;
                         }
-                    } else {
-                        unsafe { writer.set_null(key_index) }
                     }
+
+                    unsafe { writer.set_null(key_index) }
                 }
 
                 builder
@@ -194,7 +218,18 @@ impl DictionaryKeyArray {
                 let mut writer = builder.get_writer();
 
                 for key_index in 0..length {
-                    unsafe { writer.set_value_index(key_index, key_index) };
+                    let transformed_value_index = if let Some(lookup) = value_index_lookup.as_ref()
+                    {
+                        lookup.get(&key_index).and_then(|v| *v)
+                    } else {
+                        Some(key_index)
+                    };
+
+                    if let Some(value_index) = transformed_value_index {
+                        unsafe { writer.set_value_index(key_index, value_index) };
+                    } else {
+                        unsafe { writer.set_null(key_index) };
+                    }
                 }
 
                 builder
@@ -207,16 +242,31 @@ impl DictionaryKeyArray {
                 if let Some(value_index) = value_index {
                     let mut builder = KeyArrayBuilder::<KOutput>::new(length);
                     let mut writer = builder.get_writer();
-                    let value_index =
-                        <KOutput as ArrowPrimitiveType>::Native::from_usize(value_index)
-                            .expect("value index converted to output size");
-                    for key_index in 0..length {
-                        unsafe { writer.set_value_index_typed(key_index, value_index) };
+
+                    let transformed_value_index = if let Some(lookup) = value_index_lookup {
+                        lookup.get(&value_index).and_then(|v| {
+                            v.map(|v| {
+                                <KOutput as ArrowPrimitiveType>::Native::from_usize(v).unwrap()
+                            })
+                        })
+                    } else {
+                        Some(
+                            <KOutput as ArrowPrimitiveType>::Native::from_usize(value_index)
+                                .expect("value index converted to output size"),
+                        )
+                    };
+
+                    if let Some(transformed_value_index) = transformed_value_index {
+                        for key_index in 0..length {
+                            unsafe {
+                                writer.set_value_index_typed(key_index, transformed_value_index)
+                            };
+                        }
+                        return builder;
                     }
-                    builder
-                } else {
-                    KeyArrayBuilder::<KOutput>::new_null(length)
                 }
+
+                KeyArrayBuilder::<KOutput>::new_null(length)
             }
         }
     }

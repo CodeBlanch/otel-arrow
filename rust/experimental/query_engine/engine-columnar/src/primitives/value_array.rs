@@ -3,6 +3,7 @@
 
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use arrow::buffer::Buffer;
@@ -15,7 +16,7 @@ use crate::*;
 #[derive(Debug, Clone)]
 pub enum ArrayValueOrRef<'a> {
     Ref(&'a (dyn ArrayValue + 'a)),
-    Buffer(BufferArray<'a>),
+    Buffer(BufferArray),
     Owned(Rc<OwnedArrayValue<'a>>),
     Slice(ArrayValueOrRefSlice<'a>),
 }
@@ -110,25 +111,22 @@ impl<'a> From<ArrayValueOrRef<'a>> for ResolvedScalarValue<'a, '_> {
 }
 
 #[derive(Debug, Clone)]
-pub enum BufferArray<'a> {
-    U8(BufferWrapper<'a, u8>),
+pub enum BufferArray {
+    U8(BufferWrapper<u8>),
 }
 
-impl<'a> BufferArray<'a> {
-    pub fn new_u8(value: Buffer) -> BufferArray<'a> {
-        BufferArray::U8(BufferWrapper {
-            value,
-            transform: |v| ValueOrRef::Integer(*v as i64),
-        })
+impl BufferArray {
+    pub fn new_u8(value: Buffer) -> BufferArray {
+        BufferArray::U8(BufferWrapper::new(value))
     }
 
-    pub fn as_array_value(&self) -> &(dyn ArrayValue + 'a) {
+    pub fn as_array_value<'a>(&self) -> &(dyn ArrayValue + 'a) {
         match self {
             BufferArray::U8(b) => b,
         }
     }
 
-    pub fn get(&self, index: usize) -> ValueOrRef<'a> {
+    pub fn get<'a>(&self, index: usize) -> ValueOrRef<'a> {
         match self {
             BufferArray::U8(a) => a.get(index),
         }
@@ -136,22 +134,38 @@ impl<'a> BufferArray<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct BufferWrapper<'a, T> {
+pub struct BufferWrapper<T> {
     value: Buffer,
-    transform: fn(&T) -> ValueOrRef<'a>,
+    marker: PhantomData<T>,
 }
 
-impl<'a, T: ArrowNativeType + AsStaticValue> BufferWrapper<'a, T> {
-    pub fn get(&self, index: usize) -> ValueOrRef<'a> {
+impl<T: ArrowNativeType + AsStaticValue + Into<i64>> BufferWrapper<T> {
+    pub fn new(value: Buffer) -> BufferWrapper<T> {
+        Self {
+            value,
+            marker: Default::default(),
+        }
+    }
+    pub fn get_buffer(&self) -> &Buffer {
+        &self.value
+    }
+
+    pub fn get<'a>(&self, index: usize) -> ValueOrRef<'a> {
         self.value
             .typed_data::<T>()
             .get(index)
-            .map(self.transform)
+            .map(|v| ValueOrRef::Integer(Into::<i64>::into(*v)))
             .unwrap_or(ValueOrRef::Null)
     }
 }
 
-impl<T: ArrowNativeType + AsStaticValue> ArrayValue for BufferWrapper<'_, T> {
+impl<T: ArrowNativeType> AsRef<[T]> for BufferWrapper<T> {
+    fn as_ref(&self) -> &[T] {
+        self.value.typed_data()
+    }
+}
+
+impl<T: ArrowNativeType + AsStaticValue + Into<i64>> ArrayValue for BufferWrapper<T> {
     fn is_empty(&self) -> bool {
         self.value.is_empty()
     }
@@ -182,13 +196,27 @@ impl<T: ArrowNativeType + AsStaticValue> ArrayValue for BufferWrapper<'_, T> {
     ) -> bool {
         let values = range.get_slice(self.value.typed_data::<T>());
         for (index, value) in values.iter().enumerate() {
-            if !item_callback.next(index, (self.transform)(value).to_value()) {
+            if !item_callback.next(index, Value::Integer(&Into::<i64>::into(*value))) {
                 return false;
             }
         }
         true
     }
 }
+
+impl<T> Hash for BufferWrapper<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl<T> PartialEq for BufferWrapper<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T> Eq for BufferWrapper<T> {}
 
 #[derive(Debug, Clone)]
 pub struct OwnedArrayValue<'a> {

@@ -1156,6 +1156,108 @@ mod tests {
                     18,
                     logs[2].flags);
             }),
+        test_engine_set_trace_id_column_exists: (
+            vec![
+                LogRecord::build().trace_id([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().trace_id([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]).finish(),
+            ],
+            "source | extend trace_id = dynamic([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[0].trace_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[1].trace_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[2].trace_id);
+            }),
+        test_engine_set_trace_id_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend trace_id = dynamic([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[0].trace_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[1].trace_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[2].trace_id);
+            }),
+        test_engine_set_trace_id_column_invalid_size: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend trace_id = dynamic([0,1,2,3,4,5,6,7])",
+            |logs: &Vec<LogRecord>| {
+                assert!(
+                    logs[0].trace_id.is_empty());
+                assert!(
+                    logs[1].trace_id.is_empty());
+                assert!(
+                    logs[2].trace_id.is_empty());
+            }),
+        test_engine_set_span_id_column_exists: (
+            vec![
+                LogRecord::build().span_id([0,0,0,0,0,0,0,0]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().span_id([0,0,0,0,0,0,0,0]).finish(),
+            ],
+            "source | extend span_id = dynamic([0,1,2,3,4,5,6,7])",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7],
+                    logs[0].span_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7],
+                    logs[1].span_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7],
+                    logs[2].span_id);
+            }),
+        test_engine_set_span_id_column_doesnt_exist: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend span_id = dynamic([0,1,2,3,4,5,6,7])",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7],
+                    logs[0].span_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7],
+                    logs[1].span_id);
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7],
+                    logs[2].span_id);
+            }),
+        test_engine_set_span_id_column_invalid_size: (
+            vec![
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().finish(),
+            ],
+            "source | extend span_id = dynamic([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])",
+            |logs: &Vec<LogRecord>| {
+                assert!(
+                    logs[0].span_id.is_empty());
+                assert!(
+                    logs[1].span_id.is_empty());
+                assert!(
+                    logs[2].span_id.is_empty());
+            }),
         test_engine_set_dynamic_string_column: (
             vec![
                 LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("severity_text".into())) }) }]).finish(),
@@ -1200,6 +1302,20 @@ mod tests {
                 assert_eq!(
                     1,
                     logs[2].observed_time_unix_nano);
+            }),
+        test_engine_set_dynamic_binary_column: (
+            vec![
+                LogRecord::build().attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("trace_id".into())) }) }]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().span_id([0,0,0,0,0,0,0,0]).attributes(vec![KeyValue { key: "some_attr".into(), value: Some(AnyValue { value: Some(Value::StringValue("span_id".into())) }) }]).finish(),
+            ],
+            "source | extend source[some_attr] = dynamic([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    vec![0u8,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                    logs[0].trace_id);
+                assert!(
+                    logs[2].span_id.is_empty());
             }),
     }
 

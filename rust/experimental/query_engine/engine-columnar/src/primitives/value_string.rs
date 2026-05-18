@@ -155,8 +155,8 @@ impl<'a> StringValueOrRef<'a> {
     }
 }
 
-impl StringValue for StringValueOrRef<'_> {
-    fn get_value(&self) -> &str {
+impl AsRef<str> for StringValueOrRef<'_> {
+    fn as_ref(&self) -> &str {
         match self {
             StringValueOrRef::Empty => "",
             StringValueOrRef::Ref(s) => s,

@@ -254,133 +254,217 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             SelectionPath::Key {
                 expression,
                 value: root_key,
-            } => match get_log_record_schema().normalize_key(root_key.get_value()) {
-                consts::ATTRIBUTES => {
-                    todo!()
-                }
-                consts::TIME_UNIX_NANO => {
-                    if path_length > 0 {
-                        return log_invalid_column_access(
-                            diagnostic_receiver,
-                            *expression,
+            } => {
+                match get_log_record_schema().normalize_key(root_key.get_value()) {
+                    consts::ATTRIBUTES => {
+                        todo!()
+                    }
+                    consts::TIME_UNIX_NANO => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::TIME_UNIX_NANO,
+                            );
+                        }
+
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::TIME_UNIX_NANO,
+                            value,
+                            |keys, values| {
+                                primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
+                            },
                         );
+
+                        ColumnarRecordsWriteResult::Success
                     }
+                    consts::OBSERVED_TIME_UNIX_NANO => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::OBSERVED_TIME_UNIX_NANO,
+                            );
+                        }
 
-                    set_column(
-                        batches,
-                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                        consts::TIME_UNIX_NANO,
-                        value,
-                        timestamp_nanosecond_array_writer,
-                    );
-
-                    ColumnarRecordsWriteResult::Success
-                }
-                consts::OBSERVED_TIME_UNIX_NANO => {
-                    if path_length > 0 {
-                        return log_invalid_column_access(
-                            diagnostic_receiver,
-                            *expression,
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::OBSERVED_TIME_UNIX_NANO,
+                            value,
+                            |keys, values| {
+                                primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
+                            },
                         );
+
+                        ColumnarRecordsWriteResult::Success
                     }
+                    consts::SEVERITY_NUMBER => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::SEVERITY_NUMBER,
+                            );
+                        }
 
-                    set_column(
-                        batches,
-                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                        consts::OBSERVED_TIME_UNIX_NANO,
-                        value,
-                        timestamp_nanosecond_array_writer,
-                    );
-
-                    ColumnarRecordsWriteResult::Success
-                }
-                consts::SEVERITY_NUMBER => {
-                    if path_length > 0 {
-                        return log_invalid_column_access(
-                            diagnostic_receiver,
-                            *expression,
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::SEVERITY_NUMBER,
+                            value,
+                            |keys, values| {
+                                adaptive_dictionary_writer(
+                                    keys,
+                                    values,
+                                    DictionaryValueArray::transform_into_int_array::<Int32Type>,
+                                )
+                            },
                         );
+
+                        ColumnarRecordsWriteResult::Success
                     }
+                    consts::SEVERITY_TEXT => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::SEVERITY_TEXT,
+                            );
+                        }
 
-                    set_column(
-                        batches,
-                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                        consts::SEVERITY_NUMBER,
-                        value,
-                        adaptive_int_dictionary_writer::<Int32Type>,
-                    );
-
-                    ColumnarRecordsWriteResult::Success
-                }
-                consts::SEVERITY_TEXT => {
-                    if path_length > 0 {
-                        return log_invalid_column_access(
-                            diagnostic_receiver,
-                            *expression,
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::SEVERITY_TEXT,
+                            value,
+                            |keys, values| {
+                                adaptive_dictionary_writer(
+                                    keys,
+                                    values,
+                                    DictionaryValueArray::transform_into_string_array,
+                                )
+                            },
                         );
+
+                        ColumnarRecordsWriteResult::Success
                     }
+                    consts::TRACE_ID => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::TRACE_ID,
+                            );
+                        }
 
-                    set_column(
-                        batches,
-                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                        consts::SEVERITY_TEXT,
-                        value,
-                        adaptive_string_dictionary_writer,
-                    );
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                            consts::TRACE_ID,
+                            value,
+                            |keys, values| {
+                                adaptive_dictionary_writer(
+                                    keys,
+                                    values,
+                                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<
+                                        16,
+                                    >,
+                                )
+                            },
+                        );
 
-                    ColumnarRecordsWriteResult::Success
-                }
-                consts::FLAGS => {
-                    if path_length > 0 {
-                        return log_invalid_column_access(
-                            diagnostic_receiver,
-                            *expression,
+                        ColumnarRecordsWriteResult::Success
+                    }
+                    consts::SPAN_ID => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::SPAN_ID,
+                            );
+                        }
+
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                            consts::SPAN_ID,
+                            value,
+                            |keys, values| {
+                                adaptive_dictionary_writer(
+                                    keys,
+                                    values,
+                                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<
+                                        8,
+                                    >,
+                                )
+                            },
+                        );
+
+                        ColumnarRecordsWriteResult::Success
+                    }
+                    consts::FLAGS => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::FLAGS,
+                            );
+                        }
+
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::FLAGS,
+                            value,
+                            |keys, values| {
+                                primitive_array_writer(
+                                    keys,
+                                    values,
+                                    DictionaryValueArray::transform_into_int_array::<UInt32Type>,
+                                )
+                            },
                         );
+
+                        ColumnarRecordsWriteResult::Success
                     }
+                    consts::EVENT_NAME => {
+                        if path_length > 0 {
+                            return log_invalid_column_access(
+                                diagnostic_receiver,
+                                *expression,
+                                consts::EVENT_NAME,
+                            );
+                        }
 
-                    set_column(
-                        batches,
-                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                        consts::FLAGS,
-                        value,
-                        int_array_writer::<UInt32Type>,
-                    );
-
-                    ColumnarRecordsWriteResult::Success
-                }
-                consts::EVENT_NAME => {
-                    if path_length > 0 {
-                        return log_invalid_column_access(
-                            diagnostic_receiver,
-                            *expression,
+                        set_column(
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                             consts::EVENT_NAME,
+                            value,
+                            |keys, values| {
+                                adaptive_dictionary_writer(
+                                    keys,
+                                    values,
+                                    DictionaryValueArray::transform_into_string_array,
+                                )
+                            },
                         );
+
+                        ColumnarRecordsWriteResult::Success
                     }
-
-                    set_column(
-                        batches,
-                        POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                        consts::EVENT_NAME,
-                        value,
-                        adaptive_string_dictionary_writer,
-                    );
-
-                    ColumnarRecordsWriteResult::Success
+                    f => {
+                        diagnostic_receiver.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Warn,
+                            *expression,
+                            || format!("Field '{f}' does not exist on log record"),
+                        );
+                        ColumnarRecordsWriteResult::NotFound
+                    }
                 }
-                f => {
-                    diagnostic_receiver.add_diagnostic_if_enabled(
-                        ColumnarEngineDiagnosticLevel::Warn,
-                        *expression,
-                        || format!("Field '{f}' does not exist on log record"),
-                    );
-                    ColumnarRecordsWriteResult::NotFound
-                }
-            },
+            }
             SelectionPath::Dictionary {
                 expression,
                 value: root_keys,
@@ -424,10 +508,12 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::TIME_UNIX_NANO,
-                                timestamp_nanosecond_array_reader,
+                                primitive_array_reader::<TimestampNanosecondType>,
                                 key_filter,
                                 &value,
-                                timestamp_nanosecond_array_writer,
+                                |keys, values| {
+                                    primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
+                                },
                             );
 
                             written_data_count += 1;
@@ -446,10 +532,12 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::OBSERVED_TIME_UNIX_NANO,
-                                timestamp_nanosecond_array_reader,
+                                primitive_array_reader::<TimestampNanosecondType>,
                                 key_filter,
                                 &value,
-                                timestamp_nanosecond_array_writer,
+                                |keys, values| {
+                                    primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
+                                },
                             );
 
                             written_data_count += 1;
@@ -468,10 +556,16 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_NUMBER,
-                                adaptive_int_dictionary_reader::<Int32Type>,
+                                adaptive_dictionary_reader::<Int32Array>,
                                 key_filter,
                                 &value,
-                                adaptive_int_dictionary_writer::<Int32Type>,
+                                |keys, values| {
+                                    adaptive_dictionary_writer(
+                                        keys,
+                                        values,
+                                        DictionaryValueArray::transform_into_int_array::<Int32Type>,
+                                    )
+                                },
                             );
 
                             written_data_count += 1;
@@ -490,10 +584,76 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::SEVERITY_TEXT,
-                                adaptive_string_dictionary_reader,
+                                adaptive_dictionary_reader::<StringArray>,
                                 key_filter,
                                 &value,
-                                adaptive_string_dictionary_writer,
+                                |keys, values| {
+                                    adaptive_dictionary_writer(
+                                        keys,
+                                        values,
+                                        DictionaryValueArray::transform_into_string_array,
+                                    )
+                                },
+                            );
+
+                            written_data_count += 1;
+                        }
+                        consts::TRACE_ID => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::TRACE_ID,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::TRACE_ID,
+                                adaptive_dictionary_reader::<FixedSizeBinaryArray>,
+                                key_filter,
+                                &value,
+                                |keys, values| {
+                                    adaptive_dictionary_writer(
+                                        keys,
+                                        values,
+                                        DictionaryValueArray::transform_into_fixed_sized_binary_array::<
+                                            16,
+                                        >,
+                                    )
+                                },
+                            );
+
+                            written_data_count += 1;
+                        }
+                        consts::SPAN_ID => {
+                            if path_length > 0 {
+                                log_invalid_column_access(
+                                    diagnostic_receiver,
+                                    *expression,
+                                    consts::SPAN_ID,
+                                );
+                                continue;
+                            }
+
+                            set_column_with_values(
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::SPAN_ID,
+                                adaptive_dictionary_reader::<FixedSizeBinaryArray>,
+                                key_filter,
+                                &value,
+                                |keys, values| {
+                                    adaptive_dictionary_writer(
+                                        keys,
+                                        values,
+                                        DictionaryValueArray::transform_into_fixed_sized_binary_array::<
+                                            8,
+                                        >,
+                                    )
+                                },
                             );
 
                             written_data_count += 1;
@@ -512,10 +672,16 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::FLAGS,
-                                int_array_reader::<UInt32Type>,
+                                primitive_array_reader::<UInt32Type>,
                                 key_filter,
                                 &value,
-                                int_array_writer::<UInt32Type>,
+                                |keys, values| {
+                                    primitive_array_writer(
+                                        keys,
+                                        values,
+                                        DictionaryValueArray::transform_into_int_array::<UInt32Type>,
+                                    )
+                                },
                             );
 
                             written_data_count += 1;
@@ -534,10 +700,16 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                 batches,
                                 POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
                                 consts::EVENT_NAME,
-                                adaptive_string_dictionary_reader,
+                                adaptive_dictionary_reader::<StringArray>,
                                 key_filter,
                                 &value,
-                                adaptive_string_dictionary_writer,
+                                |keys, values| {
+                                    adaptive_dictionary_writer(
+                                        keys,
+                                        values,
+                                        DictionaryValueArray::transform_into_string_array,
+                                    )
+                                },
                             );
 
                             written_data_count += 1;
@@ -588,16 +760,15 @@ fn log_invalid_column_access<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
     ColumnarRecordsWriteResult::NotFound
 }
 
-fn set_column<
-    FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
-    const BATCH_SIZE: usize,
->(
+fn set_column<FTransform, const BATCH_SIZE: usize>(
     batches: &mut [Option<RecordBatch>; BATCH_SIZE],
     batch_position: usize,
     column_name: &str,
     value: Dictionary,
     primitive_array_transform: FTransform,
-) {
+) where
+    FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+{
     if let Some(logs_batch) = batches[batch_position].take() {
         let (keys, values) = value.into_parts();
 
@@ -672,134 +843,66 @@ fn set_column_with_values<
     }
 }
 
-fn adaptive_string_dictionary_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
+fn adaptive_dictionary_reader<V: Array + 'static>(array: &Arc<dyn Array>) -> RecordTableDictionary {
     match array.data_type() {
         DataType::UInt8 => array
             .as_dictionary::<UInt8Type>()
-            .downcast_dict::<StringArray>()
+            .downcast_dict::<V>()
             .expect("array values were an unexpected type")
             .into(),
         DataType::UInt16 => array
             .as_dictionary::<UInt16Type>()
-            .downcast_dict::<StringArray>()
+            .downcast_dict::<V>()
             .expect("array values were an unexpected type")
             .into(),
         d => panic!("array values with '{d}' keys are not supported"),
     }
 }
 
-fn adaptive_string_dictionary_writer(
-    keys: DictionaryKeyArray,
-    values: DictionaryValueArray,
-) -> Arc<dyn Array> {
-    let (transformed_values, lookup) = values.transform_into_string_array();
-
-    match transformed_values.len() {
-        v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
-            keys.transform_into_key_array(lookup),
-            Arc::new(transformed_values),
-        )),
-        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
-            keys.transform_into_key_array(lookup),
-            Arc::new(transformed_values),
-        )),
-    }
-}
-
-fn adaptive_int_dictionary_reader<T: ArrowPrimitiveType>(
-    array: &Arc<dyn Array>,
-) -> RecordTableDictionary {
-    match array.data_type() {
-        DataType::UInt8 => array
-            .as_dictionary::<UInt8Type>()
-            .downcast_dict::<PrimitiveArray<T>>()
-            .expect("array values were an unexpected type")
-            .into(),
-        DataType::UInt16 => array
-            .as_dictionary::<UInt16Type>()
-            .downcast_dict::<PrimitiveArray<T>>()
-            .expect("array values were an unexpected type")
-            .into(),
-        d => panic!("array values with '{d}' keys are not supported"),
-    }
-}
-
-fn adaptive_int_dictionary_writer<T: ArrowPrimitiveType>(
-    keys: DictionaryKeyArray,
-    values: DictionaryValueArray,
-) -> Arc<dyn Array>
-where
-    T::Native: Hash + Eq + TryFrom<i64>,
-    PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
-{
-    let (transformed_values, lookup) = values.transform_into_int_array::<T>();
-
-    match transformed_values.len() {
-        v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
-            keys.transform_into_key_array(lookup),
-            Arc::new(transformed_values),
-        )),
-        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
-            keys.transform_into_key_array(lookup),
-            Arc::new(transformed_values),
-        )),
-    }
-}
-
-fn timestamp_nanosecond_array_reader(array: &Arc<dyn Array>) -> RecordTableDictionary {
-    RecordTableDictionary::from_array::<UInt16Type, _>(
-        array.as_primitive::<TimestampNanosecondType>(),
-    )
-}
-
-fn timestamp_nanosecond_array_writer(
-    keys: DictionaryKeyArray,
-    values: DictionaryValueArray,
-) -> Arc<dyn Array> {
-    let (transformed_values, lookup) = values.transform_into_timestamp_nanoseconds_array();
-
-    let key_length = keys.len();
-
-    if transformed_values.len() == key_length {
-        return Arc::new(transformed_values);
-    }
-
-    let mut builder = PrimitiveBuilder::<TimestampNanosecondType>::with_capacity(key_length);
-
-    for key_index in 0..key_length {
-        if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
-            let transformed_value_index = match lookup.as_ref() {
-                Some(lookup) => lookup.get(&value_index).and_then(|v| *v),
-                None => Some(value_index),
-            };
-
-            if let Some(transformed_value_index) = transformed_value_index {
-                builder.append_value(unsafe {
-                    transformed_values.value_unchecked(transformed_value_index)
-                });
-                continue;
-            }
-        }
-
-        builder.append_null();
-    }
-
-    Arc::new(builder.finish())
-}
-
-fn int_array_reader<T: ArrowPrimitiveType>(array: &Arc<dyn Array>) -> RecordTableDictionary {
+fn primitive_array_reader<T: ArrowPrimitiveType>(array: &Arc<dyn Array>) -> RecordTableDictionary {
     RecordTableDictionary::from_array::<UInt16Type, _>(array.as_primitive::<T>())
 }
 
-fn int_array_writer<T: ArrowPrimitiveType>(
+fn adaptive_dictionary_writer<'a, T: Array + 'static, FTransform>(
     keys: DictionaryKeyArray,
-    values: DictionaryValueArray,
+    values: DictionaryValueArray<'a>,
+    transform: FTransform,
+) -> Arc<dyn Array>
+where
+    FTransform: Fn(DictionaryValueArray<'a>) -> (T, Option<AHashMap<usize, Option<usize>>>),
+{
+    let (transformed_values, lookup) = transform(values);
+
+    //let transformed_keys = ;
+
+    //println!("transformed_keys {transformed_keys:?}");
+    println!("transformed_values {transformed_values:?}");
+    println!("lookup {lookup:?}");
+
+    match transformed_values.len() {
+        v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
+            keys.transform_into_key_array(lookup),
+            Arc::new(transformed_values),
+        )),
+        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
+            keys.transform_into_key_array(lookup),
+            Arc::new(transformed_values),
+        )),
+    }
+}
+
+fn primitive_array_writer<'a, T: ArrowPrimitiveType, FTransform>(
+    keys: DictionaryKeyArray,
+    values: DictionaryValueArray<'a>,
+    transform: FTransform,
 ) -> Arc<dyn Array>
 where
     T::Native: Hash + Eq + TryFrom<i64>,
     PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
+    FTransform:
+        Fn(DictionaryValueArray<'a>) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>),
 {
-    let (transformed_values, lookup) = values.transform_into_int_array::<T>();
+    let (transformed_values, lookup) = transform(values);
 
     let key_length = keys.len();
 
@@ -920,27 +1023,29 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(time_unix_nano_column) =
                         logs_schema.column_with_name(consts::TIME_UNIX_NANO) =>
                 {
-                    timestamp_nanosecond_array_reader(logs.column(time_unix_nano_column.0))
+                    primitive_array_reader::<TimestampNanosecondType>(
+                        logs.column(time_unix_nano_column.0),
+                    )
                 }
                 consts::OBSERVED_TIME_UNIX_NANO
                     if let Some(observed_time_unix_nano_column) =
                         logs_schema.column_with_name(consts::OBSERVED_TIME_UNIX_NANO) =>
                 {
-                    timestamp_nanosecond_array_reader(logs.column(observed_time_unix_nano_column.0))
+                    primitive_array_reader::<TimestampNanosecondType>(
+                        logs.column(observed_time_unix_nano_column.0),
+                    )
                 }
                 consts::SEVERITY_NUMBER
                     if let Some(severity_number_column) =
                         logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
                 {
-                    adaptive_int_dictionary_reader::<Int32Type>(
-                        logs.column(severity_number_column.0),
-                    )
+                    adaptive_dictionary_reader::<Int32Array>(logs.column(severity_number_column.0))
                 }
                 consts::SEVERITY_TEXT
                     if let Some(severity_text_column) =
                         logs_schema.column_with_name(consts::SEVERITY_TEXT) =>
                 {
-                    adaptive_string_dictionary_reader(logs.column(severity_text_column.0))
+                    adaptive_dictionary_reader::<StringArray>(logs.column(severity_text_column.0))
                 }
                 consts::BODY
                     if let Some(body) = self
@@ -953,31 +1058,27 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                     if let Some(trace_id_column) =
                         logs_schema.column_with_name(consts::TRACE_ID) =>
                 {
-                    logs.column(trace_id_column.0)
-                        .as_dictionary::<UInt8Type>()
-                        .downcast_dict::<FixedSizeBinaryArray>()
-                        .expect("trace_id values were an unexpected type")
-                        .into()
+                    adaptive_dictionary_reader::<FixedSizeBinaryArray>(
+                        logs.column(trace_id_column.0),
+                    )
                 }
                 consts::SPAN_ID
                     if let Some(span_id_column) = logs_schema.column_with_name(consts::SPAN_ID) =>
                 {
-                    logs.column(span_id_column.0)
-                        .as_dictionary::<UInt8Type>()
-                        .downcast_dict::<FixedSizeBinaryArray>()
-                        .expect("span_id values were an unexpected type")
-                        .into()
+                    adaptive_dictionary_reader::<FixedSizeBinaryArray>(
+                        logs.column(span_id_column.0),
+                    )
                 }
                 consts::FLAGS
                     if let Some(flags_column) = logs_schema.column_with_name(consts::FLAGS) =>
                 {
-                    int_array_reader::<UInt32Type>(logs.column(flags_column.0))
+                    primitive_array_reader::<UInt32Type>(logs.column(flags_column.0))
                 }
                 consts::EVENT_NAME
                     if let Some(event_name_column) =
                         logs_schema.column_with_name(consts::EVENT_NAME) =>
                 {
-                    adaptive_string_dictionary_reader(logs.column(event_name_column.0))
+                    adaptive_dictionary_reader::<StringArray>(logs.column(event_name_column.0))
                 }
                 _ => return None,
             };
@@ -1041,12 +1142,12 @@ impl RecordTable for OtapScope<'_> {
             consts::NAME | "Name"
                 if let Some(name_column) = self.scope_struct.column_by_name("name") =>
             {
-                adaptive_string_dictionary_reader(name_column)
+                adaptive_dictionary_reader::<StringArray>(name_column)
             }
             consts::VERSION | "Version"
                 if let Some(version_column) = self.scope_struct.column_by_name("version") =>
             {
-                adaptive_string_dictionary_reader(version_column)
+                adaptive_dictionary_reader::<StringArray>(version_column)
             }
             _ => return None,
         };

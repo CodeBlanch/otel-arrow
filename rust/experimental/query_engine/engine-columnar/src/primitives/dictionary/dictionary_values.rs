@@ -6,11 +6,11 @@ use std::{hash::Hash, marker::PhantomData, rc::Rc, sync::Arc};
 use ahash::{AHashMap, RandomState};
 use arrow::{
     array::*,
-    buffer::{Buffer, NullBuffer},
+    buffer::{Buffer, MutableBuffer, NullBuffer},
     datatypes::*,
 };
 use chrono::{TimeZone, Utc};
-use data_engine_expressions::{AsValue, StringValue};
+use data_engine_expressions::{ArrayValue, AsValue, IndexValueClosureCallback};
 use indexmap::IndexSet;
 
 use crate::*;
@@ -108,44 +108,57 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn transform_into_string_array(
+    pub fn transform_into_array<TArray: Array + Clone, T: Hash + Eq, FAsArray, FConvert, FBuild>(
         self,
-    ) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
+        as_array: FAsArray,
+        convert: FConvert,
+        build: FBuild,
+    ) -> (TArray, Option<AHashMap<usize, Option<usize>>>)
+    where
+        FAsArray: Fn(&Arc<dyn Array>) -> Option<&TArray>,
+        FConvert: Fn(ValueOrRef<'a>) -> Option<T>,
+        FBuild: Fn(Vec<T>) -> TArray,
+    {
         match self {
             DictionaryValueArray::Array(a) => {
-                if let Some(s) = a.as_string_opt() {
+                if let Some(s) = as_array(&a) {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_set(
-                        &mut |v| Some(Into::<StringValueOrRef>::into(v)),
-                        a,
-                    );
+                    let (values, lookup) = transform_array_into_set(&mut |v| convert(v), a);
 
-                    (
-                        StringArray::from(
-                            values
-                                .iter()
-                                .map(|v: &StringValueOrRef<'_>| v.get_value())
-                                .collect::<Vec<_>>(),
-                        ),
-                        Some(lookup),
-                    )
+                    (build(values.into_iter().collect::<Vec<_>>()), Some(lookup))
                 }
             }
             DictionaryValueArray::Vec(a) => {
                 let length = a.len();
                 let values = Rc::unwrap_or_clone(a).into_iter();
 
-                transform_iter_into_string_array(length, values)
+                transform_iter_into_array(length, values, build, convert)
             }
             DictionaryValueArray::Set(a) => {
                 let length = a.len();
                 let values = Rc::unwrap_or_clone(a).into_iter();
 
-                transform_iter_into_string_array(length, values)
+                transform_iter_into_array(length, values, build, convert)
             }
-            DictionaryValueArray::Boolean => (StringArray::from(vec!["false", "true"]), None),
+            DictionaryValueArray::Boolean => (
+                build(vec![
+                    convert(ValueOrRef::Boolean(false)).expect("false value"),
+                    convert(ValueOrRef::Boolean(true)).expect("true value"),
+                ]),
+                None,
+            ),
         }
+    }
+
+    pub fn transform_into_string_array(
+        self,
+    ) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
+        self.transform_into_array(
+            ArrayRef::as_string_opt,
+            |v| Some(v.to_string()),
+            StringArray::from_iter_values,
+        )
     }
 
     pub fn transform_into_int_array<T: ArrowPrimitiveType>(
@@ -155,40 +168,11 @@ impl<'a> DictionaryValueArray<'a> {
         T::Native: Hash + Eq + TryFrom<i64>,
         PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
     {
-        match self {
-            DictionaryValueArray::Array(a) => {
-                if let Some(s) = a.as_primitive_opt::<T>() {
-                    (s.clone(), None)
-                } else {
-                    let (values, lookup) =
-                        transform_array_into_set(&mut |v| v.to_int::<T::Native>(), a);
-
-                    (
-                        PrimitiveArray::<T>::from(values.into_iter().collect::<Vec<_>>()),
-                        Some(lookup),
-                    )
-                }
-            }
-            DictionaryValueArray::Vec(a) => {
-                let length = a.len();
-                let values = Rc::unwrap_or_clone(a).into_iter();
-
-                transform_iter_into_int_array::<_, T>(length, values)
-            }
-            DictionaryValueArray::Set(a) => {
-                let length = a.len();
-                let values = Rc::unwrap_or_clone(a).into_iter();
-
-                transform_iter_into_int_array::<_, T>(length, values)
-            }
-            DictionaryValueArray::Boolean => (
-                PrimitiveArray::<T>::from(vec![
-                    T::Native::from_usize(0).unwrap(),
-                    T::Native::from_usize(1).unwrap(),
-                ]),
-                None,
-            ),
-        }
+        self.transform_into_array(
+            ArrayRef::as_primitive_opt::<T>,
+            |v| v.to_int::<T::Native>(),
+            PrimitiveArray::<T>::from,
+        )
     }
 
     pub fn transform_into_timestamp_nanoseconds_array(
@@ -197,45 +181,73 @@ impl<'a> DictionaryValueArray<'a> {
         PrimitiveArray<TimestampNanosecondType>,
         Option<AHashMap<usize, Option<usize>>>,
     ) {
-        match self {
-            DictionaryValueArray::Array(a) => {
-                if let Some(s) = a.as_primitive_opt::<TimestampNanosecondType>() {
-                    (s.clone(), None)
-                } else {
-                    let (values, lookup) = transform_array_into_set(
-                        &mut |v| {
-                            v.to_value()
-                                .convert_to_datetime()
-                                .and_then(|v| v.timestamp_nanos_opt())
-                        },
-                        a,
-                    );
+        self.transform_into_array(
+            ArrayRef::as_primitive_opt::<TimestampNanosecondType>,
+            |v| {
+                v.to_value()
+                    .convert_to_datetime()
+                    .and_then(|v| v.timestamp_nanos_opt())
+            },
+            PrimitiveArray::<TimestampNanosecondType>::from,
+        )
+    }
 
-                    (
-                        PrimitiveArray::<TimestampNanosecondType>::from(
-                            values.into_iter().collect::<Vec<_>>(),
-                        ),
-                        Some(lookup),
-                    )
+    pub fn transform_into_fixed_sized_binary_array<const SIZE: usize>(
+        self,
+    ) -> (FixedSizeBinaryArray, Option<AHashMap<usize, Option<usize>>>) {
+        self.transform_into_array(
+            |v| {
+                v.as_fixed_size_binary_opt().and_then(|v| {
+                    if v.value_length() as usize == SIZE {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+            },
+            |v| match v {
+                ValueOrRef::Array(ArrayValueOrRef::Buffer(BufferArray::U8(values))) => {
+                    if values.len() == SIZE {
+                        Some(values)
+                    } else {
+                        None
+                    }
                 }
-            }
-            DictionaryValueArray::Vec(a) => {
-                let length = a.len();
-                let values = Rc::unwrap_or_clone(a).into_iter();
-
-                transform_iter_into_timestamp_nanoseconds_array(length, values)
-            }
-            DictionaryValueArray::Set(a) => {
-                let length = a.len();
-                let values = Rc::unwrap_or_clone(a).into_iter();
-
-                transform_iter_into_timestamp_nanoseconds_array(length, values)
-            }
-            DictionaryValueArray::Boolean => (
-                PrimitiveArray::<TimestampNanosecondType>::from(vec![0, 1]),
-                None,
-            ),
-        }
+                ValueOrRef::Array(array) => {
+                    if array.len() == SIZE {
+                        let mut buffer = MutableBuffer::new(SIZE);
+                        let builder = buffer.as_mut_ptr();
+                        if array
+                            .as_array_value()
+                            .get_items(&mut IndexValueClosureCallback::new(|index, value| {
+                                if let Some(v) = value.convert_to_integer()
+                                    && let Ok(v) = TryInto::<u8>::try_into(v)
+                                {
+                                    unsafe { *builder.add(index) = v };
+                                    return true;
+                                }
+                                false
+                            }))
+                        {
+                            unsafe { buffer.set_len(SIZE) };
+                            Some(BufferWrapper::new(buffer.into()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            |v| {
+                if v.is_empty() {
+                    FixedSizeBinaryArray::new_null(SIZE as i32, 0)
+                } else {
+                    FixedSizeBinaryArray::try_from_iter(v.into_iter()).expect("valid array")
+                }
+            },
+        )
     }
 }
 
@@ -631,67 +643,6 @@ where
     (transformed_values, value_index_lookup)
 }
 
-fn transform_iter_into_string_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
-    length: usize,
-    values: T,
-) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
-    transform_iter_into_array(
-        length,
-        values,
-        |set| {
-            StringArray::from(
-                set.iter()
-                    .map(|v: &StringValueOrRef<'_>| v.get_value())
-                    .collect::<Vec<_>>(),
-            )
-        },
-        |value| Some(value.into()),
-    )
-}
-
-fn transform_iter_into_int_array<
-    'a,
-    TIterator: Iterator<Item = ValueOrRef<'a>>,
-    TType: ArrowPrimitiveType,
->(
-    length: usize,
-    values: TIterator,
-) -> (
-    PrimitiveArray<TType>,
-    Option<AHashMap<usize, Option<usize>>>,
-)
-where
-    TType::Native: Hash + Eq + TryFrom<i64>,
-    PrimitiveArray<TType>: From<Vec<<TType as ArrowPrimitiveType>::Native>>,
-{
-    transform_iter_into_array(
-        length,
-        values,
-        |set| PrimitiveArray::<TType>::from(set.into_iter().collect::<Vec<_>>()),
-        |value| value.to_int::<TType::Native>(),
-    )
-}
-
-fn transform_iter_into_timestamp_nanoseconds_array<'a, T: Iterator<Item = ValueOrRef<'a>>>(
-    length: usize,
-    values: T,
-) -> (
-    PrimitiveArray<TimestampNanosecondType>,
-    Option<AHashMap<usize, Option<usize>>>,
-) {
-    transform_iter_into_array(
-        length,
-        values,
-        |set| PrimitiveArray::<TimestampNanosecondType>::from(set.into_iter().collect::<Vec<_>>()),
-        |value| {
-            value
-                .to_value()
-                .convert_to_datetime()
-                .and_then(|v| v.timestamp_nanos_opt())
-        },
-    )
-}
-
 fn transform_iter_into_array<
     'a,
     TItems: Iterator<Item = ValueOrRef<'a>>,
@@ -703,11 +654,11 @@ fn transform_iter_into_array<
     length: usize,
     values: TItems,
     build: FBuild,
-    mut transform: FTransform,
+    transform: FTransform,
 ) -> (TOutput, Option<AHashMap<usize, Option<usize>>>)
 where
-    FBuild: FnOnce(IndexSet<TInput, RandomState>) -> TOutput,
-    FTransform: FnMut(ValueOrRef<'a>) -> Option<TInput>,
+    FBuild: Fn(Vec<TInput>) -> TOutput,
+    FTransform: Fn(ValueOrRef<'a>) -> Option<TInput>,
 {
     let mut lookup = AHashMap::with_capacity(length);
     let mut set = IndexSet::with_capacity_and_hasher(length, RandomState::new());
@@ -722,7 +673,7 @@ where
         }
     }
 
-    (build(set), Some(lookup))
+    (build(set.into_iter().collect::<Vec<_>>()), Some(lookup))
 }
 
 pub(crate) fn get_value_from_array(value: &Arc<dyn Array>, index: usize) -> ValueOrRef<'static> {
