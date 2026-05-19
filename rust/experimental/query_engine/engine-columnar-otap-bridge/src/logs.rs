@@ -918,17 +918,21 @@ fn set_column_with_values<
 }
 
 fn adaptive_dictionary_reader<V: Array + 'static>(array: &Arc<dyn Array>) -> RecordTableDictionary {
+    println!("d: {}", array.data_type());
     match array.data_type() {
-        DataType::UInt8 => array
-            .as_dictionary::<UInt8Type>()
-            .downcast_dict::<V>()
-            .expect("array values were an unexpected type")
-            .into(),
-        DataType::UInt16 => array
-            .as_dictionary::<UInt16Type>()
-            .downcast_dict::<V>()
-            .expect("array values were an unexpected type")
-            .into(),
+        DataType::Dictionary(d, _) => match d.as_ref() {
+            DataType::UInt8 => array
+                .as_dictionary::<UInt8Type>()
+                .downcast_dict::<V>()
+                .expect("array values were an unexpected type")
+                .into(),
+            DataType::UInt16 => array
+                .as_dictionary::<UInt16Type>()
+                .downcast_dict::<V>()
+                .expect("array values were an unexpected type")
+                .into(),
+            d => panic!("array values with '{d}' keys are not supported"),
+        },
         d => panic!("array values with '{d}' keys are not supported"),
     }
 }
