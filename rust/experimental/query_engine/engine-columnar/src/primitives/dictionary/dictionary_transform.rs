@@ -350,7 +350,7 @@ where
 {
     let key_length = keys.len();
 
-    let mut key_builder = KeyArrayBuilder::<K>::new(key_length);
+    let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
@@ -409,7 +409,7 @@ fn transform_any_typed_keyless<'a, K: ArrowDictionaryKeyType, FTransform>(
 where
     FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
-    let mut key_builder = KeyArrayBuilder::<K>::new(key_length);
+    let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =

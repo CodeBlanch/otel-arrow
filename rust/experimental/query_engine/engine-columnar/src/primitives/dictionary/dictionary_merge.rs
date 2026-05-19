@@ -63,7 +63,7 @@ where
     > = AHashMap::new();
     let mut merged_values = IndexSet::with_hasher(RandomState::new());
 
-    let mut key_builder = KeyArrayBuilder::<K>::new(key_count);
+    let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_count);
     let mut key_writer = key_builder.get_writer();
 
     for key_index in 0..key_count {

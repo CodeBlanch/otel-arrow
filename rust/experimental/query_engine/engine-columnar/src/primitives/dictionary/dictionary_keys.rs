@@ -125,7 +125,7 @@ impl DictionaryKeyArray {
     pub(crate) fn transform_into_key_builder<KOutput: ArrowDictionaryKeyType>(
         self,
         value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
-    ) -> KeyArrayBuilder<KOutput> {
+    ) -> DictionaryKeyArrayBuilder<KOutput> {
         match self {
             DictionaryKeyArray::KeyArray(array) => match array.data_type() {
                 DataType::UInt8 => transform_key_array_into_key_builder(
@@ -168,7 +168,7 @@ impl DictionaryKeyArray {
                 data_type: _,
                 values,
             } => {
-                let mut builder = KeyArrayBuilder::<KOutput>::new(values.len());
+                let mut builder = DictionaryKeyArrayBuilder::<KOutput>::new(values.len());
                 let mut writer = builder.get_writer();
 
                 let (false_value_index, true_value_index) = if let Some(lookup) = value_index_lookup
@@ -214,7 +214,7 @@ impl DictionaryKeyArray {
                 data_type: _,
                 length,
             } => {
-                let mut builder = KeyArrayBuilder::<KOutput>::new(length);
+                let mut builder = DictionaryKeyArrayBuilder::<KOutput>::new(length);
                 let mut writer = builder.get_writer();
 
                 for key_index in 0..length {
@@ -240,7 +240,7 @@ impl DictionaryKeyArray {
                 value_index,
             } => {
                 if let Some(value_index) = value_index {
-                    let mut builder = KeyArrayBuilder::<KOutput>::new(length);
+                    let mut builder = DictionaryKeyArrayBuilder::<KOutput>::new(length);
                     let mut writer = builder.get_writer();
 
                     let transformed_value_index = if let Some(lookup) = value_index_lookup {
@@ -266,7 +266,7 @@ impl DictionaryKeyArray {
                     }
                 }
 
-                KeyArrayBuilder::<KOutput>::new_null(length)
+                DictionaryKeyArrayBuilder::<KOutput>::new_null(length)
             }
         }
     }
@@ -278,8 +278,8 @@ fn transform_key_array_into_key_builder<
 >(
     keys: &PrimitiveArray<KInput>,
     value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
-) -> KeyArrayBuilder<KOutput> {
-    let mut builder = KeyArrayBuilder::<KOutput>::new(keys.len());
+) -> DictionaryKeyArrayBuilder<KOutput> {
+    let mut builder = DictionaryKeyArrayBuilder::<KOutput>::new(keys.len());
     let mut writer = builder.get_writer();
 
     for (key_index, value_index) in keys.into_iter().enumerate() {
@@ -394,7 +394,7 @@ fn get_bool_array_value_index_for_key_index(
     })
 }
 
-pub(crate) struct KeyArrayBuilder<K: ArrowDictionaryKeyType> {
+pub struct DictionaryKeyArrayBuilder<K: ArrowDictionaryKeyType> {
     key_length: usize,
     key_bit_length: usize,
     key_buffer: MutableBuffer,
@@ -402,8 +402,8 @@ pub(crate) struct KeyArrayBuilder<K: ArrowDictionaryKeyType> {
     marker: PhantomData<K>,
 }
 
-impl<K: ArrowDictionaryKeyType> KeyArrayBuilder<K> {
-    pub fn new(key_length: usize) -> KeyArrayBuilder<K> {
+impl<K: ArrowDictionaryKeyType> DictionaryKeyArrayBuilder<K> {
+    pub fn new(key_length: usize) -> DictionaryKeyArrayBuilder<K> {
         let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
 
         Self {
@@ -415,7 +415,7 @@ impl<K: ArrowDictionaryKeyType> KeyArrayBuilder<K> {
         }
     }
 
-    pub fn new_null(key_length: usize) -> KeyArrayBuilder<K> {
+    pub fn new_null(key_length: usize) -> DictionaryKeyArrayBuilder<K> {
         let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
 
         Self {
@@ -427,8 +427,8 @@ impl<K: ArrowDictionaryKeyType> KeyArrayBuilder<K> {
         }
     }
 
-    pub fn get_writer(&mut self) -> KeyArrayWriter<'_, K> {
-        KeyArrayWriter {
+    pub fn get_writer(&mut self) -> DictionaryKeyArrayWriter<'_, K> {
+        DictionaryKeyArrayWriter {
             key_bit_length: self.key_bit_length,
             key_builder: self.key_buffer.typed_data_mut::<K::Native>(),
             null_buffer: &mut self.null_buffer,
@@ -444,13 +444,13 @@ impl<K: ArrowDictionaryKeyType> KeyArrayBuilder<K> {
     }
 }
 
-pub(crate) struct KeyArrayWriter<'a, K: ArrowDictionaryKeyType> {
+pub struct DictionaryKeyArrayWriter<'a, K: ArrowDictionaryKeyType> {
     key_bit_length: usize,
     key_builder: &'a mut [K::Native],
     null_buffer: &'a mut Option<MutableBuffer>,
 }
 
-impl<'a, K: ArrowDictionaryKeyType> KeyArrayWriter<'a, K> {
+impl<'a, K: ArrowDictionaryKeyType> DictionaryKeyArrayWriter<'a, K> {
     pub unsafe fn set_value_index(&mut self, key_index: usize, value_index: usize) {
         unsafe {
             *self.key_builder.as_mut_ptr().add(key_index) =

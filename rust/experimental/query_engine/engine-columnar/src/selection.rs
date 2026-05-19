@@ -191,7 +191,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
 ) -> ResolvedScalarValue<'pipeline, 'a> {
     let key_count = selector.len();
 
-    let mut key_builder = KeyArrayBuilder::<K>::new(key_count);
+    let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_count);
     let mut key_writer = key_builder.get_writer();
 
     let mut values = IndexSet::with_hasher(RandomState::new());

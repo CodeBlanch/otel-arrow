@@ -215,7 +215,7 @@ impl<'a> DictionaryValueArray<'a> {
                 }
                 ValueOrRef::Array(array) => {
                     if array.len() == SIZE {
-                        let mut buffer = MutableBuffer::new(SIZE);
+                        let mut buffer = MutableBuffer::from_len_zeroed(SIZE);
                         let builder = buffer.as_mut_ptr();
                         if array
                             .as_array_value()
@@ -229,7 +229,6 @@ impl<'a> DictionaryValueArray<'a> {
                                 false
                             }))
                         {
-                            unsafe { buffer.set_len(SIZE) };
                             Some(BufferWrapper::new(buffer.into()))
                         } else {
                             None

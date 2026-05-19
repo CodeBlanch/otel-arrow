@@ -1591,28 +1591,6 @@ enum AttributeValueOrIndex {
     Value(ValueOrRef<'static>),
 }
 
-fn push_null(null_buffer: &mut Option<MutableBuffer>, index: usize, key_bit_length: usize) {
-    if let Some(buffer) = null_buffer {
-        let ptr = buffer.typed_data_mut::<u8>().as_mut_ptr();
-
-        let i = index / 8;
-        let b = 1 << (index % 8);
-
-        unsafe { *ptr.add(i) &= !b };
-    } else {
-        let mut buffer = MutableBuffer::new(key_bit_length).with_bitset(key_bit_length, true);
-
-        let ptr = buffer.typed_data_mut::<u8>().as_mut_ptr();
-
-        let i = index / 8;
-        let b = 1 << (index % 8);
-
-        unsafe { *ptr.add(i) &= !b };
-
-        *null_buffer = Some(buffer);
-    }
-}
-
 fn build_logs_body_dictionary(
     logs: &RecordBatch,
     logs_schema: &Schema,
@@ -1625,11 +1603,8 @@ fn build_logs_body_dictionary(
 
             let record_count = body_types.len();
 
-            let mut key_buffer = MutableBuffer::from_len_zeroed(2 * record_count);
-            let key_builder = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
-
-            let key_bit_length = arrow::util::bit_util::ceil(record_count, 8);
-            let mut null_buffer = None;
+            let mut key_builder = DictionaryKeyArrayBuilder::<UInt16Type>::new(2 * record_count);
+            let mut key_writer = key_builder.get_writer();
 
             let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
             let mut values = Vec::with_capacity(record_count);
@@ -1683,7 +1658,7 @@ fn build_logs_body_dictionary(
                                     vacant.insert(index as u16)
                                 }
                             };
-                            unsafe { *key_builder.add(key_index) = *index };
+                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
                             continue;
                         }
                     }
@@ -1708,7 +1683,7 @@ fn build_logs_body_dictionary(
                                     vacant.insert(index as u16)
                                 }
                             };
-                            unsafe { *key_builder.add(key_index) = *index };
+                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
                             continue;
                         }
                     }
@@ -1721,7 +1696,7 @@ fn build_logs_body_dictionary(
                             let index = values.len() as u16;
                             values.push(ValueOrRef::Double(body_doubles.value(key_index)));
 
-                            unsafe { *key_builder.add(key_index) = index };
+                            unsafe { key_writer.set_value_index_typed(key_index, index) };
                             continue;
                         }
                     }
@@ -1732,7 +1707,7 @@ fn build_logs_body_dictionary(
                             let index = values.len() as u16;
                             values.push(ValueOrRef::Boolean(body_bools.value(key_index)));
 
-                            unsafe { *key_builder.add(key_index) = index };
+                            unsafe { key_writer.set_value_index_typed(key_index, index) };
                             continue;
                         }
                     }
@@ -1760,7 +1735,7 @@ fn build_logs_body_dictionary(
                                     vacant.insert(index as u16)
                                 }
                             };
-                            unsafe { *key_builder.add(key_index) = *index };
+                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
                             continue;
                         }
                     }
@@ -1788,7 +1763,7 @@ fn build_logs_body_dictionary(
                                     vacant.insert(index as u16)
                                 }
                             };
-                            unsafe { *key_builder.add(key_index) = *index };
+                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
                             continue;
                         }
                     }
@@ -1823,23 +1798,18 @@ fn build_logs_body_dictionary(
                                     vacant.insert(index as u16)
                                 }
                             };
-                            unsafe { *key_builder.add(key_index) = *index };
+                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
                             continue;
                         }
                     }
                     d => todo!("Body type '{d}' is not supported"),
                 }
 
-                push_null(&mut null_buffer, key_index, key_bit_length);
+                unsafe { key_writer.set_null(key_index) };
             }
 
             return Some(RecordTableDictionary::new(
-                PrimitiveArray::<UInt16Type>::new(
-                    key_buffer.into(),
-                    null_buffer
-                        .and_then(|v| NullBufferBuilder::new_from_buffer(v, record_count).finish()),
-                )
-                .into(),
+                key_builder.finish().into(),
                 RecordTableDictionaryValueArray::Vec(values.into()),
             ));
         }
