@@ -2,18 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use data_engine_columnar::*;
+use data_engine_expressions::{
+    IndexValueClosureCallback, KeyValueClosureCallback, RegexValue, StringValue, Value,
+};
 use serde::{
     Deserializer,
     de::{Error, MapAccess, SeqAccess, Visitor},
+    ser::{SerializeMap, SerializeSeq},
 };
 
 pub(crate) fn from_slice(value: &[u8]) -> Result<ValueOrRef<'static>, serde_cbor::Error> {
     serde_cbor::from_slice(value).map(|v: ValueOrRefSerializationWrapper| v.0)
 }
 
-struct ValueOrRefSerializationWrapper(pub ValueOrRef<'static>);
+pub(crate) fn to_slice(value: ValueOrRef) -> Result<Vec<u8>, serde_cbor::Error> {
+    serde_cbor::to_vec(&ValueOrRefSerializationWrapper(value))
+}
 
-impl<'a> serde::Deserialize<'a> for ValueOrRefSerializationWrapper {
+struct ValueOrRefSerializationWrapper<'a>(pub ValueOrRef<'a>);
+
+impl<'a> serde::Deserialize<'a> for ValueOrRefSerializationWrapper<'_> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'a>,
@@ -21,6 +29,78 @@ impl<'a> serde::Deserialize<'a> for ValueOrRefSerializationWrapper {
         Ok(ValueOrRefSerializationWrapper(
             deserializer.deserialize_any(ValueOrRefVisitor)?,
         ))
+    }
+}
+
+impl serde::Serialize for ValueOrRefSerializationWrapper<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.0 {
+            ValueOrRef::Array(a) => match a {
+                ArrayValueOrRef::Buffer(BufferArray::U8(v)) => {
+                    serializer.serialize_bytes(v.get_buffer().as_slice())
+                }
+                a => {
+                    let a = a.as_array_value();
+                    let mut s = serializer.serialize_seq(Some(a.len()))?;
+                    let mut e = None;
+                    if !a.get_items(&mut IndexValueClosureCallback::new(|_, value| {
+                        match s.serialize_element(&ValueOrRefSerializationWrapper(value.into())) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                e = Some(err);
+                                return false;
+                            }
+                        }
+                        true
+                    })) {
+                        return Err(e.expect("has error"));
+                    }
+                    s.end()
+                }
+            },
+            ValueOrRef::Boolean(b) => serializer.serialize_bool(*b),
+            ValueOrRef::DateTime(d) => match Value::DateTime(d).convert_to_integer() {
+                None => serializer.serialize_none(),
+                Some(v) => serializer.serialize_i64(v),
+            },
+            ValueOrRef::Double(d) => serializer.serialize_f64(*d),
+            ValueOrRef::Integer(i) => serializer.serialize_i64(*i),
+            ValueOrRef::Map(m) => {
+                let m = m.as_map_value();
+                let mut s = serializer.serialize_map(Some(m.len()))?;
+                let mut e = None;
+                if !m.get_items(&mut KeyValueClosureCallback::new(|key, value| {
+                    match s.serialize_key(key) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            e = Some(err);
+                            return false;
+                        }
+                    }
+                    match s.serialize_value(&ValueOrRefSerializationWrapper(value.into())) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            e = Some(err);
+                            return false;
+                        }
+                    }
+                    true
+                })) {
+                    return Err(e.expect("has error"));
+                }
+                s.end()
+            }
+            ValueOrRef::Null => serializer.serialize_none(),
+            ValueOrRef::Regex(r) => serializer.serialize_str(r.get_value().as_str()),
+            ValueOrRef::String(s) => serializer.serialize_str(s.get_value()),
+            ValueOrRef::TimeSpan(t) => match Value::TimeSpan(t).convert_to_integer() {
+                None => serializer.serialize_none(),
+                Some(v) => serializer.serialize_i64(v),
+            },
+        }
     }
 }
 

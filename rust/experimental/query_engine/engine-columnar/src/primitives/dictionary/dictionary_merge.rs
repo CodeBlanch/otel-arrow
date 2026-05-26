@@ -75,10 +75,10 @@ where
         match visited_values.entry(value_indices) {
             Entry::Occupied(occupied) => match occupied.get() {
                 Some(v) => {
-                    unsafe { key_writer.set_value_index_typed(key_index, *v) };
+                    unsafe { key_writer.set_value_index_typed_unchecked(key_index, *v) };
                 }
                 None => {
-                    unsafe { key_writer.set_null(key_index) };
+                    unsafe { key_writer.set_null_unchecked(key_index) };
                 }
             },
             Entry::Vacant(vacant) => {
@@ -91,7 +91,7 @@ where
                 match merge(values_to_merge) {
                     ValueOrRef::Null => {
                         vacant.insert(None);
-                        unsafe { key_writer.set_null(key_index) };
+                        unsafe { key_writer.set_null_unchecked(key_index) };
                     }
                     v => {
                         let (merged_value_index, _) = merged_values.insert_full(v);
@@ -100,7 +100,10 @@ where
                                 .unwrap();
                         vacant.insert(Some(native_merged_value_index));
                         unsafe {
-                            key_writer.set_value_index_typed(key_index, native_merged_value_index)
+                            key_writer.set_value_index_typed_unchecked(
+                                key_index,
+                                native_merged_value_index,
+                            )
                         };
                     }
                 }

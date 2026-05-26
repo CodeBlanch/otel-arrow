@@ -135,7 +135,7 @@ pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
 pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
     execution_context: &ExecutionContext<'_, 'pipeline, TRecords>,
     selectors: &'pipeline [ScalarExpression],
-) -> Result<Vec<SelectionPath<'pipeline>>, ()> {
+) -> Result<Vec<ColumnarEngineSelectionPath<'pipeline>>, ()> {
     let mut path = match selectors.iter().size_hint() {
         (_, Some(len)) => Vec::with_capacity(len),
         _ => Vec::new(),
@@ -146,11 +146,11 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
             &mut path,
             |path, single| match single {
                 ValueOrRef::String(key) => {
-                    path.push(SelectionPath::Key{ expression: selector, value: key });
+                    path.push(ColumnarEngineSelectionPath::Key{ expression: selector, value: key });
                     Ok(())
                 }
-                ValueOrRef::Array(index) => {
-                    path.push(SelectionPath::Index{ expression: selector, value: index });
+                ValueOrRef::Integer(index) => {
+                    path.push(ColumnarEngineSelectionPath::Index{ expression: selector, value: index });
                     Ok(())
                 }
                 v => {
@@ -163,7 +163,7 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
                 }
             },
             |path, dictionary| {
-                path.push(SelectionPath::Dictionary{ expression: selector, value: dictionary });
+                path.push(ColumnarEngineSelectionPath::Dictionary{ expression: selector, value: dictionary });
                 Ok(())
             },
             |_, _| {
@@ -231,10 +231,10 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     }
                 };
                 if let ValueOrRef::Null = value {
-                    unsafe { key_writer.set_null(key_index) }
+                    unsafe { key_writer.set_null_unchecked(key_index) }
                 } else {
                     let (index, _) = values.insert_full(value);
-                    unsafe { key_writer.set_value_index(key_index, index) };
+                    unsafe { key_writer.set_value_index_unchecked(key_index, index) };
                 }
             }
             Value::Integer(index) => {
@@ -279,10 +279,10 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     }
                 };
                 if let ValueOrRef::Null = value {
-                    unsafe { key_writer.set_null(key_index) };
+                    unsafe { key_writer.set_null_unchecked(key_index) };
                 } else {
                     let (index, _) = values.insert_full(value);
-                    unsafe { key_writer.set_value_index(key_index, index) };
+                    unsafe { key_writer.set_value_index_unchecked(key_index, index) };
                 }
             }
             v => {
@@ -291,7 +291,7 @@ fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: C
                     selector_expression,
                     || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),
                 );
-                unsafe { key_writer.set_null(key_index) };
+                unsafe { key_writer.set_null_unchecked(key_index) };
             }
         }
     }

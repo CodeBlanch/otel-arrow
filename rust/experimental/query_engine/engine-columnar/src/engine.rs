@@ -296,13 +296,17 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                 let root = &path[0];
                                 let path = &path[1..];
 
-                                std::mem::drop(execution_context);
+                                let state = execution_context
+                                    .into_parts()
+                                    .expect("has records")
+                                    .into_parts();
 
                                 let write_result = factory.set(
                                     &ColumnarEngineDiagnosticReceiverImpl::new(
                                         diagnostic_level,
                                         &self.diagnostics,
                                     ),
+                                    state,
                                     &mut batches,
                                     root,
                                     path,

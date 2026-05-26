@@ -6,10 +6,12 @@ use std::{
     collections::hash_map::Entry,
     fmt::Display,
     hash::Hash,
+    ops::{Deref, DerefMut},
+    rc::Rc,
     sync::Arc,
 };
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use arrow::{
     array::*,
     buffer::{MutableBuffer, NullBuffer},
@@ -17,10 +19,10 @@ use arrow::{
     datatypes::*,
 };
 use data_engine_columnar::*;
-use data_engine_expressions::{Expression, StringValue};
+use data_engine_expressions::{Expression, RegexValue, StringValue, Value};
 use otap_df_pdata::{
-    otap::raw_batch_store::POSITION_LOOKUP, proto::opentelemetry::arrow::v1::ArrowPayloadType,
-    schema::consts,
+    encode::record::logs::LogsBodyBuilder, otap::raw_batch_store::POSITION_LOOKUP,
+    proto::opentelemetry::arrow::v1::ArrowPayloadType, schema::consts,
 };
 use roaring::RoaringBitmap;
 
@@ -243,21 +245,70 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
         diagnostic_receiver: &T,
+        mut state: OtapBody,
         batches: &mut [Option<RecordBatch>; 4],
-        root: &SelectionPath<'a>,
-        path: &[SelectionPath<'a>],
+        root: &ColumnarEngineSelectionPath<'a>,
+        path: &[ColumnarEngineSelectionPath<'a>],
         value: Dictionary,
     ) -> ColumnarRecordsWriteResult {
         let path_length = path.len();
 
         match root {
-            SelectionPath::Key {
+            ColumnarEngineSelectionPath::Key {
                 expression,
                 value: root_key,
             } => {
                 match get_log_record_schema().normalize_key(root_key.get_value()) {
                     consts::ATTRIBUTES => {
                         todo!()
+                    }
+                    consts::BODY => {
+                        let value = if path_length > 0 {
+                            let body = state.take().unwrap_or_else(|| {
+                                if let Some(logs_batch) =
+                                    &batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
+                                {
+                                    return build_logs_body_dictionary(
+                                        logs_batch,
+                                        logs_batch.schema_ref(),
+                                    );
+                                }
+
+                                None
+                            });
+
+                            match body {
+                                None => {
+                                    diagnostic_receiver.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        *expression,
+                                        || "Cannot access into empty Body".into(),
+                                    );
+                                    return ColumnarRecordsWriteResult::NotFound;
+                                }
+                                Some(body) => update_dictionary_values_for_path(
+                                    body,
+                                    None,
+                                    &path[0],
+                                    &path[1..],
+                                    value,
+                                ),
+                            }
+                        } else {
+                            value
+                        };
+
+                        set_column(
+                            diagnostic_receiver,
+                            *expression,
+                            batches,
+                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                            consts::BODY,
+                            value,
+                            body_writer,
+                        );
+
+                        ColumnarRecordsWriteResult::Success
                     }
                     consts::TIME_UNIX_NANO => {
                         if path_length > 0 {
@@ -481,7 +532,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     }
                 }
             }
-            SelectionPath::Dictionary {
+            ColumnarEngineSelectionPath::Dictionary {
                 expression,
                 value: root_keys,
             } => {
@@ -510,6 +561,51 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
                 for (key, key_filter) in plan.into_iter() {
                     match get_log_record_schema().normalize_key(key.get_value()) {
+                        consts::BODY => {
+                            let body = state.take().unwrap_or_else(|| {
+                                if let Some(logs_batch) =
+                                    &batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
+                                {
+                                    return build_logs_body_dictionary(
+                                        logs_batch,
+                                        logs_batch.schema_ref(),
+                                    );
+                                }
+
+                                None
+                            });
+
+                            if path_length > 0 {
+                                match body {
+                                    None => {
+                                        diagnostic_receiver.add_diagnostic_if_enabled(
+                                            ColumnarEngineDiagnosticLevel::Warn,
+                                            *expression,
+                                            || "Cannot access into empty Body".into(),
+                                        );
+                                        continue;
+                                    }
+                                    Some(body) => {
+                                        // todo: nested paths should be supported on body
+                                        todo!()
+                                    }
+                                }
+                            }
+
+                            set_column_with_values(
+                                diagnostic_receiver,
+                                *expression,
+                                batches,
+                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                consts::BODY,
+                                |_| body,
+                                key_filter,
+                                &value,
+                                body_writer,
+                            );
+
+                            written_data_count += 1;
+                        }
                         consts::TIME_UNIX_NANO => {
                             if path_length > 0 {
                                 log_invalid_column_access(
@@ -764,7 +860,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     ColumnarRecordsWriteResult::PartialSuccess
                 }
             }
-            SelectionPath::Index {
+            ColumnarEngineSelectionPath::Index {
                 expression,
                 value: _,
             } => {
@@ -775,6 +871,252 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 );
                 ColumnarRecordsWriteResult::NotFound
             }
+        }
+    }
+}
+
+fn update_dictionary_values_for_path<'a>(
+    source: RecordTableDictionary,
+    key_filter: Option<RoaringBitmap>,
+    current_path: &ColumnarEngineSelectionPath<'a>,
+    remaining_path: &[ColumnarEngineSelectionPath<'a>],
+    value: Dictionary<'a>,
+) -> Dictionary<'a> {
+    let (source_keys, source_values) = source.into_parts();
+
+    let (mut source_values, source_value_lookup) =
+        Into::<DictionaryValueArray>::into(source_values).into_set();
+
+    let key_length = source_keys.len();
+
+    let mut visited_values = AHashMap::with_capacity(key_length);
+
+    let mut key_builder = DictionaryKeyArrayBuilder::<UInt16Type>::new(key_length);
+    let mut key_writer = key_builder.get_writer();
+
+    if let Some(key_filter) = key_filter {
+        todo!()
+    } else {
+        for key_index in 0..key_length {
+            let path_value = match current_path {
+                ColumnarEngineSelectionPath::Key { expression, value } => {
+                    ValueOrRef::String(value.clone())
+                }
+                ColumnarEngineSelectionPath::Index { expression, value } => {
+                    ValueOrRef::Integer(*value)
+                }
+                ColumnarEngineSelectionPath::Dictionary { expression, value } => {
+                    value.get_value(key_index)
+                }
+            };
+
+            let value_index = source_keys
+                .get_value_index_for_key_index(key_index)
+                .and_then(|v| match source_value_lookup.as_ref() {
+                    Some(l) => l.get(&v).and_then(|v| *v),
+                    None => Some(v),
+                });
+
+            if let Some(value_index) = value_index {
+                let value_index = match visited_values.entry((path_value.clone(), value_index)) {
+                    Entry::Occupied(occupied_entry) => *occupied_entry.get(),
+                    Entry::Vacant(vacant_entry) => {
+                        let source_value = &source_values[value_index];
+
+                        match path_value {
+                            ValueOrRef::String(key) => {
+                                if let ValueOrRef::Map(MapValueOrRef::Owned(map)) = source_value {
+                                    let mut map = map.deref().clone();
+                                    update_map_value_for_path(
+                                        key_index,
+                                        map.get_values_mut(),
+                                        key.get_value(),
+                                        remaining_path,
+                                        value.get_value(key_index),
+                                    );
+                                    let (index, _) = source_values.insert_full(ValueOrRef::Map(
+                                        MapValueOrRef::Owned(map.into()),
+                                    ));
+                                    vacant_entry.insert(Some(index));
+                                    Some(index)
+                                } else {
+                                    // todo log
+                                    vacant_entry.insert(Some(value_index));
+                                    Some(value_index)
+                                }
+                            }
+                            ValueOrRef::Integer(index) => {
+                                if let ValueOrRef::Array(ArrayValueOrRef::Owned(array)) =
+                                    source_value
+                                {
+                                    let mut array = array.deref().clone();
+                                    update_array_value_for_path(
+                                        key_index,
+                                        array.get_values_mut(),
+                                        index,
+                                        remaining_path,
+                                        value.get_value(key_index),
+                                    );
+                                    let (index, _) = source_values.insert_full(ValueOrRef::Array(
+                                        ArrayValueOrRef::Owned(array.into()),
+                                    ));
+                                    vacant_entry.insert(Some(index));
+                                    Some(index)
+                                } else {
+                                    // todo log
+                                    vacant_entry.insert(Some(value_index));
+                                    Some(value_index)
+                                }
+                            }
+                            v => {
+                                // todo log
+                                vacant_entry.insert(Some(value_index));
+                                Some(value_index)
+                            }
+                        }
+                    }
+                };
+
+                if let Some(value_index) = value_index {
+                    unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
+                    continue;
+                }
+            }
+
+            unsafe { key_writer.set_null_unchecked(key_index) }
+        }
+    }
+
+    Dictionary::new(key_builder.finish().into(), source_values.into())
+}
+
+fn update_map_value_for_path<'a>(
+    key_index: usize,
+    map: &mut AHashMap<Box<str>, ValueOrRef<'a>>,
+    current_key: &str,
+    remaining_path: &[ColumnarEngineSelectionPath<'a>],
+    value: ValueOrRef<'a>,
+) {
+    if let Some(current_path) = remaining_path.get(0) {
+        let path_value = match current_path {
+            ColumnarEngineSelectionPath::Key { expression, value } => {
+                ValueOrRef::String(value.clone())
+            }
+            ColumnarEngineSelectionPath::Index { expression, value } => ValueOrRef::Integer(*value),
+            ColumnarEngineSelectionPath::Dictionary { expression, value } => {
+                value.get_value(key_index)
+            }
+        };
+
+        if let Entry::Occupied(mut o) = map.entry(current_key.into()) {
+            let value_for_key = o.insert(ValueOrRef::Null);
+
+            o.insert(update_any_value_for_path(
+                key_index,
+                value_for_key,
+                path_value,
+                remaining_path,
+                value,
+            ));
+        }
+    } else {
+        match value {
+            ValueOrRef::Null => {
+                map.remove(current_key);
+            }
+            v => {
+                map.insert(current_key.into(), v);
+            }
+        }
+    }
+}
+
+fn update_array_value_for_path<'a>(
+    key_index: usize,
+    array: &mut Vec<ValueOrRef<'a>>,
+    mut current_index: i64,
+    remaining_path: &[ColumnarEngineSelectionPath<'a>],
+    value: ValueOrRef<'a>,
+) {
+    let len = array.len();
+
+    if current_index < 0 {
+        current_index += len as i64;
+    }
+    if current_index < 0 || current_index >= len as i64 {
+        // todo: Log
+        return;
+    }
+
+    if let Some(current_path) = remaining_path.get(0) {
+        let path_value = match current_path {
+            ColumnarEngineSelectionPath::Key { expression, value } => {
+                ValueOrRef::String(value.clone())
+            }
+            ColumnarEngineSelectionPath::Index { expression, value } => ValueOrRef::Integer(*value),
+            ColumnarEngineSelectionPath::Dictionary { expression, value } => {
+                value.get_value(key_index)
+            }
+        };
+
+        let value_for_index =
+            std::mem::replace(&mut array[current_index as usize], ValueOrRef::Null);
+
+        array[current_index as usize] = update_any_value_for_path(
+            key_index,
+            value_for_index,
+            path_value,
+            remaining_path,
+            value,
+        );
+    } else {
+        array[current_index as usize] = value
+    }
+}
+
+fn update_any_value_for_path<'a>(
+    key_index: usize,
+    any_value: ValueOrRef<'a>,
+    current_path: ValueOrRef<'a>,
+    remaining_path: &[ColumnarEngineSelectionPath<'a>],
+    value: ValueOrRef<'a>,
+) -> ValueOrRef<'a> {
+    match current_path {
+        ValueOrRef::String(path_key) => {
+            if let ValueOrRef::Map(MapValueOrRef::Owned(inner_map)) = any_value {
+                let mut inner_map = Rc::unwrap_or_clone(inner_map);
+                update_map_value_for_path(
+                    key_index,
+                    inner_map.get_values_mut(),
+                    path_key.get_value(),
+                    &remaining_path[1..],
+                    value,
+                );
+                ValueOrRef::Map(MapValueOrRef::Owned(inner_map.into()))
+            } else {
+                //todo: log
+                any_value
+            }
+        }
+        ValueOrRef::Integer(index) => {
+            if let ValueOrRef::Array(ArrayValueOrRef::Owned(inner_array)) = any_value {
+                let mut inner_array = Rc::unwrap_or_clone(inner_array);
+                update_array_value_for_path(
+                    key_index,
+                    inner_array.get_values_mut(),
+                    index,
+                    &remaining_path[1..],
+                    value,
+                );
+                ValueOrRef::Array(ArrayValueOrRef::Owned(inner_array.into()))
+            } else {
+                //todo: log
+                any_value
+            }
+        }
+        v => {
+            //todo: log?
+            any_value
         }
     }
 }
@@ -806,45 +1148,22 @@ fn set_column<
     value: Dictionary,
     array_transform: FTransform,
 ) where
-    FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+    FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
 {
     if let Some(logs_batch) = batches[batch_position].take() {
         let (keys, values) = value.into_parts();
 
-        let values = array_transform(keys, values);
+        let transformed_values = array_transform(keys, values);
 
-        if diagnostic_receiver.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Info) {
-            let null_count = values.null_count();
-
-            diagnostic_receiver.add_diagnostic(ColumnarEngineDiagnostic::new(
-                ColumnarEngineDiagnosticLevel::Info,
-                expression,
-                format!(
-                    "Column '{column_name}' updated [{} valid row(s), {} null row(s)]",
-                    values.len() - null_count,
-                    null_count
-                ),
-            ));
-        }
-
-        let (mut schema, mut columns, count) = logs_batch.into_parts();
-
-        let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
-
-        let field = Field::new(column_name, values.data_type().clone(), true);
-
-        if let Some((column_id, _)) = schema.column_with_name(column_name) {
-            *schema_builder.field_mut(column_id) = field.into();
-            columns[column_id] = values;
-        } else {
-            schema_builder.push(field);
-            columns.push(values);
-        }
-
-        schema = Arc::new(schema_builder.finish());
-
-        batches[batch_position] =
-            Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+        write_column_values_to_batch(
+            diagnostic_receiver,
+            expression,
+            batches,
+            batch_position,
+            column_name,
+            transformed_values,
+            logs_batch,
+        )
     }
 }
 
@@ -865,61 +1184,115 @@ fn set_column_with_values<
     values: &Dictionary,
     array_transform: FArrayTransform,
 ) where
-    FDictionaryTransform: Fn(&Arc<dyn Array>) -> RecordTableDictionary,
-    FArrayTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Arc<dyn Array>,
+    FDictionaryTransform: FnOnce(&Arc<dyn Array>) -> Option<RecordTableDictionary>,
+    FArrayTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
 {
     if let Some(logs_batch) = batches[batch_position].take() {
         let key_length = logs_batch.num_rows();
-        let (mut schema, mut columns, count) = logs_batch.into_parts();
 
-        let existing_values = if let Some((column_id, _)) = schema.column_with_name(column_name) {
-            dictionary_transform(&columns[column_id]).into()
+        let existing_values = if let Some(values) = logs_batch.column_by_name(column_name)
+            && let Some(values) = dictionary_transform(values)
+        {
+            values.into()
         } else {
             Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
         };
 
-        let merged_values = existing_values.with_values(key_filter, values);
+        let merged_values = existing_values.with_values(Some(key_filter), values);
 
         let (keys, values) = merged_values.into_parts();
 
-        let column_values = array_transform(keys, values);
+        let transformed_values = array_transform(keys, values);
 
-        if diagnostic_receiver.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Info) {
-            let null_count = column_values.null_count();
-
-            diagnostic_receiver.add_diagnostic(ColumnarEngineDiagnostic::new(
-                ColumnarEngineDiagnosticLevel::Info,
-                expression,
-                format!(
-                    "Column '{column_name}' updated [{} valid row(s), {} null row(s)]",
-                    column_values.len() - null_count,
-                    null_count
-                ),
-            ));
-        }
-
-        let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
-
-        let field = Field::new(column_name, column_values.data_type().clone(), true);
-
-        if let Some((column_id, _)) = schema.column_with_name(column_name) {
-            *schema_builder.field_mut(column_id) = field.into();
-            columns[column_id] = column_values;
-        } else {
-            schema_builder.push(field);
-            columns.push(column_values);
-        }
-
-        schema = Arc::new(schema_builder.finish());
-
-        batches[batch_position] =
-            Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+        write_column_values_to_batch(
+            diagnostic_receiver,
+            expression,
+            batches,
+            batch_position,
+            column_name,
+            transformed_values,
+            logs_batch,
+        );
     }
 }
 
-fn adaptive_dictionary_reader<V: Array + 'static>(array: &Arc<dyn Array>) -> RecordTableDictionary {
-    println!("d: {}", array.data_type());
-    match array.data_type() {
+fn write_column_values_to_batch<
+    'a,
+    TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>,
+    const BATCH_SIZE: usize,
+>(
+    diagnostic_receiver: &TDiagnosticReceiver,
+    expression: &'a dyn Expression,
+    batches: &mut [Option<RecordBatch>; BATCH_SIZE],
+    batch_position: usize,
+    column_name: &str,
+    transformed_values: Option<Arc<dyn Array>>,
+    batch: RecordBatch,
+) {
+    let values = match transformed_values {
+        None => {
+            if let Some((column_id, _)) = batch.schema_ref().column_with_name(column_name) {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Info,
+                    expression,
+                    || format!("Column '{column_name}' removed",),
+                );
+
+                let (mut schema, mut columns, count) = batch.into_parts();
+
+                let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
+
+                schema_builder.remove(column_id);
+                columns.remove(column_id);
+
+                schema = Arc::new(schema_builder.finish());
+
+                batches[batch_position] =
+                    Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+            }
+
+            return;
+        }
+        Some(values) => values,
+    };
+
+    if diagnostic_receiver.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Info) {
+        let null_count = values.null_count();
+
+        diagnostic_receiver.add_diagnostic(ColumnarEngineDiagnostic::new(
+            ColumnarEngineDiagnosticLevel::Info,
+            expression,
+            format!(
+                "Column '{column_name}' updated [{} valid row(s), {} null row(s)]",
+                values.len() - null_count,
+                null_count
+            ),
+        ));
+    }
+
+    let (mut schema, mut columns, count) = batch.into_parts();
+
+    let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
+
+    let field = Field::new(column_name, values.data_type().clone(), true);
+
+    if let Some((column_id, _)) = schema.column_with_name(column_name) {
+        *schema_builder.field_mut(column_id) = field.into();
+        columns[column_id] = values;
+    } else {
+        schema_builder.push(field);
+        columns.push(values);
+    }
+
+    schema = Arc::new(schema_builder.finish());
+
+    batches[batch_position] = Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+}
+
+fn adaptive_dictionary_reader<V: Array + 'static>(
+    array: &Arc<dyn Array>,
+) -> Option<RecordTableDictionary> {
+    Some(match array.data_type() {
         DataType::Dictionary(d, _) => match d.as_ref() {
             DataType::UInt8 => array
                 .as_dictionary::<UInt8Type>()
@@ -934,24 +1307,28 @@ fn adaptive_dictionary_reader<V: Array + 'static>(array: &Arc<dyn Array>) -> Rec
             d => panic!("array values with '{d}' keys are not supported"),
         },
         d => panic!("array values with '{d}' keys are not supported"),
-    }
+    })
 }
 
-fn primitive_array_reader<T: ArrowPrimitiveType>(array: &Arc<dyn Array>) -> RecordTableDictionary {
-    RecordTableDictionary::from_array::<UInt16Type, _>(array.as_primitive::<T>())
+fn primitive_array_reader<T: ArrowPrimitiveType>(
+    array: &Arc<dyn Array>,
+) -> Option<RecordTableDictionary> {
+    Some(RecordTableDictionary::from_array::<UInt16Type, _>(
+        array.as_primitive::<T>(),
+    ))
 }
 
 fn adaptive_dictionary_writer<'a, T: Array + 'static, FTransform>(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray<'a>,
     transform: FTransform,
-) -> Arc<dyn Array>
+) -> Option<Arc<dyn Array>>
 where
     FTransform: Fn(DictionaryValueArray<'a>) -> (T, Option<AHashMap<usize, Option<usize>>>),
 {
     let (transformed_values, lookup) = transform(values);
 
-    match transformed_values.len() {
+    Some(match transformed_values.len() {
         v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
             keys.transform_into_key_array(lookup),
             Arc::new(transformed_values),
@@ -960,14 +1337,14 @@ where
             keys.transform_into_key_array(lookup),
             Arc::new(transformed_values),
         )),
-    }
+    })
 }
 
 fn primitive_array_writer<'a, T: ArrowPrimitiveType, FTransform>(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray<'a>,
     transform: FTransform,
-) -> Arc<dyn Array>
+) -> Option<Arc<dyn Array>>
 where
     T::Native: Hash + Eq + TryFrom<i64>,
     PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
@@ -979,7 +1356,7 @@ where
     let key_length = keys.len();
 
     if transformed_values.len() == key_length {
-        return Arc::new(transformed_values);
+        return Some(Arc::new(transformed_values));
     }
 
     let mut builder = PrimitiveBuilder::<T>::with_capacity(key_length);
@@ -1002,8 +1379,58 @@ where
         builder.append_null();
     }
 
-    Arc::new(builder.finish())
+    Some(Arc::new(builder.finish()))
 }
+
+fn body_writer(
+    keys: DictionaryKeyArray,
+    values: DictionaryValueArray<'_>,
+) -> Option<Arc<dyn Array>> {
+    let mut builder = LogsBodyBuilder::new();
+
+    for key_index in 0..keys.len() {
+        match keys
+            .get_value_index_for_key_index(key_index)
+            .map(|value_index| values.get_value_at(value_index))
+            .unwrap_or(ValueOrRef::Null)
+        {
+            ValueOrRef::Null => builder.append_null(),
+            ValueOrRef::Boolean(b) => builder.append_bool(b),
+            ValueOrRef::Double(d) => builder.append_double(d),
+            ValueOrRef::Integer(i) => builder.append_int(i),
+            ValueOrRef::String(s) => builder.append_str(s.get_value().as_bytes()),
+            ValueOrRef::DateTime(d) => match Value::DateTime(&d).convert_to_integer() {
+                Some(v) => builder.append_int(v),
+                None => builder.append_null(),
+            },
+            ValueOrRef::TimeSpan(t) => match Value::TimeSpan(&t).convert_to_integer() {
+                Some(v) => builder.append_int(v),
+                None => builder.append_null(),
+            },
+            ValueOrRef::Regex(r) => builder.append_str(r.get_value().as_str().as_bytes()),
+            ValueOrRef::Array(a) => match a {
+                ArrayValueOrRef::Buffer(BufferArray::U8(values)) => {
+                    builder.append_bytes(values.get_buffer().as_slice())
+                }
+                a => match crate::serialization::to_slice(ValueOrRef::Array(a)) {
+                    Ok(v) => builder.append_slice(&v),
+                    Err(_) => builder.append_null(),
+                },
+            },
+            ValueOrRef::Map(m) => match crate::serialization::to_slice(ValueOrRef::Map(m)) {
+                Ok(v) => builder.append_map(&v),
+                Err(_) => builder.append_null(),
+            },
+        }
+    }
+
+    match builder.finish() {
+        Some(Ok(v)) => Some(Arc::new(v)),
+        _ => None,
+    }
+}
+
+type OtapBody = OnceCell<Option<RecordTableDictionary>>;
 
 #[derive(Debug)]
 pub struct OtapLogRecordBatch<'record> {
@@ -1013,7 +1440,7 @@ pub struct OtapLogRecordBatch<'record> {
     attributes: Option<OtapAttributes<'record>>,
     resource: Option<OtapResource<'record>>,
     scope: Option<OtapScope<'record>>,
-    body: OnceCell<Option<RecordTableDictionary>>,
+    body: OtapBody,
 }
 
 impl<'record> OtapLogRecordBatch<'record> {
@@ -1050,6 +1477,8 @@ impl<'record> OtapLogRecordBatch<'record> {
 }
 
 impl ColumnarRecords for OtapLogRecordBatch<'_> {
+    type RecordState = OtapBody;
+
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         self.diagnostic_level
     }
@@ -1072,6 +1501,10 @@ impl ColumnarRecords for OtapLogRecordBatch<'_> {
             | "instrumentationScope" => self.scope.as_ref().map(|v| v as &dyn RecordTable),
             _ => None,
         }
+    }
+
+    fn into_parts(self) -> OtapBody {
+        self.body
     }
 }
 
@@ -1119,13 +1552,10 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                 {
                     adaptive_dictionary_reader::<StringArray>(logs.column(severity_text_column.0))
                 }
-                consts::BODY
-                    if let Some(body) = self
-                        .body
-                        .get_or_init(|| build_logs_body_dictionary(logs, logs_schema)) =>
-                {
-                    body.clone()
-                }
+                consts::BODY => self
+                    .body
+                    .get_or_init(|| build_logs_body_dictionary(logs, logs_schema))
+                    .clone(),
                 consts::TRACE_ID
                     if let Some(trace_id_column) =
                         logs_schema.column_with_name(consts::TRACE_ID) =>
@@ -1155,7 +1585,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
                 _ => return None,
             };
 
-            return Some(RecordTableValue::Dictionary(values));
+            return values.map(RecordTableValue::Dictionary);
         }
 
         None
@@ -1224,7 +1654,7 @@ impl RecordTable for OtapScope<'_> {
             _ => return None,
         };
 
-        Some(RecordTableValue::Dictionary(values))
+        values.map(RecordTableValue::Dictionary)
     }
 }
 
@@ -1602,221 +2032,227 @@ fn build_logs_body_dictionary(
     if let Some(body_column) = logs_schema.column_with_name(consts::BODY) {
         let body_struct = logs.column(body_column.0).as_struct();
 
-        if let Some(body_type) = body_struct.column_by_name("type") {
-            let body_types = body_type.as_primitive::<UInt8Type>();
+        build_logs_body_dictionary_from_struct(body_struct)
+    } else {
+        None
+    }
+}
 
-            let record_count = body_types.len();
+fn build_logs_body_dictionary_from_struct(
+    body_struct: &StructArray,
+) -> Option<RecordTableDictionary> {
+    if let Some(body_type) = body_struct.column_by_name("type") {
+        let body_types = body_type.as_primitive::<UInt8Type>();
 
-            let mut key_builder = DictionaryKeyArrayBuilder::<UInt16Type>::new(2 * record_count);
-            let mut key_writer = key_builder.get_writer();
+        let record_count = body_types.len();
 
-            let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
-            let mut values = Vec::with_capacity(record_count);
+        let mut key_builder = DictionaryKeyArrayBuilder::<UInt16Type>::new(record_count);
+        let mut key_writer = key_builder.get_writer();
 
-            let body_strings = OnceCell::new();
-            let body_ints = OnceCell::new();
-            let body_doubles = OnceCell::new();
-            let body_bools = OnceCell::new();
-            let body_bytes = OnceCell::new();
-            let body_ser = OnceCell::new();
+        let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
+        let mut values = Vec::with_capacity(record_count);
 
-            for (key_index, body_type) in body_types.values().iter().enumerate() {
-                match *body_type {
-                    /*
-                    pub enum AttributeValueType {
-                        Empty = 0,
-                        Str = 1,
-                        Int = 2,
-                        Double = 3,
-                        Bool = 4,
-                        Map = 5,
-                        Slice = 6,
-                        Bytes = 7,
-                    }
-                    */
-                    0 => {}
-                    1 => {
-                        if let Some(body_strings) = body_strings.get_or_init(|| {
-                            body_struct.column_by_name("str").map(|v| {
-                                v.as_dictionary::<UInt16Type>()
-                                    .downcast_dict::<StringArray>()
-                                    .expect("body string values were an unexpected type")
-                            })
-                        }) {
-                            let value_index = body_strings.keys().value(key_index) as usize;
+        let body_strings = OnceCell::new();
+        let body_ints = OnceCell::new();
+        let body_doubles = OnceCell::new();
+        let body_bools = OnceCell::new();
+        let body_bytes = OnceCell::new();
+        let body_ser = OnceCell::new();
 
-                            let lookup_key = (1 << 16) | value_index;
-                            let index = match value_lookup.entry(lookup_key) {
-                                Entry::Occupied(occupied) => occupied.into_mut(),
-                                Entry::Vacant(vacant) => {
-                                    let index = values.len();
-                                    values.push(ValueOrRef::String(StringValueOrRef::Buffer({
-                                        let strings = body_strings.values();
-                                        let offsets = strings.value_offsets();
-                                        let end =
-                                            unsafe { *offsets.get_unchecked(index + 1) } as usize;
-                                        let start =
-                                            unsafe { *offsets.get_unchecked(index) } as usize;
-                                        strings.values().slice_with_length(start, end - start)
-                                    })));
-                                    vacant.insert(index as u16)
-                                }
-                            };
-                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
-                            continue;
-                        }
-                    }
-                    2 => {
-                        if let Some(body_ints) = body_ints.get_or_init(|| {
-                            body_struct.column_by_name("int").map(|v| {
-                                v.as_dictionary::<UInt16Type>()
-                                    .downcast_dict::<Int64Array>()
-                                    .expect("body int values were an unexpected type")
-                            })
-                        }) {
-                            let value_index = body_ints.keys().value(key_index) as usize;
-
-                            let lookup_key = (2 << 16) | value_index;
-                            let index = match value_lookup.entry(lookup_key) {
-                                Entry::Occupied(occupied) => occupied.into_mut(),
-                                Entry::Vacant(vacant) => {
-                                    let index = values.len();
-                                    values.push(ValueOrRef::Integer(
-                                        body_ints.values().value(value_index),
-                                    ));
-                                    vacant.insert(index as u16)
-                                }
-                            };
-                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
-                            continue;
-                        }
-                    }
-                    3 => {
-                        if let Some(body_doubles) = body_doubles.get_or_init(|| {
-                            body_struct
-                                .column_by_name("double")
-                                .map(|v| v.as_primitive::<Float64Type>())
-                        }) {
-                            let index = values.len() as u16;
-                            values.push(ValueOrRef::Double(body_doubles.value(key_index)));
-
-                            unsafe { key_writer.set_value_index_typed(key_index, index) };
-                            continue;
-                        }
-                    }
-                    4 => {
-                        if let Some(body_bools) = body_bools.get_or_init(|| {
-                            body_struct.column_by_name("bool").map(|v| v.as_boolean())
-                        }) {
-                            let index = values.len() as u16;
-                            values.push(ValueOrRef::Boolean(body_bools.value(key_index)));
-
-                            unsafe { key_writer.set_value_index_typed(key_index, index) };
-                            continue;
-                        }
-                    }
-                    5 => {
-                        if let Some(body_ser) = body_ser.get_or_init(|| {
-                            body_struct.column_by_name("ser").map(|v| {
-                                v.as_dictionary::<UInt16Type>()
-                                    .downcast_dict::<BinaryArray>()
-                                    .expect("body ser values were an unexpected type")
-                            })
-                        }) {
-                            let value_index = body_ser.keys().value(key_index) as usize;
-
-                            let lookup_key = (5 << 16) | value_index;
-                            let index = match value_lookup.entry(lookup_key) {
-                                Entry::Occupied(occupied) => occupied.into_mut(),
-                                Entry::Vacant(vacant) => {
-                                    let index = values.len();
-                                    values.push(
-                                        crate::serialization::from_slice(
-                                            body_ser.values().value(value_index),
-                                        )
-                                        .unwrap_or(ValueOrRef::Null),
-                                    );
-                                    vacant.insert(index as u16)
-                                }
-                            };
-                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
-                            continue;
-                        }
-                    }
-                    6 => {
-                        if let Some(body_ser) = body_ser.get_or_init(|| {
-                            body_struct.column_by_name("ser").map(|v| {
-                                v.as_dictionary::<UInt16Type>()
-                                    .downcast_dict::<BinaryArray>()
-                                    .expect("body ser values were an unexpected type")
-                            })
-                        }) {
-                            let value_index = body_ser.keys().value(key_index) as usize;
-
-                            let lookup_key = (6 << 16) | value_index;
-                            let index = match value_lookup.entry(lookup_key) {
-                                Entry::Occupied(occupied) => occupied.into_mut(),
-                                Entry::Vacant(vacant) => {
-                                    let index = values.len();
-                                    values.push(
-                                        crate::serialization::from_slice(
-                                            body_ser.values().value(value_index),
-                                        )
-                                        .unwrap_or(ValueOrRef::Null),
-                                    );
-                                    vacant.insert(index as u16)
-                                }
-                            };
-                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
-                            continue;
-                        }
-                    }
-                    7 => {
-                        if let Some(body_bytes) = body_bytes.get_or_init(|| {
-                            body_struct.column_by_name("bytes").map(|v| {
-                                v.as_dictionary::<UInt16Type>()
-                                    .downcast_dict::<BinaryArray>()
-                                    .expect("body byte values were an unexpected type")
-                            })
-                        }) {
-                            let value_index = body_bytes.keys().value(key_index) as usize;
-
-                            let lookup_key = (7 << 16) | value_index;
-                            let index = match value_lookup.entry(lookup_key) {
-                                Entry::Occupied(occupied) => occupied.into_mut(),
-                                Entry::Vacant(vacant) => {
-                                    let index = values.len();
-                                    values.push(ValueOrRef::Array(ArrayValueOrRef::Buffer({
-                                        let bytes = body_bytes.values();
-                                        let offsets = bytes.value_offsets();
-                                        let start =
-                                            unsafe { *offsets.get_unchecked(index) } as usize;
-                                        let end =
-                                            unsafe { *offsets.get_unchecked(index + 1) } as usize;
-                                        let buffer = bytes
-                                            .values()
-                                            .slice_with_length(start, end - start)
-                                            .clone();
-                                        BufferArray::new_u8(buffer)
-                                    })));
-                                    vacant.insert(index as u16)
-                                }
-                            };
-                            unsafe { key_writer.set_value_index_typed(key_index, *index) };
-                            continue;
-                        }
-                    }
-                    d => todo!("Body type '{d}' is not supported"),
+        for (key_index, body_type) in body_types.values().iter().enumerate() {
+            match *body_type {
+                /*
+                pub enum AttributeValueType {
+                    Empty = 0,
+                    Str = 1,
+                    Int = 2,
+                    Double = 3,
+                    Bool = 4,
+                    Map = 5,
+                    Slice = 6,
+                    Bytes = 7,
                 }
+                */
+                0 => {}
+                1 => {
+                    if let Some(body_strings) = body_strings.get_or_init(|| {
+                        body_struct.column_by_name("str").map(|v| {
+                            v.as_dictionary::<UInt16Type>()
+                                .downcast_dict::<StringArray>()
+                                .expect("body string values were an unexpected type")
+                        })
+                    }) {
+                        let value_index = body_strings.keys().value(key_index) as usize;
 
-                unsafe { key_writer.set_null(key_index) };
+                        let lookup_key = (1 << 16) | value_index;
+                        let index = match value_lookup.entry(lookup_key) {
+                            Entry::Occupied(occupied) => occupied.into_mut(),
+                            Entry::Vacant(vacant) => {
+                                let index = values.len();
+                                values.push(ValueOrRef::String(StringValueOrRef::Buffer({
+                                    let strings = body_strings.values();
+                                    let offsets = strings.value_offsets();
+                                    let end =
+                                        unsafe { *offsets.get_unchecked(value_index + 1) } as usize;
+                                    let start =
+                                        unsafe { *offsets.get_unchecked(value_index) } as usize;
+                                    strings.values().slice_with_length(start, end - start)
+                                })));
+                                vacant.insert(index as u16)
+                            }
+                        };
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, *index) };
+                        continue;
+                    }
+                }
+                2 => {
+                    if let Some(body_ints) = body_ints.get_or_init(|| {
+                        body_struct.column_by_name("int").map(|v| {
+                            v.as_dictionary::<UInt16Type>()
+                                .downcast_dict::<Int64Array>()
+                                .expect("body int values were an unexpected type")
+                        })
+                    }) {
+                        let value_index = body_ints.keys().value(key_index) as usize;
+
+                        let lookup_key = (2 << 16) | value_index;
+                        let index = match value_lookup.entry(lookup_key) {
+                            Entry::Occupied(occupied) => occupied.into_mut(),
+                            Entry::Vacant(vacant) => {
+                                let index = values.len();
+                                values.push(ValueOrRef::Integer(
+                                    body_ints.values().value(value_index),
+                                ));
+                                vacant.insert(index as u16)
+                            }
+                        };
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, *index) };
+                        continue;
+                    }
+                }
+                3 => {
+                    if let Some(body_doubles) = body_doubles.get_or_init(|| {
+                        body_struct
+                            .column_by_name("double")
+                            .map(|v| v.as_primitive::<Float64Type>())
+                    }) {
+                        let index = values.len() as u16;
+                        values.push(ValueOrRef::Double(body_doubles.value(key_index)));
+
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, index) };
+                        continue;
+                    }
+                }
+                4 => {
+                    if let Some(body_bools) = body_bools
+                        .get_or_init(|| body_struct.column_by_name("bool").map(|v| v.as_boolean()))
+                    {
+                        let index = values.len() as u16;
+                        values.push(ValueOrRef::Boolean(body_bools.value(key_index)));
+
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, index) };
+                        continue;
+                    }
+                }
+                5 => {
+                    if let Some(body_ser) = body_ser.get_or_init(|| {
+                        body_struct.column_by_name("ser").map(|v| {
+                            v.as_dictionary::<UInt16Type>()
+                                .downcast_dict::<BinaryArray>()
+                                .expect("body ser values were an unexpected type")
+                        })
+                    }) {
+                        let value_index = body_ser.keys().value(key_index) as usize;
+
+                        let lookup_key = (5 << 16) | value_index;
+                        let index = match value_lookup.entry(lookup_key) {
+                            Entry::Occupied(occupied) => occupied.into_mut(),
+                            Entry::Vacant(vacant) => {
+                                let index = values.len();
+                                values.push(
+                                    crate::serialization::from_slice(
+                                        body_ser.values().value(value_index),
+                                    )
+                                    .unwrap_or(ValueOrRef::Null),
+                                );
+                                vacant.insert(index as u16)
+                            }
+                        };
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, *index) };
+                        continue;
+                    }
+                }
+                6 => {
+                    if let Some(body_ser) = body_ser.get_or_init(|| {
+                        body_struct.column_by_name("ser").map(|v| {
+                            v.as_dictionary::<UInt16Type>()
+                                .downcast_dict::<BinaryArray>()
+                                .expect("body ser values were an unexpected type")
+                        })
+                    }) {
+                        let value_index = body_ser.keys().value(key_index) as usize;
+
+                        let lookup_key = (6 << 16) | value_index;
+                        let index = match value_lookup.entry(lookup_key) {
+                            Entry::Occupied(occupied) => occupied.into_mut(),
+                            Entry::Vacant(vacant) => {
+                                let index = values.len();
+                                values.push(
+                                    crate::serialization::from_slice(
+                                        body_ser.values().value(value_index),
+                                    )
+                                    .unwrap_or(ValueOrRef::Null),
+                                );
+                                vacant.insert(index as u16)
+                            }
+                        };
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, *index) };
+                        continue;
+                    }
+                }
+                7 => {
+                    if let Some(body_bytes) = body_bytes.get_or_init(|| {
+                        body_struct.column_by_name("bytes").map(|v| {
+                            v.as_dictionary::<UInt16Type>()
+                                .downcast_dict::<BinaryArray>()
+                                .expect("body byte values were an unexpected type")
+                        })
+                    }) {
+                        let value_index = body_bytes.keys().value(key_index) as usize;
+
+                        let lookup_key = (7 << 16) | value_index;
+                        let index = match value_lookup.entry(lookup_key) {
+                            Entry::Occupied(occupied) => occupied.into_mut(),
+                            Entry::Vacant(vacant) => {
+                                let index = values.len();
+                                values.push(ValueOrRef::Array(ArrayValueOrRef::Buffer({
+                                    let bytes = body_bytes.values();
+                                    let offsets = bytes.value_offsets();
+                                    let start = unsafe { *offsets.get_unchecked(index) } as usize;
+                                    let end = unsafe { *offsets.get_unchecked(index + 1) } as usize;
+                                    let buffer = bytes
+                                        .values()
+                                        .slice_with_length(start, end - start)
+                                        .clone();
+                                    BufferArray::new_u8(buffer)
+                                })));
+                                vacant.insert(index as u16)
+                            }
+                        };
+                        unsafe { key_writer.set_value_index_typed_unchecked(key_index, *index) };
+                        continue;
+                    }
+                }
+                d => todo!("Body type '{d}' is not supported"),
             }
 
-            return Some(RecordTableDictionary::new(
-                key_builder.finish().into(),
-                RecordTableDictionaryValueArray::Vec(values.into()),
-            ));
+            unsafe { key_writer.set_null_unchecked(key_index) };
         }
+
+        return Some(RecordTableDictionary::new(
+            key_builder.finish().into(),
+            RecordTableDictionaryValueArray::Vec(values.into()),
+        ));
     }
 
     None

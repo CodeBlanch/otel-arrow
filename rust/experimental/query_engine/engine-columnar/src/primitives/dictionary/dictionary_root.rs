@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    collections::hash_map::Entry,
     fmt::{Display, Write},
     rc::Rc,
 };
 
+use ahash::AHashMap;
 use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
 use roaring::RoaringBitmap;
@@ -128,7 +130,11 @@ impl<'a> Dictionary<'a> {
         ValueOrRef::Null
     }
 
-    pub fn with_values(self, key_filter: RoaringBitmap, values: &Dictionary<'a>) -> Dictionary<'a> {
+    pub fn with_values(
+        self,
+        key_filter: Option<RoaringBitmap>,
+        values: &Dictionary<'a>,
+    ) -> Dictionary<'a> {
         let (source_keys, source_values) = self.into_parts();
 
         match source_keys.data_type() {
@@ -222,45 +228,73 @@ impl From<RecordTableDictionaryValueArray> for DictionaryValueArray<'static> {
 fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
     source_keys: DictionaryKeyArray,
     source_values: DictionaryValueArray<'a>,
-    key_filter: RoaringBitmap,
+    key_filter: Option<RoaringBitmap>,
     values: &Dictionary<'a>,
 ) -> Dictionary<'a> {
-    let (mut source_key_builder, mut source_values) = match source_values {
-        DictionaryValueArray::Set(s) => (
-            source_keys.transform_into_key_builder::<K>(None),
-            Rc::unwrap_or_clone(s),
-        ),
-        v => {
-            let (values, lookup) = v.transform_into_set(&mut |v| {
-                if matches!(v, ValueOrRef::Null) {
-                    None
-                } else {
-                    Some(v)
-                }
-            });
+    let (mut source_values, lookup) = source_values.into_set();
+    let mut source_key_builder = source_keys.transform_into_key_builder::<K>(lookup);
 
-            (source_keys.transform_into_key_builder(Some(lookup)), values)
-        }
-    };
-
+    let key_length = source_key_builder.get_key_length();
     let mut source_key_writer = source_key_builder.get_writer();
+    let mut visited_values = AHashMap::with_capacity(source_values.len());
 
-    for key_index in key_filter {
-        let key_index = key_index as usize;
-
-        let value = values.get_value(key_index);
-
-        if matches!(value, ValueOrRef::Null) {
-            unsafe { source_key_writer.set_null(key_index) }
-        } else {
-            let (value_index, _) = source_values.insert_full(value);
-
-            unsafe {
-                source_key_writer.set_value_index(key_index, value_index);
-                source_key_writer.set_nonnull(key_index);
+    match key_filter {
+        None => {
+            for key_index in 0..key_length {
+                write_value(
+                    values,
+                    &mut source_values,
+                    &mut source_key_writer,
+                    &mut visited_values,
+                    key_index,
+                );
+            }
+        }
+        Some(key_filter) => {
+            for key_index in key_filter {
+                write_value(
+                    values,
+                    &mut source_values,
+                    &mut source_key_writer,
+                    &mut visited_values,
+                    key_index as usize,
+                );
             }
         }
     }
 
     Dictionary::new(source_key_builder.finish().into(), source_values.into())
+}
+
+fn write_value<'a, K: ArrowDictionaryKeyType>(
+    values: &Dictionary<'a>,
+    source_values: &mut ValueOrRefSet<'a>,
+    source_key_writer: &mut DictionaryKeyArrayWriter<'_, K>,
+    visited_values: &mut AHashMap<usize, Option<usize>>,
+    key_index: usize,
+) {
+    let value_index =
+        match visited_values.entry(values.get_value_index(key_index).unwrap_or(usize::MAX)) {
+            Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+            Entry::Vacant(vacant_entry) => {
+                let value = values.values().get_value_at(*vacant_entry.key());
+
+                let value_index = if matches!(value, ValueOrRef::Null) {
+                    None
+                } else {
+                    let (value_index, _) = source_values.insert_full(value);
+                    Some(value_index)
+                };
+
+                vacant_entry.insert(value_index)
+            }
+        };
+
+    match value_index {
+        None => unsafe { source_key_writer.set_null_unchecked(key_index) },
+        Some(value_index) => unsafe {
+            source_key_writer.set_value_index_unchecked(key_index, *value_index);
+            source_key_writer.set_nonnull_unchecked(key_index);
+        },
+    }
 }

@@ -365,7 +365,7 @@ where
         if let Some(value_index) = value_index.map(<K as ArrowPrimitiveType>::Native::as_usize)
             && let Some(Some(transformed_value_index)) = value_index_lookup.get(&value_index)
         {
-            unsafe { key_writer.set_value_index(key_index, *transformed_value_index) };
+            unsafe { key_writer.set_value_index_unchecked(key_index, *transformed_value_index) };
             continue;
         }
 
@@ -391,11 +391,11 @@ where
         };
 
         if has_value_index {
-            unsafe { key_writer.set_value_index_typed(key_index, value_index) };
+            unsafe { key_writer.set_value_index_typed_unchecked(key_index, value_index) };
             continue;
         }
 
-        unsafe { key_writer.set_null(key_index) };
+        unsafe { key_writer.set_null_unchecked(key_index) };
     }
 
     Dictionary::new(key_builder.finish().into(), transformed_values.into())
@@ -422,7 +422,7 @@ where
 
     for key_index in 0..key_length {
         if let Some(Some(transformed_value_index)) = value_index_lookup.get(&key_index) {
-            unsafe { key_writer.set_value_index(key_index, *transformed_value_index) };
+            unsafe { key_writer.set_value_index_unchecked(key_index, *transformed_value_index) };
             continue;
         }
 
@@ -448,11 +448,11 @@ where
         };
 
         if has_value_index {
-            unsafe { key_writer.set_value_index_typed(key_index, value_index) };
+            unsafe { key_writer.set_value_index_typed_unchecked(key_index, value_index) };
             continue;
         }
 
-        unsafe { key_writer.set_null(key_index) };
+        unsafe { key_writer.set_null_unchecked(key_index) };
     }
 
     Dictionary::new(key_builder.finish().into(), transformed_values.into())

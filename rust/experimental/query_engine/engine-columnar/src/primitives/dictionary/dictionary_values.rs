@@ -53,7 +53,35 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub(crate) fn transform_into_set<T: Hash + Eq, FTransform>(
+    pub fn into_set(self) -> (ValueOrRefSet<'a>, Option<AHashMap<usize, Option<usize>>>) {
+        let t = &mut |v| {
+            if matches!(v, ValueOrRef::Null) {
+                None
+            } else {
+                Some(v)
+            }
+        };
+
+        let (set, lookup) = match self {
+            DictionaryValueArray::Array(a) => transform_array_into_set(t, a),
+            DictionaryValueArray::Vec(a) => {
+                transform_iter_into_set(t, a.len(), Rc::unwrap_or_clone(a).into_iter().enumerate())
+            }
+            DictionaryValueArray::Set(a) => {
+                return (Rc::unwrap_or_clone(a), None);
+            }
+            DictionaryValueArray::Boolean => {
+                let mut set = ValueOrRefSet::with_capacity_and_hasher(2, RandomState::new());
+                set.insert(ValueOrRef::Boolean(false));
+                set.insert(ValueOrRef::Boolean(true));
+                return (set, None);
+            }
+        };
+
+        (set, Some(lookup))
+    }
+
+    pub fn transform_into_set<T: Hash + Eq, FTransform>(
         self,
         transform: &mut FTransform,
     ) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
@@ -82,10 +110,7 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub(crate) fn transform_into_vec<T, FTransform>(
-        self,
-        mut transform: &mut FTransform,
-    ) -> Vec<Option<T>>
+    pub fn transform_into_vec<T, FTransform>(self, mut transform: &mut FTransform) -> Vec<Option<T>>
     where
         FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
     {

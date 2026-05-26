@@ -28,9 +28,10 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
     fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
         diagnostic_receiver: &T,
+        state: <Self::Records<'_> as ColumnarRecords>::RecordState,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-        root: &SelectionPath<'a>,
-        path: &[SelectionPath<'a>],
+        root: &ColumnarEngineSelectionPath<'a>,
+        path: &[ColumnarEngineSelectionPath<'a>],
         value: Dictionary,
     ) -> ColumnarRecordsWriteResult;
 }
@@ -41,14 +42,14 @@ pub enum ColumnarRecordsWriteResult {
     NotFound,
 }
 
-pub enum SelectionPath<'a> {
+pub enum ColumnarEngineSelectionPath<'a> {
     Key {
         expression: &'a dyn Expression,
         value: StringValueOrRef<'a>,
     },
     Index {
         expression: &'a dyn Expression,
-        value: ArrayValueOrRef<'a>,
+        value: i64,
     },
     Dictionary {
         expression: &'a dyn Expression,
@@ -60,6 +61,8 @@ pub trait ColumnarRecords: RecordTable
 where
     Self: Sized,
 {
+    type RecordState: 'static;
+
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel>;
 
     fn get_key_data_type(&self) -> DataType;
@@ -71,6 +74,8 @@ where
     }
 
     fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable>;
+
+    fn into_parts(self) -> Self::RecordState;
 }
 
 pub trait RecordTable: Display + Debug {

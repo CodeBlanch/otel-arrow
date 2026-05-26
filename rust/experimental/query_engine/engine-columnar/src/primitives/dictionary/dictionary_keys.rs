@@ -196,16 +196,23 @@ impl DictionaryKeyArray {
                     if let Some(v) = v {
                         if v {
                             if let Some(true_value_index) = true_value_index {
-                                unsafe { writer.set_value_index_typed(key_index, true_value_index) }
+                                unsafe {
+                                    writer.set_value_index_typed_unchecked(
+                                        key_index,
+                                        true_value_index,
+                                    )
+                                }
                                 continue;
                             }
                         } else if let Some(false_value_index) = false_value_index {
-                            unsafe { writer.set_value_index_typed(key_index, false_value_index) }
+                            unsafe {
+                                writer.set_value_index_typed_unchecked(key_index, false_value_index)
+                            }
                             continue;
                         }
                     }
 
-                    unsafe { writer.set_null(key_index) }
+                    unsafe { writer.set_null_unchecked(key_index) }
                 }
 
                 builder
@@ -226,9 +233,9 @@ impl DictionaryKeyArray {
                     };
 
                     if let Some(value_index) = transformed_value_index {
-                        unsafe { writer.set_value_index(key_index, value_index) };
+                        unsafe { writer.set_value_index_unchecked(key_index, value_index) };
                     } else {
-                        unsafe { writer.set_null(key_index) };
+                        unsafe { writer.set_null_unchecked(key_index) };
                     }
                 }
 
@@ -259,7 +266,10 @@ impl DictionaryKeyArray {
                     if let Some(transformed_value_index) = transformed_value_index {
                         for key_index in 0..length {
                             unsafe {
-                                writer.set_value_index_typed(key_index, transformed_value_index)
+                                writer.set_value_index_typed_unchecked(
+                                    key_index,
+                                    transformed_value_index,
+                                )
                             };
                         }
                         return builder;
@@ -297,13 +307,13 @@ fn transform_key_array_into_key_builder<
 
             if let Some(transformed_value_index) = transformed_value_index {
                 unsafe {
-                    writer.set_value_index(key_index, transformed_value_index);
+                    writer.set_value_index_unchecked(key_index, transformed_value_index);
                 };
                 continue;
             }
         }
 
-        unsafe { writer.set_null(key_index) };
+        unsafe { writer.set_null_unchecked(key_index) };
     }
 
     builder
@@ -427,6 +437,10 @@ impl<K: ArrowDictionaryKeyType> DictionaryKeyArrayBuilder<K> {
         }
     }
 
+    pub fn get_key_length(&self) -> usize {
+        self.key_length
+    }
+
     pub fn get_writer(&mut self) -> DictionaryKeyArrayWriter<'_, K> {
         DictionaryKeyArrayWriter {
             key_bit_length: self.key_bit_length,
@@ -451,7 +465,10 @@ pub struct DictionaryKeyArrayWriter<'a, K: ArrowDictionaryKeyType> {
 }
 
 impl<'a, K: ArrowDictionaryKeyType> DictionaryKeyArrayWriter<'a, K> {
-    pub unsafe fn set_value_index(&mut self, key_index: usize, value_index: usize) {
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
+    pub unsafe fn set_value_index_unchecked(&mut self, key_index: usize, value_index: usize) {
         unsafe {
             *self.key_builder.as_mut_ptr().add(key_index) =
                 <K as ArrowPrimitiveType>::Native::from_usize(value_index)
@@ -459,15 +476,28 @@ impl<'a, K: ArrowDictionaryKeyType> DictionaryKeyArrayWriter<'a, K> {
         }
     }
 
-    pub unsafe fn set_value_index_typed(&mut self, key_index: usize, value_index: K::Native) {
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
+    pub unsafe fn set_value_index_typed_unchecked(
+        &mut self,
+        key_index: usize,
+        value_index: K::Native,
+    ) {
         unsafe { *self.key_builder.as_mut_ptr().add(key_index) = value_index }
     }
 
-    pub unsafe fn set_null(&mut self, key_index: usize) {
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
+    pub unsafe fn set_null_unchecked(&mut self, key_index: usize) {
         unsafe { push_null(self.null_buffer, key_index, self.key_bit_length) }
     }
 
-    pub unsafe fn set_nonnull(&mut self, key_index: usize) {
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
+    pub unsafe fn set_nonnull_unchecked(&mut self, key_index: usize) {
         if let Some(nulls) = self.null_buffer {
             let ptr = nulls.typed_data_mut::<u8>().as_mut_ptr();
 

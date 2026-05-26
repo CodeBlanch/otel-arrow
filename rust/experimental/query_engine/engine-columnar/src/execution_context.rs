@@ -71,9 +71,9 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, T
 
     /*pub fn take_records(&mut self) -> Option<TRecords> {
         self.records.take()
-    }
+    }*/
 
-    pub fn set_records(&mut self, records: TRecords) {
+    /*pub fn set_records(&mut self, records: TRecords) {
         self.records = Some(records);
     }*/
 

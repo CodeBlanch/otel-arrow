@@ -73,6 +73,8 @@ impl TestRecords {
 }
 
 impl ColumnarRecords for TestRecords {
+    type RecordState = ();
+
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         None
     }
@@ -89,6 +91,10 @@ impl ColumnarRecords for TestRecords {
         self.attached_records
             .as_ref()
             .and_then(|a| a.get(name).map(|v| v as &dyn RecordTable))
+    }
+
+    fn into_parts(self) -> () {
+        ()
     }
 }
 
