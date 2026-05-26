@@ -278,7 +278,7 @@ mod tests {
     use otap_df_pdata::proto::OtlpProtoMessage;
     use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
     use otap_df_pdata::proto::opentelemetry::common::v1::{
-        AnyValue, InstrumentationScope, KeyValue, KeyValueList, any_value::Value,
+        AnyValue, ArrayValue, InstrumentationScope, KeyValue, KeyValueList, any_value::Value,
     };
     use otap_df_pdata::proto::opentelemetry::logs::v1::{
         LogRecord, LogRecordFlags, LogsData, ResourceLogs, ScopeLogs,
@@ -1295,7 +1295,7 @@ mod tests {
                     Some(AnyValue { value: Some(Value::StringValue("hello world".into()))}),
                     logs[2].body);
             }),
-        test_engine_set_body_column_subpath: (
+        test_engine_set_body_column_string_subpath: (
             vec![
                 LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![]}))}).finish(),
                 LogRecord::build().finish(),
@@ -1332,7 +1332,7 @@ mod tests {
                     Some(AnyValue { value: Some(Value::StringValue("string value".into()))}),
                     logs[3].body);
             }),
-        test_engine_set_body_column_subpath_recursive: (
+        test_engine_set_body_column_string_subpath_recursive: (
             vec![
                 LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
                     KeyValue { key: "sub_key".into(), value: Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![]})) }) }
@@ -1390,6 +1390,82 @@ mod tests {
                     KeyValue { key: "sub_key".into(), value: Some(AnyValue { value: Some(Value::IntValue(18)) }) }
                 ]}))}),
                     logs[4].body);
+            }),
+        test_engine_set_body_column_int_subpath: (
+            vec![
+                LogRecord::build().body(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                    AnyValue { value: Some(Value::IntValue(18)) }
+                ]}))}).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().body(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                    AnyValue { value: Some(Value::StringValue("string value".into())) },
+                    AnyValue { value: Some(Value::IntValue(18)) }
+                ]}))}).finish(),
+                LogRecord::build().body(AnyValue { value: Some(Value::StringValue("string value".into()))}).finish(),
+            ],
+            "source | extend body[-1] = 'hello world'",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::StringValue("hello world".into())) }
+                    ]}))}),
+                    logs[0].body);
+                assert_eq!(
+                    None,
+                    logs[1].body);
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::StringValue("string value".into())) },
+                        AnyValue { value: Some(Value::StringValue("hello world".into())) }
+                    ]}))}),
+                    logs[2].body);
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::StringValue("string value".into()))}),
+                    logs[3].body);
+            }),
+        test_engine_set_body_column_int_subpath_recursive: (
+            vec![
+                LogRecord::build().body(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                    AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::IntValue(18)) }
+                    ]}))}
+                ]}))}).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().body(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                    AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::StringValue("string value".into())) },
+                        AnyValue { value: Some(Value::IntValue(18)) }
+                    ]}))}
+                ]}))}).finish(),
+                LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                    KeyValue { key: "sub_key".into(), value: Some(AnyValue { value: Some(Value::IntValue(18)) }) }
+                ]}))}).finish(),
+            ],
+            "source | extend body[0][0] = 'hello world'",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                            AnyValue { value: Some(Value::StringValue("hello world".into())) }
+                        ]}))}
+                    ]}))}),
+                    logs[0].body);
+                assert_eq!(
+                    None,
+                    logs[1].body);
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                            AnyValue { value: Some(Value::StringValue("hello world".into())) },
+                            AnyValue { value: Some(Value::IntValue(18)) }
+                        ]}))}
+                    ]}))}),
+                    logs[2].body);
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                    KeyValue { key: "sub_key".into(), value: Some(AnyValue { value: Some(Value::IntValue(18)) }) }
+                ]}))}),
+                    logs[3].body);
             }),
         test_engine_set_dynamic_string_column: (
             vec![
