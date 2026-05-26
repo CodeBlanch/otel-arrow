@@ -894,10 +894,22 @@ fn update_dictionary_values_for_path<'a>(
     let mut key_builder = DictionaryKeyArrayBuilder::<UInt16Type>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    if let Some(key_filter) = key_filter {
-        todo!()
-    } else {
-        for key_index in 0..key_length {
+    for key_index in 0..key_length {
+        let value_index = source_keys
+            .get_value_index_for_key_index(key_index)
+            .and_then(|v| match source_value_lookup.as_ref() {
+                Some(l) => l.get(&v).and_then(|v| *v),
+                None => Some(v),
+            });
+
+        if let Some(value_index) = value_index {
+            if let Some(key_filter) = &key_filter {
+                if !key_filter.contains(key_index as u32) {
+                    unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
+                }
+                continue;
+            }
+
             let path_value = match current_path {
                 ColumnarEngineSelectionPath::Key { expression, value } => {
                     ValueOrRef::String(value.clone())
@@ -910,20 +922,16 @@ fn update_dictionary_values_for_path<'a>(
                 }
             };
 
-            let value_index = source_keys
-                .get_value_index_for_key_index(key_index)
-                .and_then(|v| match source_value_lookup.as_ref() {
-                    Some(l) => l.get(&v).and_then(|v| *v),
-                    None => Some(v),
-                });
+            let value_index = match visited_values.entry((path_value.clone(), value_index)) {
+                Entry::Occupied(occupied_entry) => *occupied_entry.get(),
+                Entry::Vacant(vacant_entry) => {
+                    let source_value = &source_values[value_index];
 
-            if let Some(value_index) = value_index {
-                let value_index = match visited_values.entry((path_value.clone(), value_index)) {
-                    Entry::Occupied(occupied_entry) => *occupied_entry.get(),
-                    Entry::Vacant(vacant_entry) => {
-                        let source_value = &source_values[value_index];
-
-                        match path_value {
+                    if matches!(source_value, ValueOrRef::Null) {
+                        vacant_entry.insert(None);
+                        None
+                    } else {
+                        let inserted_index = match path_value {
                             ValueOrRef::String(key) => {
                                 if let ValueOrRef::Map(MapValueOrRef::Owned(map)) = source_value {
                                     let mut map = map.deref().clone();
@@ -937,12 +945,10 @@ fn update_dictionary_values_for_path<'a>(
                                     let (index, _) = source_values.insert_full(ValueOrRef::Map(
                                         MapValueOrRef::Owned(map.into()),
                                     ));
-                                    vacant_entry.insert(Some(index));
                                     Some(index)
                                 } else {
                                     // todo log
-                                    vacant_entry.insert(Some(value_index));
-                                    Some(value_index)
+                                    None
                                 }
                             }
                             ValueOrRef::Integer(index) => {
@@ -960,31 +966,33 @@ fn update_dictionary_values_for_path<'a>(
                                     let (index, _) = source_values.insert_full(ValueOrRef::Array(
                                         ArrayValueOrRef::Owned(array.into()),
                                     ));
-                                    vacant_entry.insert(Some(index));
                                     Some(index)
                                 } else {
                                     // todo log
-                                    vacant_entry.insert(Some(value_index));
-                                    Some(value_index)
+                                    None
                                 }
                             }
                             v => {
                                 // todo log
-                                vacant_entry.insert(Some(value_index));
-                                Some(value_index)
+                                None
                             }
-                        }
+                        };
+
+                        let final_index = inserted_index.unwrap_or(value_index);
+
+                        vacant_entry.insert(Some(final_index));
+                        Some(final_index)
                     }
-                };
-
-                if let Some(value_index) = value_index {
-                    unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
-                    continue;
                 }
-            }
+            };
 
-            unsafe { key_writer.set_null_unchecked(key_index) }
+            if let Some(value_index) = value_index {
+                unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
+                continue;
+            }
         }
+
+        unsafe { key_writer.set_null_unchecked(key_index) }
     }
 
     Dictionary::new(key_builder.finish().into(), source_values.into())
