@@ -55,7 +55,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref() {
             let logs_schema = logs.schema_ref();
 
-            let attributes = if let Some(id_column) = logs_schema.column_with_name("id")
+            let attributes = if let Some(id_column) = logs_schema.column_with_name(consts::ID)
                 && let Some(attributes_batch) =
                     batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].as_ref()
             {
@@ -66,10 +66,11 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 None
             };
 
-            let resource = if let Some(resource_column) = logs_schema.column_with_name("resource")
+            let resource = if let Some(resource_column) =
+                logs_schema.column_with_name(consts::RESOURCE)
                 && let Some(resource_struct) = logs.column(resource_column.0).as_struct_opt()
             {
-                if let Some(resource_ids) = resource_struct.column_by_name("id")
+                if let Some(resource_ids) = resource_struct.column_by_name(consts::ID)
                     && let Some(resource_attributes_batch) =
                         batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].as_ref()
                 {
@@ -89,10 +90,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 None
             };
 
-            let scope = if let Some(scope_column) = logs_schema.column_with_name("scope")
+            let scope = if let Some(scope_column) = logs_schema.column_with_name(consts::SCOPE)
                 && let Some(scope_struct) = logs.column(scope_column.0).as_struct_opt()
             {
-                if let Some(scope_ids) = scope_struct.column_by_name("id")
+                if let Some(scope_ids) = scope_struct.column_by_name(consts::ID)
                     && let Some(scope_attributes_batch) =
                         batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].as_ref()
                 {
@@ -151,7 +152,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             if number_of_logs_after_filter > 0 {
                 let mut ids = IdBitmap::new();
 
-                if let Some(id_column) = filtered_logs_batch.schema_ref().column_with_name("id") {
+                if let Some(id_column) = filtered_logs_batch
+                    .schema_ref()
+                    .column_with_name(consts::ID)
+                {
                     ids.populate(
                         filtered_logs_batch
                             .column(id_column.0)
@@ -177,11 +181,11 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
                     if let Some(resource_column) = filtered_logs_batch
                         .schema_ref()
-                        .column_with_name("resource")
+                        .column_with_name(consts::RESOURCE)
                         && let Some(resource_struct) = filtered_logs_batch
                             .column(resource_column.0)
                             .as_struct_opt()
-                        && let Some(resource_ids) = resource_struct.column_by_name("id")
+                        && let Some(resource_ids) = resource_struct.column_by_name(consts::ID)
                     {
                         ids.populate(
                             resource_ids
@@ -206,11 +210,12 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 {
                     ids.clear();
 
-                    if let Some(scope_column) =
-                        filtered_logs_batch.schema_ref().column_with_name("scope")
+                    if let Some(scope_column) = filtered_logs_batch
+                        .schema_ref()
+                        .column_with_name(consts::SCOPE)
                         && let Some(scope_struct) =
                             filtered_logs_batch.column(scope_column.0).as_struct_opt()
-                        && let Some(scope_ids) = scope_struct.column_by_name("id")
+                        && let Some(scope_ids) = scope_struct.column_by_name(consts::ID)
                     {
                         ids.populate(
                             scope_ids
@@ -1668,12 +1673,12 @@ impl RecordTable for OtapScope<'_> {
 
         let values = match key {
             consts::NAME | "Name"
-                if let Some(name_column) = self.scope_struct.column_by_name("name") =>
+                if let Some(name_column) = self.scope_struct.column_by_name(consts::NAME) =>
             {
                 adaptive_dictionary_reader::<StringArray>(name_column)
             }
             consts::VERSION | "Version"
-                if let Some(version_column) = self.scope_struct.column_by_name("version") =>
+                if let Some(version_column) = self.scope_struct.column_by_name(consts::VERSION) =>
             {
                 adaptive_dictionary_reader::<StringArray>(version_column)
             }
@@ -1717,29 +1722,35 @@ impl<'record> OtapAttributes<'record> {
         attributes_batch: &'record RecordBatch,
     ) -> OtapAttributes<'record> {
         let strings = attributes_batch
-            .column_by_name("str")
+            .column_by_name(consts::ATTRIBUTE_STR)
             .expect("strings")
             .as_dictionary::<UInt16Type>()
             .downcast_dict::<StringArray>()
             .expect("Attribute strings were an unexpected type");
 
-        let ints = attributes_batch.column_by_name("int").map(|c| {
-            c.as_dictionary::<UInt16Type>()
-                .downcast_dict::<PrimitiveArray<Int64Type>>()
-                .expect("Attribute ints were an unexpected type")
-        });
+        let ints = attributes_batch
+            .column_by_name(consts::ATTRIBUTE_INT)
+            .map(|c| {
+                c.as_dictionary::<UInt16Type>()
+                    .downcast_dict::<PrimitiveArray<Int64Type>>()
+                    .expect("Attribute ints were an unexpected type")
+            });
 
-        let bytes = attributes_batch.column_by_name("bytes").map(|c| {
-            c.as_dictionary::<UInt16Type>()
-                .downcast_dict::<BinaryArray>()
-                .expect("Attribute bytes were an unexpected type")
-        });
+        let bytes = attributes_batch
+            .column_by_name(consts::ATTRIBUTE_BYTES)
+            .map(|c| {
+                c.as_dictionary::<UInt16Type>()
+                    .downcast_dict::<BinaryArray>()
+                    .expect("Attribute bytes were an unexpected type")
+            });
 
-        let ser = attributes_batch.column_by_name("ser").map(|c| {
-            c.as_dictionary::<UInt16Type>()
-                .downcast_dict::<BinaryArray>()
-                .expect("Attribute ser was an unexpected type")
-        });
+        let ser = attributes_batch
+            .column_by_name(consts::ATTRIBUTE_SER)
+            .map(|c| {
+                c.as_dictionary::<UInt16Type>()
+                    .downcast_dict::<BinaryArray>()
+                    .expect("Attribute ser was an unexpected type")
+            });
 
         Self {
             ids,
@@ -1757,10 +1768,10 @@ impl<'record> OtapAttributes<'record> {
             attribute_int_keys: ints.map(|v| v.keys()),
             attribute_int_values: ints.map(|v| v.values()),
             attribute_doubles: attributes_batch
-                .column_by_name("double")
+                .column_by_name(consts::ATTRIBUTE_DOUBLE)
                 .map(|c| c.as_primitive::<Float64Type>()),
             attribute_bools: attributes_batch
-                .column_by_name("bool")
+                .column_by_name(consts::ATTRIBUTE_BOOL)
                 .map(|c| c.as_boolean()),
             attribute_bytes_keys: bytes.map(|v| v.keys()),
             attribute_bytes_values: bytes.map(|v| v.values()),
@@ -2068,7 +2079,7 @@ fn build_logs_body_dictionary(
 fn build_logs_body_dictionary_from_struct(
     body_struct: &StructArray,
 ) -> Option<RecordTableDictionary> {
-    if let Some(body_type) = body_struct.column_by_name("type") {
+    if let Some(body_type) = body_struct.column_by_name(consts::ATTRIBUTE_TYPE) {
         let body_types = body_type.as_primitive::<UInt8Type>();
 
         let record_count = body_types.len();
@@ -2103,7 +2114,7 @@ fn build_logs_body_dictionary_from_struct(
                 0 => {}
                 1 => {
                     if let Some(body_strings) = body_strings.get_or_init(|| {
-                        body_struct.column_by_name("str").map(|v| {
+                        body_struct.column_by_name(consts::ATTRIBUTE_STR).map(|v| {
                             v.as_dictionary::<UInt16Type>()
                                 .downcast_dict::<StringArray>()
                                 .expect("body string values were an unexpected type")
@@ -2134,7 +2145,7 @@ fn build_logs_body_dictionary_from_struct(
                 }
                 2 => {
                     if let Some(body_ints) = body_ints.get_or_init(|| {
-                        body_struct.column_by_name("int").map(|v| {
+                        body_struct.column_by_name(consts::ATTRIBUTE_INT).map(|v| {
                             v.as_dictionary::<UInt16Type>()
                                 .downcast_dict::<Int64Array>()
                                 .expect("body int values were an unexpected type")
@@ -2160,7 +2171,7 @@ fn build_logs_body_dictionary_from_struct(
                 3 => {
                     if let Some(body_doubles) = body_doubles.get_or_init(|| {
                         body_struct
-                            .column_by_name("double")
+                            .column_by_name(consts::ATTRIBUTE_DOUBLE)
                             .map(|v| v.as_primitive::<Float64Type>())
                     }) {
                         let index = values.len() as u16;
@@ -2171,9 +2182,11 @@ fn build_logs_body_dictionary_from_struct(
                     }
                 }
                 4 => {
-                    if let Some(body_bools) = body_bools
-                        .get_or_init(|| body_struct.column_by_name("bool").map(|v| v.as_boolean()))
-                    {
+                    if let Some(body_bools) = body_bools.get_or_init(|| {
+                        body_struct
+                            .column_by_name(consts::ATTRIBUTE_BOOL)
+                            .map(|v| v.as_boolean())
+                    }) {
                         let index = values.len() as u16;
                         values.push(ValueOrRef::Boolean(body_bools.value(key_index)));
 
@@ -2183,7 +2196,7 @@ fn build_logs_body_dictionary_from_struct(
                 }
                 5 => {
                     if let Some(body_ser) = body_ser.get_or_init(|| {
-                        body_struct.column_by_name("ser").map(|v| {
+                        body_struct.column_by_name(consts::ATTRIBUTE_SER).map(|v| {
                             v.as_dictionary::<UInt16Type>()
                                 .downcast_dict::<BinaryArray>()
                                 .expect("body ser values were an unexpected type")
@@ -2211,7 +2224,7 @@ fn build_logs_body_dictionary_from_struct(
                 }
                 6 => {
                     if let Some(body_ser) = body_ser.get_or_init(|| {
-                        body_struct.column_by_name("ser").map(|v| {
+                        body_struct.column_by_name(consts::ATTRIBUTE_SER).map(|v| {
                             v.as_dictionary::<UInt16Type>()
                                 .downcast_dict::<BinaryArray>()
                                 .expect("body ser values were an unexpected type")
@@ -2239,11 +2252,13 @@ fn build_logs_body_dictionary_from_struct(
                 }
                 7 => {
                     if let Some(body_bytes) = body_bytes.get_or_init(|| {
-                        body_struct.column_by_name("bytes").map(|v| {
-                            v.as_dictionary::<UInt16Type>()
-                                .downcast_dict::<BinaryArray>()
-                                .expect("body byte values were an unexpected type")
-                        })
+                        body_struct
+                            .column_by_name(consts::ATTRIBUTE_BYTES)
+                            .map(|v| {
+                                v.as_dictionary::<UInt16Type>()
+                                    .downcast_dict::<BinaryArray>()
+                                    .expect("body byte values were an unexpected type")
+                            })
                     }) {
                         let value_index = body_bytes.keys().value(key_index) as usize;
 
