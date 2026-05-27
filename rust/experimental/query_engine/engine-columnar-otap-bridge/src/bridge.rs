@@ -1530,6 +1530,68 @@ mod tests {
                 assert!(
                     logs[2].span_id.is_empty());
             }),
+        test_engine_set_dynamic_int_subpath_column: (
+            vec![
+                LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList::new(vec![]))) }).attributes(vec![
+                    KeyValue { key: "some_attr1".into(), value: Some(AnyValue { value: Some(Value::StringValue("body".into())) }) },
+                    KeyValue { key: "some_attr2".into(), value: Some(AnyValue { value: Some(Value::StringValue("key1".into())) }) }
+                ]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList::new(vec![]))) }).attributes(vec![
+                    KeyValue { key: "some_attr1".into(), value: Some(AnyValue { value: Some(Value::StringValue("body".into())) }) },
+                    KeyValue { key: "some_attr2".into(), value: Some(AnyValue { value: Some(Value::StringValue("key2".into())) }) }
+                ]).finish(),
+            ],
+            "source | extend source[some_attr1][some_attr2] = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                        KeyValue { key: "key1".into(), value: Some(AnyValue { value: Some(Value::IntValue(18)) }) }
+                    ]}))}),
+                    logs[0].body);
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                        KeyValue { key: "key2".into(), value: Some(AnyValue { value: Some(Value::IntValue(18)) }) }
+                    ]}))}),
+                    logs[2].body);
+            }),
+        test_engine_set_dynamic_int_subpath_recursive_column: (
+            vec![
+                LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList::new(vec![
+                    KeyValue { key: "key1".into(), value: Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![]})) }) }
+                ]))) }).attributes(vec![
+                    KeyValue { key: "some_attr1".into(), value: Some(AnyValue { value: Some(Value::StringValue("body".into())) }) },
+                    KeyValue { key: "some_attr2".into(), value: Some(AnyValue { value: Some(Value::StringValue("key1".into())) }) },
+                    KeyValue { key: "some_attr3".into(), value: Some(AnyValue { value: Some(Value::StringValue("value".into())) }) }
+                ]).finish(),
+                LogRecord::build().finish(),
+                LogRecord::build().body(AnyValue { value: Some(Value::KvlistValue(KeyValueList::new(vec![
+                    KeyValue { key: "key2".into(), value: Some(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                        AnyValue { value: Some(Value::IntValue(0)) }
+                    ]})) }) }
+                ]))) }).attributes(vec![
+                    KeyValue { key: "some_attr1".into(), value: Some(AnyValue { value: Some(Value::StringValue("body".into())) }) },
+                    KeyValue { key: "some_attr2".into(), value: Some(AnyValue { value: Some(Value::StringValue("key2".into())) }) },
+                    KeyValue { key: "some_attr3".into(), value: Some(AnyValue { value: Some(Value::IntValue(-1)) }) }
+                ]).finish(),
+            ],
+            "source | extend source[some_attr1][some_attr2][some_attr3] = 18",
+            |logs: &Vec<LogRecord>| {
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                        KeyValue { key: "key1".into(), value: Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                            KeyValue { key: "value".into(), value: Some(AnyValue { value: Some(Value::IntValue(18)) }) }
+                        ]})) }) }
+                    ]}))}),
+                    logs[0].body);
+                assert_eq!(
+                    Some(AnyValue { value: Some(Value::KvlistValue(KeyValueList { values: vec![
+                        KeyValue { key: "key2".into(), value: Some(AnyValue { value: Some(Value::ArrayValue(ArrayValue { values: vec![
+                            AnyValue { value: Some(Value::IntValue(18)) }
+                        ]})) }) }
+                    ]}))}),
+                    logs[2].body);
+            }),
     }
 
     #[test]

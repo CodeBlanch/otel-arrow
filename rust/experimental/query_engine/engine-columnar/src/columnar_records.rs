@@ -42,6 +42,7 @@ pub enum ColumnarRecordsWriteResult {
     NotFound,
 }
 
+#[derive(Debug)]
 pub enum ColumnarEngineSelectionPath<'a> {
     Key {
         expression: &'a dyn Expression,

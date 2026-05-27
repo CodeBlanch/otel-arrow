@@ -6,12 +6,12 @@ use std::{
     collections::hash_map::Entry,
     fmt::Display,
     hash::Hash,
-    ops::{Deref, DerefMut},
+    ops::Deref,
     rc::Rc,
     sync::Arc,
 };
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use arrow::{
     array::*,
     buffer::{MutableBuffer, NullBuffer},
@@ -291,7 +291,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                     None,
                                     &path[0],
                                     &path[1..],
-                                    value,
+                                    &value,
                                 ),
                             }
                         } else {
@@ -586,8 +586,26 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                         continue;
                                     }
                                     Some(body) => {
-                                        // todo: nested paths should be supported on body
-                                        todo!()
+                                        let value = update_dictionary_values_for_path(
+                                            body,
+                                            Some(key_filter),
+                                            &path[0],
+                                            &path[1..],
+                                            &value,
+                                        );
+
+                                        set_column(
+                                            diagnostic_receiver,
+                                            *expression,
+                                            batches,
+                                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
+                                            consts::BODY,
+                                            value,
+                                            body_writer,
+                                        );
+
+                                        written_data_count += 1;
+                                        continue;
                                     }
                                 }
                             }
@@ -880,7 +898,7 @@ fn update_dictionary_values_for_path<'a>(
     key_filter: Option<RoaringBitmap>,
     current_path: &ColumnarEngineSelectionPath<'a>,
     remaining_path: &[ColumnarEngineSelectionPath<'a>],
-    value: Dictionary<'a>,
+    value: &Dictionary<'a>,
 ) -> Dictionary<'a> {
     let (source_keys, source_values) = source.into_parts();
 
@@ -903,10 +921,10 @@ fn update_dictionary_values_for_path<'a>(
             });
 
         if let Some(value_index) = value_index {
-            if let Some(key_filter) = &key_filter {
-                if !key_filter.contains(key_index as u32) {
-                    unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
-                }
+            if let Some(key_filter) = &key_filter
+                && !key_filter.contains(key_index as u32)
+            {
+                unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
                 continue;
             }
 
@@ -1699,7 +1717,8 @@ impl<'record> OtapAttributes<'record> {
         attributes_batch: &'record RecordBatch,
     ) -> OtapAttributes<'record> {
         let strings = attributes_batch
-            .column(3)
+            .column_by_name("str")
+            .expect("strings")
             .as_dictionary::<UInt16Type>()
             .downcast_dict::<StringArray>()
             .expect("Attribute strings were an unexpected type");
