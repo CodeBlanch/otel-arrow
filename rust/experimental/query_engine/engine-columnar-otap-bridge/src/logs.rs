@@ -1706,8 +1706,7 @@ pub struct OtapAttributes<'record> {
     attribute_types: &'record PrimitiveArray<UInt8Type>,
     attribute_string_keys: &'record PrimitiveArray<UInt16Type>,
     attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
-    attribute_int_keys: Option<&'record PrimitiveArray<UInt16Type>>,
-    attribute_int_values: Option<&'record PrimitiveArray<Int64Type>>,
+    attribute_ints: Option<TypedDictionaryArray<'record, UInt16Type, PrimitiveArray<Int64Type>>>,
     attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
     attribute_bools: Option<&'record BooleanArray>,
     attribute_bytes_keys: Option<&'record PrimitiveArray<UInt16Type>>,
@@ -1727,14 +1726,6 @@ impl<'record> OtapAttributes<'record> {
             .as_dictionary::<UInt16Type>()
             .downcast_dict::<StringArray>()
             .expect("Attribute strings were an unexpected type");
-
-        let ints = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_INT)
-            .map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<PrimitiveArray<Int64Type>>()
-                    .expect("Attribute ints were an unexpected type")
-            });
 
         let bytes = attributes_batch
             .column_by_name(consts::ATTRIBUTE_BYTES)
@@ -1765,8 +1756,13 @@ impl<'record> OtapAttributes<'record> {
             attribute_types: attributes_batch.column(2).as_primitive::<UInt8Type>(),
             attribute_string_keys: strings.keys(),
             attribute_string_values: strings.values(),
-            attribute_int_keys: ints.map(|v| v.keys()),
-            attribute_int_values: ints.map(|v| v.values()),
+            attribute_ints: attributes_batch
+                .column_by_name(consts::ATTRIBUTE_INT)
+                .map(|c| {
+                    c.as_dictionary::<UInt16Type>()
+                        .downcast_dict::<PrimitiveArray<Int64Type>>()
+                        .expect("Attribute ints were an unexpected type")
+                }),
             attribute_doubles: attributes_batch
                 .column_by_name(consts::ATTRIBUTE_DOUBLE)
                 .map(|c| c.as_primitive::<Float64Type>()),
@@ -1835,20 +1831,28 @@ impl<'record> OtapAttributes<'record> {
                 }
             }
             2 => {
-                if let Some(keys) = self.attribute_int_keys
-                    && keys.is_valid(attribute_index)
+                return Some(
+                    if let Some(ints) = self.attribute_ints
+                        && ints.is_valid(attribute_index)
                 {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
+                        let value = unsafe { ints.value_unchecked(attribute_index) };
+                        AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
+                    } else {
+                        AttributeValueOrIndex::Value(ValueOrRef::Integer(0))
+                    },
+                );
             }
             3 => {
+                return Some(
                 if let Some(doubles) = self.attribute_doubles
                     && doubles.is_valid(attribute_index)
                 {
                     let value = unsafe { doubles.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Double(value)));
-                }
+                        AttributeValueOrIndex::Value(ValueOrRef::Double(value))
+                    } else {
+                        AttributeValueOrIndex::Value(ValueOrRef::Double(0f64))
+                    },
+                );
             }
             4 => {
                 if let Some(bools) = self.attribute_bools
@@ -1910,11 +1914,6 @@ impl<'record> OtapAttributes<'record> {
                     .slice_with_length(start, end - start)
                     .clone()
             })),
-            2 => ValueOrRef::Integer(unsafe {
-                self.attribute_int_values
-                    .unwrap()
-                    .value_unchecked(attribute_value_index as usize)
-            }),
             5 | 6 => {
                 let value = unsafe {
                     self.attribute_ser_values

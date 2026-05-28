@@ -1572,7 +1572,7 @@ mod tests {
                 ]))) }).attributes(vec![
                     KeyValue { key: "some_attr1".into(), value: Some(AnyValue { value: Some(Value::StringValue("body".into())) }) },
                     KeyValue { key: "some_attr2".into(), value: Some(AnyValue { value: Some(Value::StringValue("key2".into())) }) },
-                    KeyValue { key: "some_attr3".into(), value: Some(AnyValue { value: Some(Value::IntValue(-1)) }) }
+                    KeyValue { key: "some_attr3".into(), value: Some(AnyValue { value: Some(Value::IntValue(0)) }) }
                 ]).finish(),
             ],
             "source | extend source[some_attr1][some_attr2][some_attr3] = 18",
