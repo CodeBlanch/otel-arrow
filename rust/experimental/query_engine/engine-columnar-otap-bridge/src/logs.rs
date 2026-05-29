@@ -21,8 +21,16 @@ use arrow::{
 use data_engine_columnar::*;
 use data_engine_expressions::{Expression, RegexValue, StringValue, Value};
 use otap_df_pdata::{
-    encode::record::logs::LogsBodyBuilder, otap::raw_batch_store::POSITION_LOOKUP,
-    proto::opentelemetry::arrow::v1::ArrowPayloadType, schema::consts,
+    encode::record::{attributes::AttributesRecordBatchBuilder, logs::LogsBodyBuilder},
+    otap::{
+        raw_batch_store::POSITION_LOOKUP,
+        transform::{materialize_parent_id_for_attributes, remove_delta_encoding_from_column},
+    },
+    proto::opentelemetry::arrow::v1::ArrowPayloadType,
+    schema::{
+        consts::{self, metadata},
+        update_field_metadata,
+    },
 };
 use roaring::RoaringBitmap;
 
@@ -59,9 +67,17 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 && let Some(attributes_batch) =
                     batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].as_ref()
             {
-                let ids = logs.column(id_column.0).as_primitive::<UInt16Type>();
-
-                Some(OtapAttributes::new(ids, attributes_batch))
+                Some(OtapAttributes::new(
+                    OtapIds::new(
+                        logs.column(id_column.0).as_primitive::<UInt16Type>(),
+                        id_column
+                            .1
+                            .metadata()
+                            .get(metadata::COLUMN_ENCODING)
+                            .map(|v| v.as_str()),
+                    ),
+                    attributes_batch,
+                ))
             } else {
                 None
             };
@@ -70,15 +86,26 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 logs_schema.column_with_name(consts::RESOURCE)
                 && let Some(resource_struct) = logs.column(resource_column.0).as_struct_opt()
             {
-                if let Some(resource_ids) = resource_struct.column_by_name(consts::ID)
+                if let DataType::Struct(fields) = resource_struct.data_type()
+                    && let Some(id_column) = fields.find(consts::ID)
                     && let Some(resource_attributes_batch) =
                         batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].as_ref()
                 {
-                    let ids = resource_ids.as_primitive::<UInt16Type>();
-
                     Some(OtapResource {
                         resource_struct,
-                        attributes: Some(OtapAttributes::new(ids, resource_attributes_batch)),
+                        attributes: Some(OtapAttributes::new(
+                            OtapIds::new(
+                                resource_struct
+                                    .column(id_column.0)
+                                    .as_primitive::<UInt16Type>(),
+                                id_column
+                                    .1
+                                    .metadata()
+                                    .get(metadata::COLUMN_ENCODING)
+                                    .map(|v| v.as_str()),
+                            ),
+                            resource_attributes_batch,
+                        )),
                     })
                 } else {
                     Some(OtapResource {
@@ -93,15 +120,26 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             let scope = if let Some(scope_column) = logs_schema.column_with_name(consts::SCOPE)
                 && let Some(scope_struct) = logs.column(scope_column.0).as_struct_opt()
             {
-                if let Some(scope_ids) = scope_struct.column_by_name(consts::ID)
+                if let DataType::Struct(fields) = scope_struct.data_type()
+                    && let Some(id_column) = fields.find(consts::ID)
                     && let Some(scope_attributes_batch) =
                         batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].as_ref()
                 {
-                    let ids = scope_ids.as_primitive::<UInt16Type>();
-
                     Some(OtapScope {
                         scope_struct,
-                        attributes: Some(OtapAttributes::new(ids, scope_attributes_batch)),
+                        attributes: Some(OtapAttributes::new(
+                            OtapIds::new(
+                                scope_struct
+                                    .column(id_column.0)
+                                    .as_primitive::<UInt16Type>(),
+                                id_column
+                                    .1
+                                    .metadata()
+                                    .get(metadata::COLUMN_ENCODING)
+                                    .map(|v| v.as_str()),
+                            ),
+                            scope_attributes_batch,
+                        )),
                     })
                 } else {
                     Some(OtapScope {
@@ -128,12 +166,13 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
     fn filter(
         &self,
-        batches: &[Option<RecordBatch>; 4],
+        mut state: OtapLogRecordState,
+        batches: &mut [Option<RecordBatch>; 4],
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; 4] {
         let filter_true_count = filter.true_count();
 
-        if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref()
+        if let Some(mut logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].take()
             && filter_true_count > 0
         {
             let number_of_logs_before_filter = logs.num_rows();
@@ -141,12 +180,34 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 return [
                     batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].clone(),
                     batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].clone(),
-                    Some(logs.clone()),
+                    Some(logs),
                     batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].clone(),
                 ];
             }
 
-            let filtered_logs_batch = filter::filter_record_batch(logs, filter).unwrap();
+            let mut decoded_ids = [
+                (consts::ID, None),
+                (consts::SCOPE, None),
+                (consts::RESOURCE, None),
+            ];
+            let mut decode = false;
+            if let Some(ids) = state.decoded_ids.0.take() {
+                decoded_ids[0].1 = Some(ids);
+                decode = true;
+            }
+            if let Some(scope_ids) = state.decoded_scope_ids.0.take() {
+                decoded_ids[1].1 = Some(scope_ids);
+                decode = true;
+            }
+            if let Some(resource_ids) = state.decoded_resource_ids.0.take() {
+                decoded_ids[2].1 = Some(resource_ids);
+                decode = true;
+            }
+            if decode {
+                logs = replace_id_columns_in_batch(decoded_ids, logs);
+            }
+
+            let filtered_logs_batch = filter::filter_record_batch(&logs, filter).unwrap();
 
             let number_of_logs_after_filter = filtered_logs_batch.num_rows();
             if number_of_logs_after_filter > 0 {
@@ -171,7 +232,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 } else {
                     batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]]
                         .as_ref()
-                        .and_then(|v| filter_child_batch(&ids, v))
+                        .and_then(|v| filter_child_batch(&ids, state.decoded_ids.1.take(), v))
                 };
 
                 let resource_attributes_batch = if let Some(resource_attributes) =
@@ -199,7 +260,11 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if ids.is_empty() {
                         None
                     } else {
-                        filter_child_batch(&ids, resource_attributes)
+                        filter_child_batch(
+                            &ids,
+                            state.decoded_resource_ids.1.take(),
+                            resource_attributes,
+                        )
                     }
                 } else {
                     None
@@ -229,7 +294,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if ids.is_empty() {
                         None
                     } else {
-                        filter_child_batch(&ids, scope_attributes)
+                        filter_child_batch(&ids, state.decoded_scope_ids.1.take(), scope_attributes)
                     }
                 } else {
                     None
@@ -250,7 +315,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
         diagnostic_receiver: &T,
-        mut state: OtapBody,
+        mut state: OtapLogRecordState,
         batches: &mut [Option<RecordBatch>; 4],
         root: &ColumnarEngineSelectionPath<'a>,
         path: &[ColumnarEngineSelectionPath<'a>],
@@ -269,7 +334,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     }
                     consts::BODY => {
                         let value = if path_length > 0 {
-                            let body = state.take().unwrap_or_else(|| {
+                            let body = state.body.take().unwrap_or_else(|| {
                                 if let Some(logs_batch) =
                                     &batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
                                 {
@@ -567,7 +632,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 for (key, key_filter) in plan.into_iter() {
                     match get_log_record_schema().normalize_key(key.get_value()) {
                         consts::BODY => {
-                            let body = state.take().unwrap_or_else(|| {
+                            let body = state.body.take().unwrap_or_else(|| {
                                 if let Some(logs_batch) =
                                     &batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
                                 {
@@ -896,6 +961,60 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             }
         }
     }
+}
+
+fn replace_id_columns_in_batch<const SIZE: usize>(
+    decoded_ids: [(&str, Option<PrimitiveArray<UInt16Type>>); SIZE],
+    batch: RecordBatch,
+) -> RecordBatch {
+    let (schema, mut columns, _) = batch.into_parts();
+
+    let mut schema_builder: SchemaBuilder = schema.as_ref().into();
+
+    for (column_name, decoded_ids) in decoded_ids.into_iter() {
+        if let Some(decoded_ids) = decoded_ids {
+            let (column_id, field) = schema.column_with_name(column_name).expect("has ids");
+
+            if let DataType::Struct(_) = field.data_type() {
+                let (struct_fields, mut struct_columns, struct_nulls) =
+                    columns[column_id].as_struct().clone().into_parts();
+
+                let (struct_column_id, field) = struct_fields.find(consts::ID).expect("has ids");
+
+                let mut field = field.as_ref().clone();
+
+                field.metadata_mut().insert(
+                    metadata::COLUMN_ENCODING.into(),
+                    metadata::encodings::PLAIN.into(),
+                );
+
+                let mut struct_fields = struct_fields.to_vec();
+
+                struct_fields[struct_column_id] = Arc::new(field);
+
+                struct_columns[struct_column_id] = Arc::new(decoded_ids);
+
+                columns[column_id] = Arc::new(StructArray::new(
+                    struct_fields.into(),
+                    struct_columns,
+                    struct_nulls,
+                ));
+            } else {
+                let mut field = field.clone();
+
+                field.metadata_mut().insert(
+                    metadata::COLUMN_ENCODING.into(),
+                    metadata::encodings::PLAIN.into(),
+                );
+
+                *schema_builder.field_mut(column_id) = Arc::new(field);
+
+                columns[column_id] = Arc::new(decoded_ids);
+            }
+        }
+    }
+
+    RecordBatch::try_new(Arc::new(schema_builder.finish()), columns).unwrap()
 }
 
 fn update_dictionary_values_for_path<'a>(
@@ -1508,7 +1627,7 @@ impl<'record> OtapLogRecordBatch<'record> {
 }
 
 impl ColumnarRecords for OtapLogRecordBatch<'_> {
-    type RecordState = OtapBody;
+    type RecordState = OtapLogRecordState;
 
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         self.diagnostic_level
@@ -1534,8 +1653,22 @@ impl ColumnarRecords for OtapLogRecordBatch<'_> {
         }
     }
 
-    fn into_parts(self) -> OtapBody {
-        self.body
+    fn into_parts(self) -> OtapLogRecordState {
+        OtapLogRecordState {
+            decoded_ids: self
+                .attributes
+                .map(|v| v.into_parts())
+                .unwrap_or((None, None)),
+            decoded_scope_ids: self
+                .scope
+                .and_then(|v| v.attributes.map(|v| v.into_parts()))
+                .unwrap_or((None, None)),
+            decoded_resource_ids: self
+                .resource
+                .and_then(|v| v.attributes.map(|v| v.into_parts()))
+                .unwrap_or((None, None)),
+            body: self.body,
+        }
     }
 }
 
@@ -1696,11 +1829,81 @@ impl Display for OtapScope<'_> {
 }
 
 #[derive(Debug)]
+pub struct OtapIds<'record> {
+    encoding: Option<&'record str>,
+    encoded: &'record PrimitiveArray<UInt16Type>,
+    decoded: OnceCell<PrimitiveArray<UInt16Type>>,
+}
+
+impl<'record> OtapIds<'record> {
+    pub fn new(
+        encoded_ids: &'record PrimitiveArray<UInt16Type>,
+        encoding: Option<&'record str>,
+    ) -> OtapIds<'record> {
+        Self {
+            encoding,
+            encoded: encoded_ids,
+            decoded: OnceCell::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.encoded.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.encoded.len()
+    }
+
+    pub fn get_ids(&self) -> &PrimitiveArray<UInt16Type> {
+        self.decoded.get_or_init(|| self.init())
+    }
+
+    pub fn into_parts(mut self) -> Option<PrimitiveArray<UInt16Type>> {
+        if self.encoding == Some(metadata::encodings::PLAIN) {
+            None
+        } else {
+            Some(
+                self.decoded
+                    .take()
+                    .unwrap_or_else(|| remove_delta_encoding_from_column(self.encoded)),
+            )
+        }
+    }
+
+    fn init(&self) -> PrimitiveArray<UInt16Type> {
+        if self.encoding == Some(metadata::encodings::PLAIN) {
+            self.encoded.clone()
+        } else {
+            remove_delta_encoding_from_column(self.encoded)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct OtapLogRecordState {
+    decoded_ids: (
+        Option<PrimitiveArray<UInt16Type>>,
+        Option<PrimitiveArray<UInt16Type>>,
+    ),
+    decoded_scope_ids: (
+        Option<PrimitiveArray<UInt16Type>>,
+        Option<PrimitiveArray<UInt16Type>>,
+    ),
+    decoded_resource_ids: (
+        Option<PrimitiveArray<UInt16Type>>,
+        Option<PrimitiveArray<UInt16Type>>,
+    ),
+    body: OtapBody,
+}
+
+#[derive(Debug)]
 pub struct OtapAttributes<'record> {
-    ids: &'record PrimitiveArray<UInt16Type>,
+    ids: OtapIds<'record>,
     id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
     cache: RefCell<AHashMap<Box<str>, RecordTableDictionary>>,
-    attribute_parent_ids: &'record PrimitiveArray<UInt16Type>,
+    attributes_batch: &'record RecordBatch,
+    attribute_parent_ids: OnceCell<PrimitiveArray<UInt16Type>>,
     attribute_keys:
         TypedDictionaryArray<'record, UInt8Type, GenericByteArray<GenericStringType<i32>>>,
     attribute_types: &'record PrimitiveArray<UInt8Type>,
@@ -1717,7 +1920,7 @@ pub struct OtapAttributes<'record> {
 
 impl<'record> OtapAttributes<'record> {
     pub fn new(
-        ids: &'record PrimitiveArray<UInt16Type>,
+        ids: OtapIds<'record>,
         attributes_batch: &'record RecordBatch,
     ) -> OtapAttributes<'record> {
         let strings = attributes_batch
@@ -1747,13 +1950,18 @@ impl<'record> OtapAttributes<'record> {
             ids,
             id_to_record_index_map: OnceCell::new(),
             cache: RefCell::new(AHashMap::new()),
-            attribute_parent_ids: attributes_batch.column(0).as_primitive::<UInt16Type>(),
+            attributes_batch,
+            attribute_parent_ids: OnceCell::new(),
             attribute_keys: attributes_batch
-                .column(1)
+                .column_by_name(consts::ATTRIBUTE_KEY)
+                .expect("has keys")
                 .as_dictionary::<UInt8Type>()
                 .downcast_dict::<StringArray>()
                 .expect("Attribute keys were an unexpected type"),
-            attribute_types: attributes_batch.column(2).as_primitive::<UInt8Type>(),
+            attribute_types: attributes_batch
+                .column_by_name(consts::ATTRIBUTE_TYPE)
+                .expect("has types")
+                .as_primitive::<UInt8Type>(),
             attribute_string_keys: strings.keys(),
             attribute_string_values: strings.values(),
             attribute_ints: attributes_batch
@@ -1776,11 +1984,75 @@ impl<'record> OtapAttributes<'record> {
         }
     }
 
+    pub fn into_parts(
+        mut self,
+    ) -> (
+        Option<PrimitiveArray<UInt16Type>>,
+        Option<PrimitiveArray<UInt16Type>>,
+    ) {
+        let parent_id_column = self
+            .attributes_batch
+            .schema_ref()
+            .column_with_name(consts::PARENT_ID)
+            .expect("has parent ids");
+
+        let parent_ids = if parent_id_column
+            .1
+            .metadata()
+            .get(metadata::COLUMN_ENCODING)
+            .map(|v| v.as_str())
+            == Some(metadata::encodings::PLAIN)
+        {
+            None
+        } else {
+            Some(
+                self.attribute_parent_ids
+                    .take()
+                    .unwrap_or_else(|| self.init_parent_ids(parent_id_column.0)),
+            )
+        };
+
+        (self.ids.into_parts(), parent_ids)
+    }
+
+    fn get_parent_ids(&self) -> &PrimitiveArray<UInt16Type> {
+        self.attribute_parent_ids.get_or_init(|| {
+            let parent_id_column = self
+                .attributes_batch
+                .schema_ref()
+                .column_with_name(consts::PARENT_ID)
+                .expect("has parent ids");
+
+            if parent_id_column
+                .1
+                .metadata()
+                .get(metadata::COLUMN_ENCODING)
+                .map(|v| v.as_str())
+                == Some(metadata::encodings::PLAIN)
+            {
+                self.attributes_batch
+                    .column(parent_id_column.0)
+                    .as_primitive::<UInt16Type>()
+                    .clone()
+            } else {
+                self.init_parent_ids(parent_id_column.0)
+            }
+        })
+    }
+
+    fn init_parent_ids(&self, parent_id_column: usize) -> PrimitiveArray<UInt16Type> {
+        materialize_parent_id_for_attributes::<u16>(self.attributes_batch)
+            .expect("materialized batch")
+            .column(parent_id_column)
+            .as_primitive::<UInt16Type>()
+            .clone()
+    }
+
     fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
         // Note: id_map is an array of parent_ids (record identifier in the
         // attribute table) to the actual index of the record in the root table.
         self.id_to_record_index_map.get_or_init(|| {
-            let ids = self.ids;
+            let ids = self.ids.get_ids();
             let mut id_map_length = ids.len();
             let mut id_map_buffer = MutableBuffer::from_len_zeroed(id_map_length * 2);
             let mut id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
@@ -1834,7 +2106,7 @@ impl<'record> OtapAttributes<'record> {
                 return Some(
                     if let Some(ints) = self.attribute_ints
                         && ints.is_valid(attribute_index)
-                {
+                    {
                         let value = unsafe { ints.value_unchecked(attribute_index) };
                         AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
                     } else {
@@ -1844,10 +2116,10 @@ impl<'record> OtapAttributes<'record> {
             }
             3 => {
                 return Some(
-                if let Some(doubles) = self.attribute_doubles
-                    && doubles.is_valid(attribute_index)
-                {
-                    let value = unsafe { doubles.value_unchecked(attribute_index) };
+                    if let Some(doubles) = self.attribute_doubles
+                        && doubles.is_valid(attribute_index)
+                    {
+                        let value = unsafe { doubles.value_unchecked(attribute_index) };
                         AttributeValueOrIndex::Value(ValueOrRef::Double(value))
                     } else {
                         AttributeValueOrIndex::Value(ValueOrRef::Double(0f64))
@@ -1972,7 +2244,7 @@ impl<'record> RecordTable for OtapAttributes<'record> {
 
             let attribute_keys = self.attribute_keys.keys().values().as_ptr();
             let attribute_types = self.attribute_types.values().as_ptr();
-            let attribute_parent_ids = self.attribute_parent_ids.values().as_ptr();
+            let attribute_parent_ids = self.get_parent_ids().values().as_ptr();
             let id_to_record_index_map = self.get_id_to_record_index_map().values().as_ptr();
 
             for attribute_index in 0..attribute_count {
@@ -2052,7 +2324,7 @@ impl Display for OtapAttributes<'_> {
         write!(
             f,
             "Attributes(RecordCount={})",
-            self.attribute_parent_ids.len()
+            self.attributes_batch.num_rows()
         )
     }
 }

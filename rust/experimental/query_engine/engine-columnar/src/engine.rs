@@ -187,9 +187,13 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                 data_type: _,
                                 values,
                             } => {
-                                std::mem::drop(execution_context);
+                                let state = execution_context
+                                    .into_parts()
+                                    .expect("has records")
+                                    .into_parts();
 
-                                let new_batches = factory.filter(&batches, values.as_boolean());
+                                let new_batches =
+                                    factory.filter(state, &mut batches, values.as_boolean());
 
                                 batches = new_batches;
 

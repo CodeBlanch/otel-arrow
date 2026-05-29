@@ -502,6 +502,14 @@ mod tests {
                 .attributes(vec![KeyValue {
                     key: "attr1".into(),
                     value: Some(AnyValue {
+                        value: Some(Value::StringValue("value1".into())),
+                    }),
+                }])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![KeyValue {
+                    key: "attr1".into(),
+                    value: Some(AnyValue {
                         value: Some(Value::StringValue("value2".into())),
                     }),
                 }])
@@ -517,7 +525,9 @@ mod tests {
             LogRecord::build().finish(),
         ];
 
-        let otap_batch = to_otap_logs(log_records);
+        let mut otap_batch = to_otap_logs(log_records);
+
+        otap_batch.encode_transport_optimized().unwrap();
 
         let logs = match otap_batch {
             OtapArrowRecords::Logs(l) => l,
@@ -525,7 +535,7 @@ mod tests {
         };
 
         assert_eq!(
-            5,
+            6,
             logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
         );
 
@@ -549,18 +559,18 @@ mod tests {
         println!("{results}");
 
         assert_eq!(2, results.dropped_record_count);
-        assert_eq!(3, results.included_record_count);
+        assert_eq!(4, results.included_record_count);
 
         let final_logs = &results.included_records;
 
         assert_eq!(
-            3,
+            4,
             final_logs
                 .get(ArrowPayloadType::Logs)
                 .map_or(0, |v| v.num_rows())
         );
         assert_eq!(
-            3,
+            4,
             final_logs
                 .get(ArrowPayloadType::LogAttrs)
                 .map_or(0, |v| v.num_rows())

@@ -21,7 +21,8 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
 
     fn filter(
         &self,
-        batches: &[Option<RecordBatch>; BATCH_SIZE],
+        state: <Self::Records<'_> as ColumnarRecords>::RecordState,
+        batches: &mut [Option<RecordBatch>; BATCH_SIZE],
         filter: &BooleanArray,
     ) -> [Option<RecordBatch>; BATCH_SIZE];
 

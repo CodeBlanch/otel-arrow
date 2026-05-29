@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrow::{array::*, compute::kernels::filter, datatypes::*};
+use otap_df_pdata::schema::consts;
 
 /// Number of u64 words per page. Each page covers 65,536 IDs (one full u16 range).
 const ID_BITMAP_PAGE_WORDS: usize = 1024;
@@ -214,8 +215,20 @@ impl PartialEq for IdBitmap {
     }
 }
 
-pub fn filter_child_batch(ids: &IdBitmap, child_batch: &RecordBatch) -> Option<RecordBatch> {
-    let filter = build_uint16_id_filter(child_batch.column(0).as_primitive::<UInt16Type>(), ids);
+pub fn filter_child_batch(
+    ids: &IdBitmap,
+    parent_ids: Option<PrimitiveArray<UInt16Type>>,
+    child_batch: &RecordBatch,
+) -> Option<RecordBatch> {
+    let filter = build_uint16_id_filter(
+        parent_ids.as_ref().unwrap_or_else(|| {
+            child_batch
+                .column_by_name(consts::PARENT_ID)
+                .expect("has parent ids")
+                .as_primitive::<UInt16Type>()
+        }),
+        ids,
+    );
 
     if filter.true_count() > 0 {
         Some(filter::filter_record_batch(child_batch, &filter).unwrap())
