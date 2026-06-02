@@ -59,7 +59,11 @@ impl OtapLogRecordBatchFactory {
 impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     type Records<'a> = OtapLogRecordBatch<'a>;
 
-    fn create<'a>(&self, batches: &'a [Option<RecordBatch>; 4]) -> OtapLogRecordBatch<'a> {
+    fn create<'a>(
+        &self,
+        state: Option<OtapLogRecordState>,
+        batches: &'a [Option<RecordBatch>; 4],
+    ) -> OtapLogRecordBatch<'a> {
         if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref() {
             let logs_schema = logs.schema_ref();
 
@@ -166,10 +170,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
     fn filter(
         &self,
-        mut state: OtapLogRecordState,
+        state: &mut OtapLogRecordState,
         batches: &mut [Option<RecordBatch>; 4],
         filter: &BooleanArray,
-    ) -> [Option<RecordBatch>; 4] {
+    ) {
         let filter_true_count = filter.true_count();
 
         if let Some(mut logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].take()
@@ -177,12 +181,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         {
             let number_of_logs_before_filter = logs.num_rows();
             if filter_true_count == number_of_logs_before_filter {
-                return [
-                    batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].clone(),
-                    batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].clone(),
-                    Some(logs),
-                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].clone(),
-                ];
+                batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]] = Some(logs);
+                return;
             }
 
             let mut decoded_ids = [
@@ -213,30 +213,31 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             if number_of_logs_after_filter > 0 {
                 let mut ids = IdBitmap::new();
 
-                if let Some(id_column) = filtered_logs_batch
-                    .schema_ref()
-                    .column_with_name(consts::ID)
+                if let Some(attributes_batch) =
+                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].take()
                 {
-                    ids.populate(
-                        filtered_logs_batch
-                            .column(id_column.0)
-                            .as_primitive::<UInt16Type>()
-                            .iter()
-                            .flatten()
-                            .map(|i| i.into()),
-                    );
+                    if let Some(id_column) = filtered_logs_batch
+                        .schema_ref()
+                        .column_with_name(consts::ID)
+                    {
+                        ids.populate(
+                            filtered_logs_batch
+                                .column(id_column.0)
+                                .as_primitive::<UInt16Type>()
+                                .iter()
+                                .flatten()
+                                .map(|i| i.into()),
+                        );
+                    }
+
+                    if !ids.is_empty() {
+                        batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]] =
+                            filter_child_batch(&ids, state.decoded_ids.1.take(), &attributes_batch);
+                    }
                 }
 
-                let attributes_batch = if ids.is_empty() {
-                    None
-                } else {
-                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]]
-                        .as_ref()
-                        .and_then(|v| filter_child_batch(&ids, state.decoded_ids.1.take(), v))
-                };
-
-                let resource_attributes_batch = if let Some(resource_attributes) =
-                    batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].as_ref()
+                if let Some(resource_attributes) =
+                    batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].take()
                 {
                     ids.clear();
 
@@ -257,21 +258,18 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         );
                     }
 
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        filter_child_batch(
-                            &ids,
-                            state.decoded_resource_ids.1.take(),
-                            resource_attributes,
-                        )
+                    if !ids.is_empty() {
+                        batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]] =
+                            filter_child_batch(
+                                &ids,
+                                state.decoded_resource_ids.1.take(),
+                                &resource_attributes,
+                            );
                     }
-                } else {
-                    None
-                };
+                }
 
-                let scope_attributes_batch = if let Some(scope_attributes) =
-                    batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].as_ref()
+                if let Some(scope_attributes) =
+                    batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].take()
                 {
                     ids.clear();
 
@@ -291,31 +289,30 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         );
                     }
 
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        filter_child_batch(&ids, state.decoded_scope_ids.1.take(), scope_attributes)
-                    }
-                } else {
-                    None
-                };
+                    if !ids.is_empty() {
+                        batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]] =
+                            filter_child_batch(
+                                &ids,
+                                state.decoded_scope_ids.1.take(),
+                                &scope_attributes,
+                            );
+                    };
+                }
 
-                return [
-                    resource_attributes_batch,
-                    scope_attributes_batch,
-                    Some(filtered_logs_batch),
-                    attributes_batch,
-                ];
+                batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]] =
+                    Some(filtered_logs_batch);
+
+                return;
             }
         }
 
-        [None, None, None, None]
+        *batches = [None, None, None, None];
     }
 
     fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
         diagnostic_receiver: &T,
-        mut state: OtapLogRecordState,
+        state: &mut OtapLogRecordState,
         batches: &mut [Option<RecordBatch>; 4],
         root: &ColumnarEngineSelectionPath<'a>,
         path: &[ColumnarEngineSelectionPath<'a>],
@@ -961,6 +958,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             }
         }
     }
+
+    fn apply(&self, state: &mut OtapLogRecordState, batches: &mut [Option<RecordBatch>; 4]) {}
 }
 
 fn replace_id_columns_in_batch<const SIZE: usize>(

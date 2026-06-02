@@ -17,24 +17,34 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
     where
         Self: 'a;
 
-    fn create<'a>(&self, batches: &'a [Option<RecordBatch>; BATCH_SIZE]) -> Self::Records<'a>;
+    fn create<'a>(
+        &self,
+        state: Option<<Self::Records<'_> as ColumnarRecords>::RecordState>,
+        batches: &'a [Option<RecordBatch>; BATCH_SIZE],
+    ) -> Self::Records<'a>;
 
     fn filter(
         &self,
-        state: <Self::Records<'_> as ColumnarRecords>::RecordState,
+        state: &mut <Self::Records<'_> as ColumnarRecords>::RecordState,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
         filter: &BooleanArray,
-    ) -> [Option<RecordBatch>; BATCH_SIZE];
+    );
 
     fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
         &self,
         diagnostic_receiver: &T,
-        state: <Self::Records<'_> as ColumnarRecords>::RecordState,
+        state: &mut <Self::Records<'_> as ColumnarRecords>::RecordState,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
         root: &ColumnarEngineSelectionPath<'a>,
         path: &[ColumnarEngineSelectionPath<'a>],
         value: Dictionary,
     ) -> ColumnarRecordsWriteResult;
+
+    fn apply(
+        &self,
+        state: &mut <Self::Records<'_> as ColumnarRecords>::RecordState,
+        batches: &mut [Option<RecordBatch>; BATCH_SIZE],
+    );
 }
 
 pub enum ColumnarRecordsWriteResult {
