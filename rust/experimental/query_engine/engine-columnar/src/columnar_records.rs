@@ -8,41 +8,41 @@ use std::{
 };
 
 use arrow::{array::*, datatypes::*};
-use data_engine_expressions::Expression;
+use data_engine_expressions::{Expression, PipelineExpression};
 
 use crate::{engine_diagnostic::ColumnarEngineDiagnosticLevel, *};
 
 pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
-    type Records<'a>: ColumnarRecords
-    where
-        Self: 'a;
+    type Records<'pipeline, 'record>: ColumnarRecords + Into<Self::State<'pipeline>>;
+    type State<'pipeline>;
 
-    fn create<'a>(
+    fn create<'pipeline, 'record>(
         &self,
-        state: Option<<Self::Records<'_> as ColumnarRecords>::RecordState>,
-        batches: &'a [Option<RecordBatch>; BATCH_SIZE],
-    ) -> Self::Records<'a>;
+        pipeline: &'pipeline PipelineExpression,
+        state: Option<Self::State<'pipeline>>,
+        batches: &'record [Option<RecordBatch>; BATCH_SIZE],
+    ) -> Self::Records<'pipeline, 'record>;
 
-    fn filter(
+    fn filter<'pipeline>(
         &self,
-        state: &mut <Self::Records<'_> as ColumnarRecords>::RecordState,
+        state: &mut Self::State<'pipeline>,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
         filter: &BooleanArray,
     );
 
-    fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
+    fn set<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
         diagnostic_receiver: &T,
-        state: &mut <Self::Records<'_> as ColumnarRecords>::RecordState,
+        state: &mut Self::State<'pipeline>,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-        root: &ColumnarEngineSelectionPath<'a>,
-        path: &[ColumnarEngineSelectionPath<'a>],
-        value: Dictionary,
+        root: &ColumnarEngineSelectionPath<'pipeline>,
+        path: &[ColumnarEngineSelectionPath<'pipeline>],
+        value: Dictionary<'pipeline>,
     ) -> ColumnarRecordsWriteResult;
 
-    fn apply(
+    fn apply<'pipeline>(
         &self,
-        state: &mut <Self::Records<'_> as ColumnarRecords>::RecordState,
+        state: &mut Self::State<'pipeline>,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
     );
 }
@@ -69,12 +69,7 @@ pub enum ColumnarEngineSelectionPath<'a> {
     },
 }
 
-pub trait ColumnarRecords: RecordTable
-where
-    Self: Sized,
-{
-    type RecordState: 'static;
-
+pub trait ColumnarRecords: RecordTable {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel>;
 
     fn get_key_data_type(&self) -> DataType;
@@ -86,8 +81,6 @@ where
     }
 
     fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable>;
-
-    fn into_parts(self) -> Self::RecordState;
 }
 
 pub trait RecordTable: Display + Debug {

@@ -6,6 +6,7 @@ use std::{
     collections::hash_map::Entry,
     fmt::Display,
     hash::Hash,
+    marker::PhantomData,
     ops::Deref,
     rc::Rc,
     sync::Arc,
@@ -19,7 +20,7 @@ use arrow::{
     datatypes::*,
 };
 use data_engine_columnar::*;
-use data_engine_expressions::{Expression, RegexValue, StringValue, Value};
+use data_engine_expressions::*;
 use otap_df_pdata::{
     encode::record::{attributes::AttributesRecordBatchBuilder, logs::LogsBodyBuilder},
     otap::{
@@ -27,10 +28,7 @@ use otap_df_pdata::{
         transform::{materialize_parent_id_for_attributes, remove_delta_encoding_from_column},
     },
     proto::opentelemetry::arrow::v1::ArrowPayloadType,
-    schema::{
-        consts::{self, metadata},
-        update_field_metadata,
-    },
+    schema::consts::{self, metadata},
 };
 use roaring::RoaringBitmap;
 
@@ -57,13 +55,15 @@ impl OtapLogRecordBatchFactory {
 }
 
 impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
-    type Records<'a> = OtapLogRecordBatch<'a>;
+    type Records<'pipeline, 'record> = OtapLogRecordBatch<'pipeline, 'record>;
+    type State<'pipeline> = OtapLogRecordState;
 
-    fn create<'a>(
+    fn create<'pipeline, 'record>(
         &self,
+        pipeline: &'pipeline PipelineExpression,
         state: Option<OtapLogRecordState>,
-        batches: &'a [Option<RecordBatch>; 4],
-    ) -> OtapLogRecordBatch<'a> {
+        batches: &'record [Option<RecordBatch>; 4],
+    ) -> OtapLogRecordBatch<'pipeline, 'record> {
         if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref() {
             let logs_schema = logs.schema_ref();
 
@@ -168,7 +168,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         }
     }
 
-    fn filter(
+    fn filter<'pipeline>(
         &self,
         state: &mut OtapLogRecordState,
         batches: &mut [Option<RecordBatch>; 4],
@@ -191,15 +191,15 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 (consts::RESOURCE, None),
             ];
             let mut decode = false;
-            if let Some(ids) = state.decoded_ids.0.take() {
+            if let Some(ids) = state.decoded_attribute_ids.ids.take() {
                 decoded_ids[0].1 = Some(ids);
                 decode = true;
             }
-            if let Some(scope_ids) = state.decoded_scope_ids.0.take() {
+            if let Some(scope_ids) = state.decoded_scope_ids.ids.take() {
                 decoded_ids[1].1 = Some(scope_ids);
                 decode = true;
             }
-            if let Some(resource_ids) = state.decoded_resource_ids.0.take() {
+            if let Some(resource_ids) = state.decoded_resource_ids.ids.take() {
                 decoded_ids[2].1 = Some(resource_ids);
                 decode = true;
             }
@@ -232,7 +232,11 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
 
                     if !ids.is_empty() {
                         batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]] =
-                            filter_child_batch(&ids, state.decoded_ids.1.take(), &attributes_batch);
+                            filter_child_batch(
+                                &ids,
+                                state.decoded_attribute_ids.parent_ids.take(),
+                                &attributes_batch,
+                            );
                     }
                 }
 
@@ -262,7 +266,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]] =
                             filter_child_batch(
                                 &ids,
-                                state.decoded_resource_ids.1.take(),
+                                state.decoded_resource_ids.parent_ids.take(),
                                 &resource_attributes,
                             );
                     }
@@ -293,7 +297,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                         batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]] =
                             filter_child_batch(
                                 &ids,
-                                state.decoded_scope_ids.1.take(),
+                                state.decoded_scope_ids.parent_ids.take(),
                                 &scope_attributes,
                             );
                     };
@@ -309,13 +313,13 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         *batches = [None, None, None, None];
     }
 
-    fn set<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
+    fn set<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
         diagnostic_receiver: &T,
         state: &mut OtapLogRecordState,
         batches: &mut [Option<RecordBatch>; 4],
-        root: &ColumnarEngineSelectionPath<'a>,
-        path: &[ColumnarEngineSelectionPath<'a>],
+        root: &ColumnarEngineSelectionPath<'pipeline>,
+        path: &[ColumnarEngineSelectionPath<'pipeline>],
         value: Dictionary,
     ) -> ColumnarRecordsWriteResult {
         let path_length = path.len();
@@ -959,7 +963,12 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         }
     }
 
-    fn apply(&self, state: &mut OtapLogRecordState, batches: &mut [Option<RecordBatch>; 4]) {}
+    fn apply<'pipeline>(
+        &self,
+        state: &mut OtapLogRecordState,
+        batches: &mut [Option<RecordBatch>; 4],
+    ) {
+    }
 }
 
 fn replace_id_columns_in_batch<const SIZE: usize>(
@@ -1582,7 +1591,7 @@ fn body_writer(
 type OtapBody = OnceCell<Option<RecordTableDictionary>>;
 
 #[derive(Debug)]
-pub struct OtapLogRecordBatch<'record> {
+pub struct OtapLogRecordBatch<'pipeline, 'record> {
     diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
     logs: Option<&'record RecordBatch>,
     logs_schema: Option<&'record SchemaRef>,
@@ -1590,9 +1599,10 @@ pub struct OtapLogRecordBatch<'record> {
     resource: Option<OtapResource<'record>>,
     scope: Option<OtapScope<'record>>,
     body: OtapBody,
+    marker: PhantomData<&'pipeline usize>,
 }
 
-impl<'record> OtapLogRecordBatch<'record> {
+impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
     pub fn new(
         diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
         logs: &'record RecordBatch,
@@ -1600,7 +1610,7 @@ impl<'record> OtapLogRecordBatch<'record> {
         attributes: Option<OtapAttributes<'record>>,
         resource: Option<OtapResource<'record>>,
         scope: Option<OtapScope<'record>>,
-    ) -> OtapLogRecordBatch<'record> {
+    ) -> OtapLogRecordBatch<'pipeline, 'record> {
         Self {
             diagnostic_level,
             logs: Some(logs),
@@ -1609,10 +1619,11 @@ impl<'record> OtapLogRecordBatch<'record> {
             resource,
             scope,
             body: OnceCell::new(),
+            marker: Default::default(),
         }
     }
 
-    pub fn new_empty() -> OtapLogRecordBatch<'record> {
+    pub fn new_empty() -> OtapLogRecordBatch<'pipeline, 'record> {
         Self {
             diagnostic_level: None,
             logs: None,
@@ -1621,13 +1632,12 @@ impl<'record> OtapLogRecordBatch<'record> {
             resource: None,
             scope: None,
             body: OnceCell::new(),
+            marker: Default::default(),
         }
     }
 }
 
-impl ColumnarRecords for OtapLogRecordBatch<'_> {
-    type RecordState = OtapLogRecordState;
-
+impl ColumnarRecords for OtapLogRecordBatch<'_, '_> {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         self.diagnostic_level
     }
@@ -1651,27 +1661,26 @@ impl ColumnarRecords for OtapLogRecordBatch<'_> {
             _ => None,
         }
     }
+}
 
-    fn into_parts(self) -> OtapLogRecordState {
+impl Into<OtapLogRecordState> for OtapLogRecordBatch<'_, '_> {
+    fn into(self) -> OtapLogRecordState {
         OtapLogRecordState {
-            decoded_ids: self
-                .attributes
-                .map(|v| v.into_parts())
-                .unwrap_or((None, None)),
+            decoded_attribute_ids: self.attributes.map(|v| v.into_parts()).unwrap_or_default(),
             decoded_scope_ids: self
                 .scope
                 .and_then(|v| v.attributes.map(|v| v.into_parts()))
-                .unwrap_or((None, None)),
+                .unwrap_or_default(),
             decoded_resource_ids: self
                 .resource
                 .and_then(|v| v.attributes.map(|v| v.into_parts()))
-                .unwrap_or((None, None)),
+                .unwrap_or_default(),
             body: self.body,
         }
     }
 }
 
-impl RecordTable for OtapLogRecordBatch<'_> {
+impl RecordTable for OtapLogRecordBatch<'_, '_> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
         let key = get_log_record_schema().normalize_key(key);
 
@@ -1755,7 +1764,7 @@ impl RecordTable for OtapLogRecordBatch<'_> {
     }
 }
 
-impl Display for OtapLogRecordBatch<'_> {
+impl Display for OtapLogRecordBatch<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Logs(RecordCount={})", self.len())
     }
@@ -1880,19 +1889,25 @@ impl<'record> OtapIds<'record> {
 }
 
 #[derive(Debug)]
+pub struct OtapDecodedIds {
+    ids: Option<PrimitiveArray<UInt16Type>>,
+    parent_ids: Option<PrimitiveArray<UInt16Type>>,
+}
+
+impl Default for OtapDecodedIds {
+    fn default() -> Self {
+        Self {
+            ids: None,
+            parent_ids: None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct OtapLogRecordState {
-    decoded_ids: (
-        Option<PrimitiveArray<UInt16Type>>,
-        Option<PrimitiveArray<UInt16Type>>,
-    ),
-    decoded_scope_ids: (
-        Option<PrimitiveArray<UInt16Type>>,
-        Option<PrimitiveArray<UInt16Type>>,
-    ),
-    decoded_resource_ids: (
-        Option<PrimitiveArray<UInt16Type>>,
-        Option<PrimitiveArray<UInt16Type>>,
-    ),
+    decoded_attribute_ids: OtapDecodedIds,
+    decoded_scope_ids: OtapDecodedIds,
+    decoded_resource_ids: OtapDecodedIds,
     body: OtapBody,
 }
 
@@ -1983,12 +1998,7 @@ impl<'record> OtapAttributes<'record> {
         }
     }
 
-    pub fn into_parts(
-        mut self,
-    ) -> (
-        Option<PrimitiveArray<UInt16Type>>,
-        Option<PrimitiveArray<UInt16Type>>,
-    ) {
+    pub fn into_parts(mut self) -> OtapDecodedIds {
         let parent_id_column = self
             .attributes_batch
             .schema_ref()
@@ -2011,7 +2021,10 @@ impl<'record> OtapAttributes<'record> {
             )
         };
 
-        (self.ids.into_parts(), parent_ids)
+        OtapDecodedIds {
+            ids: self.ids.into_parts(),
+            parent_ids,
+        }
     }
 
     fn get_parent_ids(&self) -> &PrimitiveArray<UInt16Type> {
