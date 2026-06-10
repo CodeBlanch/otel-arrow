@@ -4,7 +4,6 @@
 use std::{
     collections::hash_map::Entry,
     fmt::{Display, Write},
-    rc::Rc,
 };
 
 use ahash::AHashMap;
@@ -132,7 +131,7 @@ impl<'a> Dictionary<'a> {
 
     pub fn with_values(
         self,
-        key_filter: Option<RoaringBitmap>,
+        key_filter: Option<&RoaringBitmap>,
         values: &Dictionary<'a>,
     ) -> Dictionary<'a> {
         let (source_keys, source_values) = self.into_parts();
@@ -204,31 +203,10 @@ where
     }
 }
 
-impl From<RecordTableDictionary> for Dictionary<'static> {
-    fn from(value: RecordTableDictionary) -> Self {
-        let (keys, values) = value.into_parts();
-
-        Dictionary {
-            keys,
-            values: values.into(),
-        }
-    }
-}
-
-impl From<RecordTableDictionaryValueArray> for DictionaryValueArray<'static> {
-    fn from(value: RecordTableDictionaryValueArray) -> Self {
-        match value {
-            RecordTableDictionaryValueArray::Array(a) => DictionaryValueArray::Array(a),
-            RecordTableDictionaryValueArray::Vec(v) => DictionaryValueArray::Vec(v),
-            RecordTableDictionaryValueArray::Boolean => DictionaryValueArray::Boolean,
-        }
-    }
-}
-
 fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
     source_keys: DictionaryKeyArray,
     source_values: DictionaryValueArray<'a>,
-    key_filter: Option<RoaringBitmap>,
+    key_filter: Option<&RoaringBitmap>,
     values: &Dictionary<'a>,
 ) -> Dictionary<'a> {
     let (mut source_values, lookup) = source_values.into_set();

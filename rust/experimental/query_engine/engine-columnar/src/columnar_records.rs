@@ -8,7 +8,8 @@ use std::{
 };
 
 use arrow::{array::*, datatypes::*};
-use data_engine_expressions::{Expression, PipelineExpression};
+use data_engine_expressions::*;
+use roaring::RoaringBitmap;
 
 use crate::{engine_diagnostic::ColumnarEngineDiagnosticLevel, *};
 
@@ -18,7 +19,6 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
 
     fn create<'pipeline, 'record>(
         &self,
-        pipeline: &'pipeline PipelineExpression,
         state: Option<Self::State<'pipeline>>,
         batches: &'record [Option<RecordBatch>; BATCH_SIZE],
     ) -> Self::Records<'pipeline, 'record>;
@@ -33,20 +33,25 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
     fn set<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
         diagnostic_receiver: &T,
+        expression: &'pipeline dyn Expression,
         state: &mut Self::State<'pipeline>,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
         root: &ColumnarEngineSelectionPath<'pipeline>,
         path: &[ColumnarEngineSelectionPath<'pipeline>],
+        key_filter: Option<&RoaringBitmap>,
         value: Dictionary<'pipeline>,
     ) -> ColumnarRecordsWriteResult;
 
-    fn apply<'pipeline>(
+    fn apply<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
+        diagnostic_receiver: &T,
+        expression: &'pipeline dyn Expression,
         state: &mut Self::State<'pipeline>,
         batches: &mut [Option<RecordBatch>; BATCH_SIZE],
     );
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ColumnarRecordsWriteResult {
     Success,
     PartialSuccess,
@@ -121,6 +126,8 @@ impl RecordTableDictionary {
         }
     }
 
+    // Note: Use Into<Dictionary<'static>> for real code
+    #[cfg(test)]
     pub fn as_dictionary(&self) -> Dictionary<'static> {
         let values = match &self.values {
             RecordTableDictionaryValueArray::Array(a) => DictionaryValueArray::Array(a.clone()),
@@ -148,22 +155,11 @@ impl RecordTableDictionary {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum RecordTableDictionaryValueArray {
-    Array(Arc<dyn Array>),
-    Vec(Rc<Vec<ValueOrRef<'static>>>),
-    Boolean,
-}
+impl From<RecordTableDictionary> for Dictionary<'static> {
+    fn from(value: RecordTableDictionary) -> Self {
+        let (keys, values) = value.into_parts();
 
-impl RecordTableDictionaryValueArray {
-    pub fn get_value_at(&self, index: usize) -> ValueOrRef<'static> {
-        match self {
-            RecordTableDictionaryValueArray::Array(a) => get_value_from_array(a, index),
-            RecordTableDictionaryValueArray::Vec(a) => {
-                a.get(index).cloned().unwrap_or(ValueOrRef::Null)
-            }
-            RecordTableDictionaryValueArray::Boolean => ValueOrRef::Boolean(index != 0),
-        }
+        Dictionary::new(keys, values.into())
     }
 }
 
@@ -189,6 +185,25 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum RecordTableDictionaryValueArray {
+    Array(Arc<dyn Array>),
+    Vec(Rc<Vec<ValueOrRef<'static>>>),
+    Boolean,
+}
+
+impl RecordTableDictionaryValueArray {
+    pub fn get_value_at(&self, index: usize) -> ValueOrRef<'static> {
+        match self {
+            RecordTableDictionaryValueArray::Array(a) => get_value_from_array(a, index),
+            RecordTableDictionaryValueArray::Vec(a) => {
+                a.get(index).cloned().unwrap_or(ValueOrRef::Null)
+            }
+            RecordTableDictionaryValueArray::Boolean => ValueOrRef::Boolean(index != 0),
+        }
+    }
+}
+
 impl<T: Array> From<&T> for RecordTableDictionaryValueArray {
     fn from(value: &T) -> RecordTableDictionaryValueArray {
         RecordTableDictionaryValueArray::Array((value as &dyn Array).slice(0, value.len()))
@@ -198,5 +213,15 @@ impl<T: Array> From<&T> for RecordTableDictionaryValueArray {
 impl From<&dyn Array> for RecordTableDictionaryValueArray {
     fn from(value: &dyn Array) -> RecordTableDictionaryValueArray {
         RecordTableDictionaryValueArray::Array(value.slice(0, value.len()))
+    }
+}
+
+impl From<RecordTableDictionaryValueArray> for DictionaryValueArray<'static> {
+    fn from(value: RecordTableDictionaryValueArray) -> Self {
+        match value {
+            RecordTableDictionaryValueArray::Array(a) => DictionaryValueArray::Array(a),
+            RecordTableDictionaryValueArray::Vec(v) => DictionaryValueArray::Vec(v),
+            RecordTableDictionaryValueArray::Boolean => DictionaryValueArray::Boolean,
+        }
     }
 }

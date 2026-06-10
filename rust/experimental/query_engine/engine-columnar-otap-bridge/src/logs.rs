@@ -6,7 +6,6 @@ use std::{
     collections::hash_map::Entry,
     fmt::Display,
     hash::Hash,
-    marker::PhantomData,
     ops::Deref,
     rc::Rc,
     sync::Arc,
@@ -22,7 +21,7 @@ use arrow::{
 use data_engine_columnar::*;
 use data_engine_expressions::*;
 use otap_df_pdata::{
-    encode::record::{attributes::AttributesRecordBatchBuilder, logs::LogsBodyBuilder},
+    encode::record::logs::LogsBodyBuilder,
     otap::{
         raw_batch_store::POSITION_LOOKUP,
         transform::{materialize_parent_id_for_attributes, remove_delta_encoding_from_column},
@@ -31,11 +30,19 @@ use otap_df_pdata::{
     schema::consts::{self, metadata},
 };
 use roaring::RoaringBitmap;
+use strum::*;
 
 use crate::{
     filter::{IdBitmap, filter_child_batch},
     *,
 };
+
+static LOGS_BATCH_POSITION: usize = POSITION_LOOKUP[ArrowPayloadType::Logs as usize];
+static LOG_ATTRIBUTES_BATCH_POSITION: usize = POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize];
+static RESOURCE_ATTRIBUTES_BATCH_POSITION: usize =
+    POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize];
+static SCOPE_ATTRIBUTES_BATCH_POSITION: usize =
+    POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize];
 
 pub struct OtapLogRecordBatchFactory {
     diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
@@ -56,20 +63,18 @@ impl OtapLogRecordBatchFactory {
 
 impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     type Records<'pipeline, 'record> = OtapLogRecordBatch<'pipeline, 'record>;
-    type State<'pipeline> = OtapLogRecordState;
+    type State<'pipeline> = OtapLogRecordState<'pipeline>;
 
     fn create<'pipeline, 'record>(
         &self,
-        pipeline: &'pipeline PipelineExpression,
-        state: Option<OtapLogRecordState>,
+        state: Option<Self::State<'pipeline>>,
         batches: &'record [Option<RecordBatch>; 4],
     ) -> OtapLogRecordBatch<'pipeline, 'record> {
-        if let Some(logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].as_ref() {
+        if let Some(logs) = batches[LOGS_BATCH_POSITION].as_ref() {
             let logs_schema = logs.schema_ref();
 
             let attributes = if let Some(id_column) = logs_schema.column_with_name(consts::ID)
-                && let Some(attributes_batch) =
-                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].as_ref()
+                && let Some(attributes_batch) = batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref()
             {
                 Some(OtapAttributes::new(
                     OtapIds::new(
@@ -93,7 +98,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 if let DataType::Struct(fields) = resource_struct.data_type()
                     && let Some(id_column) = fields.find(consts::ID)
                     && let Some(resource_attributes_batch) =
-                        batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].as_ref()
+                        batches[RESOURCE_ATTRIBUTES_BATCH_POSITION].as_ref()
                 {
                     Some(OtapResource {
                         resource_struct,
@@ -127,7 +132,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 if let DataType::Struct(fields) = scope_struct.data_type()
                     && let Some(id_column) = fields.find(consts::ID)
                     && let Some(scope_attributes_batch) =
-                        batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].as_ref()
+                        batches[SCOPE_ATTRIBUTES_BATCH_POSITION].as_ref()
                 {
                     Some(OtapScope {
                         scope_struct,
@@ -162,6 +167,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 attributes,
                 resource,
                 scope,
+                state,
             )
         } else {
             OtapLogRecordBatch::new_empty()
@@ -176,12 +182,12 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     ) {
         let filter_true_count = filter.true_count();
 
-        if let Some(mut logs) = batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]].take()
+        if let Some(mut logs) = batches[LOGS_BATCH_POSITION].take()
             && filter_true_count > 0
         {
             let number_of_logs_before_filter = logs.num_rows();
             if filter_true_count == number_of_logs_before_filter {
-                batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]] = Some(logs);
+                batches[LOGS_BATCH_POSITION] = Some(logs);
                 return;
             }
 
@@ -213,9 +219,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             if number_of_logs_after_filter > 0 {
                 let mut ids = IdBitmap::new();
 
-                if let Some(attributes_batch) =
-                    batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]].take()
-                {
+                if let Some(attributes_batch) = batches[LOG_ATTRIBUTES_BATCH_POSITION].take() {
                     if let Some(id_column) = filtered_logs_batch
                         .schema_ref()
                         .column_with_name(consts::ID)
@@ -231,17 +235,16 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     }
 
                     if !ids.is_empty() {
-                        batches[POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize]] =
-                            filter_child_batch(
-                                &ids,
-                                state.decoded_attribute_ids.parent_ids.take(),
-                                &attributes_batch,
-                            );
+                        batches[LOG_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
+                            &ids,
+                            state.decoded_attribute_ids.parent_ids.take(),
+                            &attributes_batch,
+                        );
                     }
                 }
 
                 if let Some(resource_attributes) =
-                    batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]].take()
+                    batches[RESOURCE_ATTRIBUTES_BATCH_POSITION].take()
                 {
                     ids.clear();
 
@@ -263,18 +266,15 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     }
 
                     if !ids.is_empty() {
-                        batches[POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize]] =
-                            filter_child_batch(
-                                &ids,
-                                state.decoded_resource_ids.parent_ids.take(),
-                                &resource_attributes,
-                            );
+                        batches[RESOURCE_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
+                            &ids,
+                            state.decoded_resource_ids.parent_ids.take(),
+                            &resource_attributes,
+                        );
                     }
                 }
 
-                if let Some(scope_attributes) =
-                    batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]].take()
-                {
+                if let Some(scope_attributes) = batches[SCOPE_ATTRIBUTES_BATCH_POSITION].take() {
                     ids.clear();
 
                     if let Some(scope_column) = filtered_logs_batch
@@ -294,17 +294,15 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     }
 
                     if !ids.is_empty() {
-                        batches[POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize]] =
-                            filter_child_batch(
-                                &ids,
-                                state.decoded_scope_ids.parent_ids.take(),
-                                &scope_attributes,
-                            );
+                        batches[SCOPE_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
+                            &ids,
+                            state.decoded_scope_ids.parent_ids.take(),
+                            &scope_attributes,
+                        );
                     };
                 }
 
-                batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]] =
-                    Some(filtered_logs_batch);
+                batches[LOGS_BATCH_POSITION] = Some(filtered_logs_batch);
 
                 return;
             }
@@ -316,295 +314,60 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     fn set<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
         diagnostic_receiver: &T,
-        state: &mut OtapLogRecordState,
+        expression: &'pipeline dyn Expression,
+        state: &mut OtapLogRecordState<'pipeline>,
         batches: &mut [Option<RecordBatch>; 4],
         root: &ColumnarEngineSelectionPath<'pipeline>,
         path: &[ColumnarEngineSelectionPath<'pipeline>],
-        value: Dictionary,
+        key_filter: Option<&RoaringBitmap>,
+        value: Dictionary<'pipeline>,
     ) -> ColumnarRecordsWriteResult {
-        let path_length = path.len();
+        let logs = batches[LOGS_BATCH_POSITION]
+            .as_ref()
+            .expect("has log records");
 
         match root {
             ColumnarEngineSelectionPath::Key {
-                expression,
+                expression: key_expression,
                 value: root_key,
             } => {
-                match get_log_record_schema().normalize_key(root_key.get_value()) {
+                let field = match get_log_record_schema().normalize_key(root_key.get_value()) {
                     consts::ATTRIBUTES => {
                         todo!()
                     }
-                    consts::BODY => {
-                        let value = if path_length > 0 {
-                            let body = state.body.take().unwrap_or_else(|| {
-                                if let Some(logs_batch) =
-                                    &batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
-                                {
-                                    return build_logs_body_dictionary(
-                                        logs_batch,
-                                        logs_batch.schema_ref(),
-                                    );
-                                }
-
-                                None
-                            });
-
-                            match body {
-                                None => {
-                                    diagnostic_receiver.add_diagnostic_if_enabled(
-                                        ColumnarEngineDiagnosticLevel::Warn,
-                                        *expression,
-                                        || "Cannot access into empty Body".into(),
-                                    );
-                                    return ColumnarRecordsWriteResult::NotFound;
-                                }
-                                Some(body) => update_dictionary_values_for_path(
-                                    body,
-                                    None,
-                                    &path[0],
-                                    &path[1..],
-                                    &value,
-                                ),
-                            }
-                        } else {
-                            value
-                        };
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::BODY,
-                            value,
-                            body_writer,
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::TIME_UNIX_NANO => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::TIME_UNIX_NANO,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::TIME_UNIX_NANO,
-                            value,
-                            |keys, values| {
-                                primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::OBSERVED_TIME_UNIX_NANO => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::OBSERVED_TIME_UNIX_NANO,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::OBSERVED_TIME_UNIX_NANO,
-                            value,
-                            |keys, values| {
-                                primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::SEVERITY_NUMBER => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::SEVERITY_NUMBER,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::SEVERITY_NUMBER,
-                            value,
-                            |keys, values| {
-                                adaptive_dictionary_writer(
-                                    keys,
-                                    values,
-                                    DictionaryValueArray::transform_into_int_array::<Int32Type>,
-                                )
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::SEVERITY_TEXT => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::SEVERITY_TEXT,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::SEVERITY_TEXT,
-                            value,
-                            |keys, values| {
-                                adaptive_dictionary_writer(
-                                    keys,
-                                    values,
-                                    DictionaryValueArray::transform_into_string_array,
-                                )
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::TRACE_ID => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::TRACE_ID,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::TRACE_ID,
-                            value,
-                            |keys, values| {
-                                adaptive_dictionary_writer(
-                                    keys,
-                                    values,
-                                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<
-                                        16,
-                                    >,
-                                )
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::SPAN_ID => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::SPAN_ID,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::SPAN_ID,
-                            value,
-                            |keys, values| {
-                                adaptive_dictionary_writer(
-                                    keys,
-                                    values,
-                                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<
-                                        8,
-                                    >,
-                                )
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::FLAGS => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::FLAGS,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::FLAGS,
-                            value,
-                            |keys, values| {
-                                primitive_array_writer(
-                                    keys,
-                                    values,
-                                    DictionaryValueArray::transform_into_int_array::<UInt32Type>,
-                                )
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
-                    consts::EVENT_NAME => {
-                        if path_length > 0 {
-                            return log_invalid_column_access(
-                                diagnostic_receiver,
-                                *expression,
-                                consts::EVENT_NAME,
-                            );
-                        }
-
-                        set_column(
-                            diagnostic_receiver,
-                            *expression,
-                            batches,
-                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                            consts::EVENT_NAME,
-                            value,
-                            |keys, values| {
-                                adaptive_dictionary_writer(
-                                    keys,
-                                    values,
-                                    DictionaryValueArray::transform_into_string_array,
-                                )
-                            },
-                        );
-
-                        ColumnarRecordsWriteResult::Success
-                    }
+                    consts::BODY => OtapLogRecordField::Body,
+                    consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
+                    consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
+                    consts::SEVERITY_NUMBER => OtapLogRecordField::SeverityNumber,
+                    consts::SEVERITY_TEXT => OtapLogRecordField::SeverityText,
+                    consts::TRACE_ID => OtapLogRecordField::TraceId,
+                    consts::SPAN_ID => OtapLogRecordField::SpanId,
+                    consts::FLAGS => OtapLogRecordField::Flags,
+                    consts::EVENT_NAME => OtapLogRecordField::EventName,
                     f => {
                         diagnostic_receiver.add_diagnostic_if_enabled(
                             ColumnarEngineDiagnosticLevel::Warn,
-                            *expression,
+                            *key_expression,
                             || format!("Field '{f}' does not exist on log record"),
                         );
-                        ColumnarRecordsWriteResult::NotFound
+                        return ColumnarRecordsWriteResult::NotFound;
                     }
-                }
+                };
+
+                process_log_record_field_update(
+                    diagnostic_receiver,
+                    expression,
+                    field,
+                    &mut state.fields,
+                    logs,
+                    *key_expression,
+                    path,
+                    key_filter,
+                    &value,
+                )
             }
             ColumnarEngineSelectionPath::Dictionary {
-                expression,
+                expression: keys_expression,
                 value: root_keys,
             } => {
                 let key_length = root_keys.len();
@@ -612,332 +375,52 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
                     AHashMap::with_capacity(key_length);
 
-                for key_index in 0..key_length {
-                    if let ValueOrRef::String(key) = root_keys.get_value(key_index) {
-                        match plan.entry(key) {
-                            Entry::Occupied(mut o) => {
-                                o.get_mut()
-                                    .try_push(key_index as u32)
-                                    .expect("key_index pushed");
-                            }
-                            Entry::Vacant(v) => {
-                                v.insert(RoaringBitmap::from([key_index as u32]));
-                            }
-                        };
-                    }
+                match key_filter {
+                    Some(v) => build_plan(root_keys, &mut plan, v.iter().map(|v| v as usize)),
+                    None => build_plan(root_keys, &mut plan, 0..key_length),
                 }
 
                 let mut written_data_count = 0;
                 let plan_count = plan.len();
 
                 for (key, key_filter) in plan.into_iter() {
-                    match get_log_record_schema().normalize_key(key.get_value()) {
-                        consts::BODY => {
-                            let body = state.body.take().unwrap_or_else(|| {
-                                if let Some(logs_batch) =
-                                    &batches[POSITION_LOOKUP[ArrowPayloadType::Logs as usize]]
-                                {
-                                    return build_logs_body_dictionary(
-                                        logs_batch,
-                                        logs_batch.schema_ref(),
-                                    );
-                                }
-
-                                None
-                            });
-
-                            if path_length > 0 {
-                                match body {
-                                    None => {
-                                        diagnostic_receiver.add_diagnostic_if_enabled(
-                                            ColumnarEngineDiagnosticLevel::Warn,
-                                            *expression,
-                                            || "Cannot access into empty Body".into(),
-                                        );
-                                        continue;
-                                    }
-                                    Some(body) => {
-                                        let value = update_dictionary_values_for_path(
-                                            body,
-                                            Some(key_filter),
-                                            &path[0],
-                                            &path[1..],
-                                            &value,
-                                        );
-
-                                        set_column(
-                                            diagnostic_receiver,
-                                            *expression,
-                                            batches,
-                                            POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                            consts::BODY,
-                                            value,
-                                            body_writer,
-                                        );
-
-                                        written_data_count += 1;
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::BODY,
-                                |_| body,
-                                key_filter,
-                                &value,
-                                body_writer,
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::TIME_UNIX_NANO => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::TIME_UNIX_NANO,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::TIME_UNIX_NANO,
-                                primitive_array_reader::<TimestampNanosecondType>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::OBSERVED_TIME_UNIX_NANO => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::OBSERVED_TIME_UNIX_NANO,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::OBSERVED_TIME_UNIX_NANO,
-                                primitive_array_reader::<TimestampNanosecondType>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    primitive_array_writer(keys, values, DictionaryValueArray::transform_into_timestamp_nanoseconds_array)
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::SEVERITY_NUMBER => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::SEVERITY_NUMBER,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::SEVERITY_NUMBER,
-                                adaptive_dictionary_reader::<Int32Array>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    adaptive_dictionary_writer(
-                                        keys,
-                                        values,
-                                        DictionaryValueArray::transform_into_int_array::<Int32Type>,
-                                    )
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::SEVERITY_TEXT => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::SEVERITY_TEXT,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::SEVERITY_TEXT,
-                                adaptive_dictionary_reader::<StringArray>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    adaptive_dictionary_writer(
-                                        keys,
-                                        values,
-                                        DictionaryValueArray::transform_into_string_array,
-                                    )
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::TRACE_ID => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::TRACE_ID,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::TRACE_ID,
-                                adaptive_dictionary_reader::<FixedSizeBinaryArray>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    adaptive_dictionary_writer(
-                                        keys,
-                                        values,
-                                        DictionaryValueArray::transform_into_fixed_sized_binary_array::<
-                                            16,
-                                        >,
-                                    )
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::SPAN_ID => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::SPAN_ID,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::SPAN_ID,
-                                adaptive_dictionary_reader::<FixedSizeBinaryArray>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    adaptive_dictionary_writer(
-                                        keys,
-                                        values,
-                                        DictionaryValueArray::transform_into_fixed_sized_binary_array::<
-                                            8,
-                                        >,
-                                    )
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::FLAGS => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::FLAGS,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::FLAGS,
-                                primitive_array_reader::<UInt32Type>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    primitive_array_writer(
-                                        keys,
-                                        values,
-                                        DictionaryValueArray::transform_into_int_array::<UInt32Type>,
-                                    )
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
-                        consts::EVENT_NAME => {
-                            if path_length > 0 {
-                                log_invalid_column_access(
-                                    diagnostic_receiver,
-                                    *expression,
-                                    consts::EVENT_NAME,
-                                );
-                                continue;
-                            }
-
-                            set_column_with_values(
-                                diagnostic_receiver,
-                                *expression,
-                                batches,
-                                POSITION_LOOKUP[ArrowPayloadType::Logs as usize],
-                                consts::EVENT_NAME,
-                                adaptive_dictionary_reader::<StringArray>,
-                                key_filter,
-                                &value,
-                                |keys, values| {
-                                    adaptive_dictionary_writer(
-                                        keys,
-                                        values,
-                                        DictionaryValueArray::transform_into_string_array,
-                                    )
-                                },
-                            );
-
-                            written_data_count += 1;
-                        }
+                    let field = match get_log_record_schema().normalize_key(key.get_value()) {
+                        consts::BODY => OtapLogRecordField::Body,
+                        consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
+                        consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
+                        consts::SEVERITY_NUMBER => OtapLogRecordField::SeverityNumber,
+                        consts::SEVERITY_TEXT => OtapLogRecordField::SeverityText,
+                        consts::TRACE_ID => OtapLogRecordField::TraceId,
+                        consts::SPAN_ID => OtapLogRecordField::SpanId,
+                        consts::FLAGS => OtapLogRecordField::Flags,
+                        consts::EVENT_NAME => OtapLogRecordField::EventName,
                         f => {
                             diagnostic_receiver.add_diagnostic_if_enabled(
                                 ColumnarEngineDiagnosticLevel::Warn,
-                                *expression,
+                                *keys_expression,
                                 || format!("Field '{f}' does not exist on log record"),
                             );
+                            continue;
                         }
+                    };
+
+                    let logs = batches[LOGS_BATCH_POSITION]
+                        .as_ref()
+                        .expect("has log records");
+
+                    if process_log_record_field_update(
+                        diagnostic_receiver,
+                        expression,
+                        field,
+                        &mut state.fields,
+                        logs,
+                        *keys_expression,
+                        path,
+                        Some(&key_filter),
+                        &value,
+                    ) != ColumnarRecordsWriteResult::NotFound
+                    {
+                        written_data_count += 1;
                     }
                 }
 
@@ -963,11 +446,125 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         }
     }
 
-    fn apply<'pipeline>(
+    fn apply<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
-        state: &mut OtapLogRecordState,
+        diagnostic_receiver: &T,
+        expression: &'pipeline dyn Expression,
+        state: &mut OtapLogRecordState<'pipeline>,
         batches: &mut [Option<RecordBatch>; 4],
     ) {
+        let mut logs = batches[LOGS_BATCH_POSITION].take().expect("has logs");
+
+        for field in OtapLogRecordField::VARIANTS {
+            if let Some(value) = state.fields.take_if_modified(*field) {
+                let (column_name, transform) = field.get_column_name_and_transform();
+
+                match value {
+                    OtapLogRecordModifiedField::Removed => {
+                        logs = remove_column(diagnostic_receiver, expression, logs, column_name);
+                    }
+                    OtapLogRecordModifiedField::Set(v) => {
+                        logs = set_column(
+                            diagnostic_receiver,
+                            expression,
+                            logs,
+                            column_name,
+                            v,
+                            transform,
+                        );
+                    }
+                }
+            }
+        }
+
+        batches[LOGS_BATCH_POSITION] = Some(logs);
+    }
+}
+
+fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
+    diagnostic_receiver: &T,
+    expression: &'pipeline dyn Expression,
+    field: OtapLogRecordField,
+    fields: &mut OtapLogRecordFields<'pipeline>,
+    logs: &RecordBatch,
+    root_expression: &'pipeline dyn Expression,
+    path: &[ColumnarEngineSelectionPath<'pipeline>],
+    key_filter: Option<&RoaringBitmap>,
+    value: &Dictionary<'pipeline>,
+) -> ColumnarRecordsWriteResult {
+    let path_length = path.len();
+
+    let value = if path_length > 0 {
+        if !field.supports_access_by_path() {
+            diagnostic_receiver.add_diagnostic_if_enabled(
+                ColumnarEngineDiagnosticLevel::Warn,
+                root_expression,
+                || format!("Cannot access into field '{field:?}'"),
+            );
+            return ColumnarRecordsWriteResult::NotFound;
+        }
+
+        match fields.take(field, logs) {
+            OtapValue::NotFound | OtapValue::Removed => {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    root_expression,
+                    || format!("Cannot access into empty '{field:?}'"),
+                );
+                return ColumnarRecordsWriteResult::NotFound;
+            }
+            OtapValue::Read(v) | OtapValue::Set(v) => {
+                update_dictionary_values_for_path(v, key_filter, &path[0], &path[1..], value)
+            }
+        }
+    } else if let Some(key_filter) = key_filter {
+        let existing_values = match fields.take(field, logs) {
+            OtapValue::Read(v) | OtapValue::Set(v) => v,
+            OtapValue::Removed | OtapValue::NotFound => {
+                let key_length = logs.num_rows();
+                Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
+            }
+        };
+
+        existing_values.with_values(Some(key_filter), value)
+    } else {
+        value.clone()
+    };
+
+    diagnostic_receiver.add_diagnostic_if_enabled(
+        ColumnarEngineDiagnosticLevel::Verbose,
+        expression,
+        || format!("Field '{field:?}' set to: {value}"),
+    );
+
+    fields.set(field, OtapValue::Set(value).into());
+
+    ColumnarRecordsWriteResult::Success
+}
+
+fn build_plan<'pipeline, T: Iterator<Item = usize>>(
+    root_keys: &Dictionary<'pipeline>,
+    plan: &mut AHashMap<StringValueOrRef<'pipeline>, RoaringBitmap>,
+    key_iter: T,
+) {
+    for key_index in key_iter {
+        match root_keys.get_value(key_index) {
+            ValueOrRef::String(key) => {
+                match plan.entry(key) {
+                    Entry::Occupied(mut o) => {
+                        o.get_mut()
+                            .try_push(key_index as u32)
+                            .expect("key_index pushed");
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert(RoaringBitmap::from([key_index as u32]));
+                    }
+                };
+            }
+            v => {
+                // todo: Log
+            }
+        }
     }
 }
 
@@ -1026,8 +623,8 @@ fn replace_id_columns_in_batch<const SIZE: usize>(
 }
 
 fn update_dictionary_values_for_path<'a>(
-    source: RecordTableDictionary,
-    key_filter: Option<RoaringBitmap>,
+    source: Dictionary<'a>,
+    key_filter: Option<&RoaringBitmap>,
     current_path: &ColumnarEngineSelectionPath<'a>,
     remaining_path: &[ColumnarEngineSelectionPath<'a>],
     value: &Dictionary<'a>,
@@ -1279,137 +876,65 @@ fn update_any_value_for_path<'a>(
     }
 }
 
-fn log_invalid_column_access<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
-    diagnostic_receiver: &T,
-    expression: &'a dyn Expression,
-    column_name: &str,
-) -> ColumnarRecordsWriteResult {
-    diagnostic_receiver.add_diagnostic_if_enabled(
-        ColumnarEngineDiagnosticLevel::Warn,
-        expression,
-        || format!("Cannot access into field '{column_name}' on log record"),
-    );
-    ColumnarRecordsWriteResult::NotFound
-}
-
-fn set_column<
-    'a,
-    TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>,
-    FTransform,
-    const BATCH_SIZE: usize,
->(
+fn set_column<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
     diagnostic_receiver: &TDiagnosticReceiver,
     expression: &'a dyn Expression,
-    batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-    batch_position: usize,
+    batch: RecordBatch,
     column_name: &str,
     value: Dictionary,
-    array_transform: FTransform,
-) where
-    FTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
-{
-    if let Some(logs_batch) = batches[batch_position].take() {
-        let (keys, values) = value.into_parts();
+    array_transform: fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
+) -> RecordBatch {
+    let (keys, values) = value.into_parts();
 
-        let transformed_values = array_transform(keys, values);
+    let transformed_values = array_transform(keys, values);
 
-        write_column_values_to_batch(
-            diagnostic_receiver,
-            expression,
-            batches,
-            batch_position,
-            column_name,
-            transformed_values,
-            logs_batch,
-        )
-    }
+    write_column_values_to_batch(
+        diagnostic_receiver,
+        expression,
+        batch,
+        column_name,
+        transformed_values,
+    )
 }
 
-fn set_column_with_values<
-    'a,
-    TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>,
-    FDictionaryTransform,
-    FArrayTransform,
-    const BATCH_SIZE: usize,
->(
+fn remove_column<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
     diagnostic_receiver: &TDiagnosticReceiver,
     expression: &'a dyn Expression,
-    batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-    batch_position: usize,
+    batch: RecordBatch,
     column_name: &str,
-    dictionary_transform: FDictionaryTransform,
-    key_filter: RoaringBitmap,
-    values: &Dictionary,
-    array_transform: FArrayTransform,
-) where
-    FDictionaryTransform: FnOnce(&Arc<dyn Array>) -> Option<RecordTableDictionary>,
-    FArrayTransform: Fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
-{
-    if let Some(logs_batch) = batches[batch_position].take() {
-        let key_length = logs_batch.num_rows();
-
-        let existing_values = if let Some(values) = logs_batch.column_by_name(column_name)
-            && let Some(values) = dictionary_transform(values)
-        {
-            values.into()
-        } else {
-            Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
-        };
-
-        let merged_values = existing_values.with_values(Some(key_filter), values);
-
-        let (keys, values) = merged_values.into_parts();
-
-        let transformed_values = array_transform(keys, values);
-
-        write_column_values_to_batch(
-            diagnostic_receiver,
+) -> RecordBatch {
+    if let Some((column_id, _)) = batch.schema_ref().column_with_name(column_name) {
+        diagnostic_receiver.add_diagnostic_if_enabled(
+            ColumnarEngineDiagnosticLevel::Info,
             expression,
-            batches,
-            batch_position,
-            column_name,
-            transformed_values,
-            logs_batch,
+            || format!("Column '{column_name}' removed",),
         );
+
+        let (mut schema, mut columns, count) = batch.into_parts();
+
+        let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
+
+        schema_builder.remove(column_id);
+        columns.remove(column_id);
+
+        schema = Arc::new(schema_builder.finish());
+
+        unsafe { RecordBatch::new_unchecked(schema, columns, count) }
+    } else {
+        batch
     }
 }
 
-fn write_column_values_to_batch<
-    'a,
-    TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>,
-    const BATCH_SIZE: usize,
->(
+fn write_column_values_to_batch<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
     diagnostic_receiver: &TDiagnosticReceiver,
     expression: &'a dyn Expression,
-    batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-    batch_position: usize,
+    batch: RecordBatch,
     column_name: &str,
     transformed_values: Option<Arc<dyn Array>>,
-    batch: RecordBatch,
-) {
+) -> RecordBatch {
     let values = match transformed_values {
         None => {
-            if let Some((column_id, _)) = batch.schema_ref().column_with_name(column_name) {
-                diagnostic_receiver.add_diagnostic_if_enabled(
-                    ColumnarEngineDiagnosticLevel::Info,
-                    expression,
-                    || format!("Column '{column_name}' removed",),
-                );
-
-                let (mut schema, mut columns, count) = batch.into_parts();
-
-                let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
-
-                schema_builder.remove(column_id);
-                columns.remove(column_id);
-
-                schema = Arc::new(schema_builder.finish());
-
-                batches[batch_position] =
-                    Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
-            }
-
-            return;
+            return remove_column(diagnostic_receiver, expression, batch, column_name);
         }
         Some(values) => values,
     };
@@ -1444,7 +969,7 @@ fn write_column_values_to_batch<
 
     schema = Arc::new(schema_builder.finish());
 
-    batches[batch_position] = Some(unsafe { RecordBatch::new_unchecked(schema, columns, count) });
+    unsafe { RecordBatch::new_unchecked(schema, columns, count) }
 }
 
 fn adaptive_dictionary_reader<V: Array + 'static>(
@@ -1598,8 +1123,7 @@ pub struct OtapLogRecordBatch<'pipeline, 'record> {
     attributes: Option<OtapAttributes<'record>>,
     resource: Option<OtapResource<'record>>,
     scope: Option<OtapScope<'record>>,
-    body: OtapBody,
-    marker: PhantomData<&'pipeline usize>,
+    fields: OtapLogRecordFields<'pipeline>,
 }
 
 impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
@@ -1610,7 +1134,13 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
         attributes: Option<OtapAttributes<'record>>,
         resource: Option<OtapResource<'record>>,
         scope: Option<OtapScope<'record>>,
+        state: Option<OtapLogRecordState<'pipeline>>,
     ) -> OtapLogRecordBatch<'pipeline, 'record> {
+        let fields = match state {
+            Some(state) => state.fields,
+            None => OtapLogRecordFields::new(),
+        };
+
         Self {
             diagnostic_level,
             logs: Some(logs),
@@ -1618,8 +1148,7 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
             attributes,
             resource,
             scope,
-            body: OnceCell::new(),
-            marker: Default::default(),
+            fields,
         }
     }
 
@@ -1631,8 +1160,7 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
             attributes: None,
             resource: None,
             scope: None,
-            body: OnceCell::new(),
-            marker: Default::default(),
+            fields: OtapLogRecordFields::new(),
         }
     }
 }
@@ -1663,8 +1191,8 @@ impl ColumnarRecords for OtapLogRecordBatch<'_, '_> {
     }
 }
 
-impl Into<OtapLogRecordState> for OtapLogRecordBatch<'_, '_> {
-    fn into(self) -> OtapLogRecordState {
+impl<'pipeline> Into<OtapLogRecordState<'pipeline>> for OtapLogRecordBatch<'pipeline, '_> {
+    fn into(self) -> OtapLogRecordState<'pipeline> {
         OtapLogRecordState {
             decoded_attribute_ids: self.attributes.map(|v| v.into_parts()).unwrap_or_default(),
             decoded_scope_ids: self
@@ -1675,7 +1203,8 @@ impl Into<OtapLogRecordState> for OtapLogRecordBatch<'_, '_> {
                 .resource
                 .and_then(|v| v.attributes.map(|v| v.into_parts()))
                 .unwrap_or_default(),
-            body: self.body,
+            fields: self.fields,
+            attributes: OnceCell::new(),
         }
     }
 }
@@ -1695,69 +1224,23 @@ impl RecordTable for OtapLogRecordBatch<'_, '_> {
         if let Some(logs) = self.logs
             && let Some(logs_schema) = self.logs_schema
         {
-            let values = match key {
-                consts::TIME_UNIX_NANO
-                    if let Some(time_unix_nano_column) =
-                        logs_schema.column_with_name(consts::TIME_UNIX_NANO) =>
-                {
-                    primitive_array_reader::<TimestampNanosecondType>(
-                        logs.column(time_unix_nano_column.0),
-                    )
-                }
-                consts::OBSERVED_TIME_UNIX_NANO
-                    if let Some(observed_time_unix_nano_column) =
-                        logs_schema.column_with_name(consts::OBSERVED_TIME_UNIX_NANO) =>
-                {
-                    primitive_array_reader::<TimestampNanosecondType>(
-                        logs.column(observed_time_unix_nano_column.0),
-                    )
-                }
-                consts::SEVERITY_NUMBER
-                    if let Some(severity_number_column) =
-                        logs_schema.column_with_name(consts::SEVERITY_NUMBER) =>
-                {
-                    adaptive_dictionary_reader::<Int32Array>(logs.column(severity_number_column.0))
-                }
-                consts::SEVERITY_TEXT
-                    if let Some(severity_text_column) =
-                        logs_schema.column_with_name(consts::SEVERITY_TEXT) =>
-                {
-                    adaptive_dictionary_reader::<StringArray>(logs.column(severity_text_column.0))
-                }
-                consts::BODY => self
-                    .body
-                    .get_or_init(|| build_logs_body_dictionary(logs, logs_schema))
-                    .clone(),
-                consts::TRACE_ID
-                    if let Some(trace_id_column) =
-                        logs_schema.column_with_name(consts::TRACE_ID) =>
-                {
-                    adaptive_dictionary_reader::<FixedSizeBinaryArray>(
-                        logs.column(trace_id_column.0),
-                    )
-                }
-                consts::SPAN_ID
-                    if let Some(span_id_column) = logs_schema.column_with_name(consts::SPAN_ID) =>
-                {
-                    adaptive_dictionary_reader::<FixedSizeBinaryArray>(
-                        logs.column(span_id_column.0),
-                    )
-                }
-                consts::FLAGS
-                    if let Some(flags_column) = logs_schema.column_with_name(consts::FLAGS) =>
-                {
-                    primitive_array_reader::<UInt32Type>(logs.column(flags_column.0))
-                }
-                consts::EVENT_NAME
-                    if let Some(event_name_column) =
-                        logs_schema.column_with_name(consts::EVENT_NAME) =>
-                {
-                    adaptive_dictionary_reader::<StringArray>(logs.column(event_name_column.0))
-                }
+            let value = match key {
+                consts::TIME_UNIX_NANO => self.fields.get(OtapLogRecordField::TimeUnixNano, logs),
+                consts::OBSERVED_TIME_UNIX_NANO => self.fields.get(OtapLogRecordField::ObservedTimeUnixNano, logs),
+                consts::SEVERITY_NUMBER => self.fields.get(OtapLogRecordField::SeverityNumber, logs),
+                consts::SEVERITY_TEXT => self.fields.get(OtapLogRecordField::SeverityText, logs),
+                consts::BODY => self.fields.get(OtapLogRecordField::Body, logs),
+                consts::TRACE_ID => self.fields.get(OtapLogRecordField::TraceId, logs),
+                consts::SPAN_ID => self.fields.get(OtapLogRecordField::SpanId, logs),
+                consts::FLAGS => self.fields.get(OtapLogRecordField::Flags, logs),
+                consts::EVENT_NAME => self.fields.get(OtapLogRecordField::EventName, logs),
                 _ => return None,
             };
 
-            return values.map(RecordTableValue::Dictionary);
+            return match value {
+                OtapValue::Read(v) | OtapValue::Set(v) => Some(RecordTableValue::Dictionary(v.clone())),
+                _ => None
+            };
         }
 
         None
@@ -1904,11 +1387,266 @@ impl Default for OtapDecodedIds {
 }
 
 #[derive(Debug)]
-pub struct OtapLogRecordState {
+pub struct OtapLogRecordState<'pipeline> {
     decoded_attribute_ids: OtapDecodedIds,
     decoded_scope_ids: OtapDecodedIds,
     decoded_resource_ids: OtapDecodedIds,
-    body: OtapBody,
+    fields: OtapLogRecordFields<'pipeline>,
+    attributes: OnceCell<AHashMap<Box<str>, OtapValue<'pipeline>>>,
+}
+
+#[derive(VariantArray, EnumCount, Debug, Copy, Clone)]
+pub enum OtapLogRecordField {
+    TimeUnixNano,
+    ObservedTimeUnixNano,
+    SeverityNumber,
+    SeverityText,
+    TraceId,
+    SpanId,
+    Flags,
+    EventName,
+    Body,
+}
+
+impl OtapLogRecordField {
+    pub fn supports_access_by_path(&self) -> bool {
+        match self {
+            OtapLogRecordField::TimeUnixNano => false,
+            OtapLogRecordField::ObservedTimeUnixNano => false,
+            OtapLogRecordField::SeverityNumber => false,
+            OtapLogRecordField::SeverityText => false,
+            OtapLogRecordField::TraceId => false,
+            OtapLogRecordField::SpanId => false,
+            OtapLogRecordField::Flags => false,
+            OtapLogRecordField::EventName => false,
+            OtapLogRecordField::Body => true,
+        }
+    }
+
+    pub fn get_column_name_and_transform(
+        &self,
+    ) -> (
+        &'static str,
+        fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
+    ) {
+        match self {
+            OtapLogRecordField::TimeUnixNano => (consts::TIME_UNIX_NANO, |keys, values| {
+                primitive_array_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_timestamp_nanoseconds_array,
+                )
+            }),
+            OtapLogRecordField::ObservedTimeUnixNano => {
+                (consts::OBSERVED_TIME_UNIX_NANO, |keys, values| {
+                    primitive_array_writer(
+                        keys,
+                        values,
+                        DictionaryValueArray::transform_into_timestamp_nanoseconds_array,
+                    )
+                })
+            }
+            OtapLogRecordField::SeverityNumber => (consts::SEVERITY_NUMBER, |keys, values| {
+                adaptive_dictionary_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_int_array::<Int32Type>,
+                )
+            }),
+            OtapLogRecordField::SeverityText => (consts::SEVERITY_TEXT, |keys, values| {
+                adaptive_dictionary_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_string_array,
+                )
+            }),
+            OtapLogRecordField::TraceId => (consts::TRACE_ID, |keys, values| {
+                adaptive_dictionary_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<16>,
+                )
+            }),
+            OtapLogRecordField::SpanId => (consts::SPAN_ID, |keys, values| {
+                adaptive_dictionary_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<8>,
+                )
+            }),
+            OtapLogRecordField::Flags => (consts::FLAGS, |keys, values| {
+                primitive_array_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_int_array::<UInt32Type>,
+                )
+            }),
+            OtapLogRecordField::EventName => (consts::EVENT_NAME, |keys, values| {
+                adaptive_dictionary_writer(
+                    keys,
+                    values,
+                    DictionaryValueArray::transform_into_string_array,
+                )
+            }),
+            OtapLogRecordField::Body => (consts::BODY, body_writer),
+        }
+    }
+}
+
+pub enum OtapLogRecordModifiedField<'pipeline> {
+    Removed,
+    Set(Dictionary<'pipeline>),
+}
+
+#[derive(Debug)]
+pub struct OtapLogRecordFields<'pipeline>(
+    [OnceCell<OtapValue<'pipeline>>; OtapLogRecordField::COUNT],
+);
+
+impl<'pipeline> OtapLogRecordFields<'pipeline> {
+    pub fn new() -> OtapLogRecordFields<'pipeline> {
+        OtapLogRecordFields(std::array::from_fn(|_| OnceCell::new()))
+    }
+
+    pub fn get(&self, field: OtapLogRecordField, logs: &RecordBatch) -> &OtapValue<'pipeline> {
+        self.0[field as usize].get_or_init(|| Self::init(field, logs))
+    }
+
+    pub fn get_mut(
+        &mut self,
+        field: OtapLogRecordField,
+        logs: &RecordBatch,
+    ) -> &mut OtapValue<'pipeline> {
+        self.get(field, logs);
+        self.0[field as usize].get_mut().unwrap()
+    }
+
+    pub fn set(&mut self, field: OtapLogRecordField, value: OtapValue<'pipeline>) {
+        let v = OnceCell::new();
+        v.set(value).expect("set");
+        self.0[field as usize] = v;
+    }
+
+    pub fn take(&mut self, field: OtapLogRecordField, logs: &RecordBatch) -> OtapValue<'pipeline> {
+        self.0[field as usize]
+            .take()
+            .unwrap_or_else(|| Self::init(field, logs))
+    }
+
+    pub fn take_if_modified(
+        &mut self,
+        field: OtapLogRecordField,
+    ) -> Option<OtapLogRecordModifiedField<'pipeline>> {
+        let field = &mut self.0[field as usize];
+        match field.get() {
+            Some(OtapValue::Removed) => {
+                *field = OnceCell::new();
+                Some(OtapLogRecordModifiedField::Removed)
+            }
+            Some(OtapValue::Set(v)) => {
+                let r = v.clone();
+                *field = OnceCell::new();
+                Some(OtapLogRecordModifiedField::Set(r))
+            }
+            _ => None,
+        }
+    }
+
+    fn init(field: OtapLogRecordField, logs: &RecordBatch) -> OtapValue<'pipeline> {
+        match field {
+            OtapLogRecordField::TimeUnixNano => {
+                if let Some(time_unix_nano_column) =
+                    logs.schema_ref().column_with_name(consts::TIME_UNIX_NANO)
+                    && let Some(d) = primitive_array_reader::<TimestampNanosecondType>(
+                        logs.column(time_unix_nano_column.0),
+                    )
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::ObservedTimeUnixNano => {
+                if let Some(observed_time_unix_nano_column) = logs
+                    .schema_ref()
+                    .column_with_name(consts::OBSERVED_TIME_UNIX_NANO)
+                    && let Some(d) = primitive_array_reader::<TimestampNanosecondType>(
+                        logs.column(observed_time_unix_nano_column.0),
+                    )
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::SeverityNumber => {
+                if let Some(severity_number_column) =
+                    logs.schema_ref().column_with_name(consts::SEVERITY_NUMBER)
+                    && let Some(d) = adaptive_dictionary_reader::<Int32Array>(
+                        logs.column(severity_number_column.0),
+                    )
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::SeverityText => {
+                if let Some(severity_text_column) =
+                    logs.schema_ref().column_with_name(consts::SEVERITY_TEXT)
+                    && let Some(d) = adaptive_dictionary_reader::<StringArray>(
+                        logs.column(severity_text_column.0),
+                    )
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::TraceId => {
+                if let Some(trace_id_column) = logs.schema_ref().column_with_name(consts::TRACE_ID)
+                    && let Some(d) = adaptive_dictionary_reader::<FixedSizeBinaryArray>(
+                        logs.column(trace_id_column.0),
+                    )
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::SpanId => {
+                if let Some(span_id_column) = logs.schema_ref().column_with_name(consts::SPAN_ID)
+                    && let Some(d) = adaptive_dictionary_reader::<FixedSizeBinaryArray>(
+                        logs.column(span_id_column.0),
+                    )
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::Flags => {
+                if let Some(flags_column) = logs.schema_ref().column_with_name(consts::FLAGS)
+                    && let Some(d) =
+                        primitive_array_reader::<UInt32Type>(logs.column(flags_column.0))
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::EventName => {
+                if let Some(event_name_column) =
+                    logs.schema_ref().column_with_name(consts::EVENT_NAME)
+                    && let Some(d) =
+                        adaptive_dictionary_reader::<StringArray>(logs.column(event_name_column.0))
+                {
+                    return OtapValue::Read(d.into());
+                }
+            }
+            OtapLogRecordField::Body => {
+                if let Some(d) = build_logs_body_dictionary(logs, logs.schema_ref()) {
+                    return OtapValue::Read(d.into());
+                }
+            }
+        }
+
+        OtapValue::NotFound
+    }
+}
+
+#[derive(Debug)]
+pub enum OtapValue<'pipeline> {
+    NotFound,
+    Removed,
+    Read(Dictionary<'pipeline>),
+    Set(Dictionary<'pipeline>),
 }
 
 #[derive(Debug)]

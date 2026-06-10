@@ -149,7 +149,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
     ) {
         let pipeline = &self.engine.pipeline;
 
-        let records = factory.create(pipeline, None, &batches);
+        let records = factory.create(None, &batches);
 
         let diagnostic_level = records
             .get_diagnostic_level()
@@ -190,11 +190,19 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                 let mut state =
                                     execution_context.into_parts().expect("has records").into();
 
-                                factory.apply(&mut state, &mut batches);
+                                factory.apply(
+                                    &ColumnarEngineDiagnosticReceiverImpl::new(
+                                        diagnostic_level,
+                                        &self.diagnostics,
+                                    ),
+                                    d,
+                                    &mut state,
+                                    &mut batches,
+                                );
 
                                 factory.filter(&mut state, &mut batches, values.as_boolean());
 
-                                let new_records = factory.create(pipeline, Some(state), &batches);
+                                let new_records = factory.create(Some(state), &batches);
 
                                 let dropped_count = current_batch_record_count - new_records.len();
 
@@ -305,10 +313,12 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                         diagnostic_level,
                                         &self.diagnostics,
                                     ),
+                                    s,
                                     &mut state,
                                     &mut batches,
                                     root,
                                     path,
+                                    None,
                                     value.into_dictionary(key_data_type, key_count),
                                 );
 
@@ -319,7 +329,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                     pipeline,
                                     //&self.global_variables,
                                     //&self.summaries,
-                                    Some(factory.create(pipeline, Some(state), &batches)),
+                                    Some(factory.create(Some(state), &batches)),
                                     //None,
                                 );
 
@@ -359,7 +369,12 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 
         let mut state = execution_context.into_parts().expect("has records").into();
 
-        factory.apply(&mut state, &mut batches);
+        factory.apply(
+            &ColumnarEngineDiagnosticReceiverImpl::new(diagnostic_level, &self.diagnostics),
+            pipeline,
+            &mut state,
+            &mut batches,
+        );
 
         self.included_record_count += current_batch_record_count;
 
