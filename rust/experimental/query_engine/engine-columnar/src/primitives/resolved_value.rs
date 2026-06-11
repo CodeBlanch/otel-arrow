@@ -18,7 +18,7 @@ where
 {
     Single(ValueOrRef<'a>),
     Dictionary(Dictionary<'a>),
-    Table(&'b dyn RecordTable),
+    Table(&'b dyn RecordTable<'a>),
 }
 
 impl<'a, 'b> ResolvedScalarValue<'a, 'b> {

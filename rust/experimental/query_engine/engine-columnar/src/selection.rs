@@ -10,10 +10,10 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
-pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
     key_data_type: DataType,
-    root: &'a dyn RecordTable,
+    root: &'a dyn RecordTable<'pipeline>,
     selectors: &'pipeline [ScalarExpression],
 ) -> ResolvedScalarValue<'pipeline, 'a> {
     let mut current = ResolvedScalarValue::Table(root);
@@ -132,7 +132,7 @@ pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords>(
     current
 }
 
-pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
+pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &ExecutionContext<'_, 'pipeline, TRecords>,
     selectors: &'pipeline [ScalarExpression],
 ) -> Result<Vec<ColumnarEngineSelectionPath<'pipeline>>, ()> {
@@ -183,7 +183,12 @@ pub fn capture_selector_values<'pipeline, TRecords: ColumnarRecords>(
     Ok(path)
 }
 
-fn select_using_dictionary<'a, 'pipeline, K: ArrowDictionaryKeyType, TRecords: ColumnarRecords>(
+fn select_using_dictionary<
+    'a,
+    'pipeline,
+    K: ArrowDictionaryKeyType,
+    TRecords: ColumnarRecords<'pipeline>,
+>(
     execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
     source: &ResolvedScalarValue<'pipeline, 'a>,
     selector_expression: &'pipeline dyn Expression,

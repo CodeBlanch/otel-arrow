@@ -13,7 +13,7 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
-pub fn execute_logical_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn execute_logical_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
     logical_expression: &'pipeline LogicalExpression,
 ) -> ResolvedLogicalValue {

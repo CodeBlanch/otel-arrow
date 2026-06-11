@@ -7,7 +7,7 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, selection::select_from_record_table, *,
 };
 
-pub fn execute_attached_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn execute_attached_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     attached_scalar_expression: &'pipeline AttachedScalarExpression,
 ) -> ResolvedScalarValue<'pipeline, 'a> {
@@ -91,7 +91,7 @@ mod tests {
             ScalarExpression::Attached(select_valid_attached_data),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
-                    assert_eq!(values_dictionary.as_dictionary(), actual)
+                    assert_eq!(values_dictionary, actual)
                 }
                 _ => panic!("test failure"),
             },

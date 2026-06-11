@@ -163,7 +163,6 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             OtapLogRecordBatch::new(
                 self.diagnostic_level,
                 logs,
-                logs_schema,
                 attributes,
                 resource,
                 scope,
@@ -974,7 +973,7 @@ fn write_column_values_to_batch<'a, TDiagnosticReceiver: ColumnarEngineDiagnosti
 
 fn adaptive_dictionary_reader<V: Array + 'static>(
     array: &Arc<dyn Array>,
-) -> Option<RecordTableDictionary> {
+) -> Option<Dictionary<'static>> {
     Some(match array.data_type() {
         DataType::Dictionary(d, _) => match d.as_ref() {
             DataType::UInt8 => array
@@ -995,8 +994,8 @@ fn adaptive_dictionary_reader<V: Array + 'static>(
 
 fn primitive_array_reader<T: ArrowPrimitiveType>(
     array: &Arc<dyn Array>,
-) -> Option<RecordTableDictionary> {
-    Some(RecordTableDictionary::from_array::<UInt16Type, _>(
+) -> Option<Dictionary<'static>> {
+    Some(Dictionary::from_array::<UInt16Type, _>(
         array.as_primitive::<T>(),
     ))
 }
@@ -1113,16 +1112,13 @@ fn body_writer(
     }
 }
 
-type OtapBody = OnceCell<Option<RecordTableDictionary>>;
-
 #[derive(Debug)]
 pub struct OtapLogRecordBatch<'pipeline, 'record> {
     diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
     logs: Option<&'record RecordBatch>,
-    logs_schema: Option<&'record SchemaRef>,
-    attributes: Option<OtapAttributes<'record>>,
-    resource: Option<OtapResource<'record>>,
-    scope: Option<OtapScope<'record>>,
+    attributes: Option<OtapAttributes<'pipeline, 'record>>,
+    resource: Option<OtapResource<'pipeline, 'record>>,
+    scope: Option<OtapScope<'pipeline, 'record>>,
     fields: OtapLogRecordFields<'pipeline>,
 }
 
@@ -1130,10 +1126,9 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
     pub fn new(
         diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
         logs: &'record RecordBatch,
-        logs_schema: &'record SchemaRef,
-        attributes: Option<OtapAttributes<'record>>,
-        resource: Option<OtapResource<'record>>,
-        scope: Option<OtapScope<'record>>,
+        attributes: Option<OtapAttributes<'pipeline, 'record>>,
+        resource: Option<OtapResource<'pipeline, 'record>>,
+        scope: Option<OtapScope<'pipeline, 'record>>,
         state: Option<OtapLogRecordState<'pipeline>>,
     ) -> OtapLogRecordBatch<'pipeline, 'record> {
         let fields = match state {
@@ -1144,7 +1139,6 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
         Self {
             diagnostic_level,
             logs: Some(logs),
-            logs_schema: Some(logs_schema),
             attributes,
             resource,
             scope,
@@ -1156,7 +1150,6 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
         Self {
             diagnostic_level: None,
             logs: None,
-            logs_schema: None,
             attributes: None,
             resource: None,
             scope: None,
@@ -1165,7 +1158,7 @@ impl<'pipeline, 'record> OtapLogRecordBatch<'pipeline, 'record> {
     }
 }
 
-impl ColumnarRecords for OtapLogRecordBatch<'_, '_> {
+impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_> {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         self.diagnostic_level
     }
@@ -1178,7 +1171,7 @@ impl ColumnarRecords for OtapLogRecordBatch<'_, '_> {
         self.logs.map_or(0, |v| v.num_rows())
     }
 
-    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable> {
+    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable<'pipeline>> {
         match name {
             "resource" | "Resource" => self.resource.as_ref().map(|v| v as &dyn RecordTable),
             "scope"
@@ -1209,8 +1202,8 @@ impl<'pipeline> Into<OtapLogRecordState<'pipeline>> for OtapLogRecordBatch<'pipe
     }
 }
 
-impl RecordTable for OtapLogRecordBatch<'_, '_> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+impl<'pipeline> RecordTable<'pipeline> for OtapLogRecordBatch<'pipeline, '_> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         let key = get_log_record_schema().normalize_key(key);
 
         if key == consts::ATTRIBUTES {
@@ -1221,13 +1214,15 @@ impl RecordTable for OtapLogRecordBatch<'_, '_> {
             }
         }
 
-        if let Some(logs) = self.logs
-            && let Some(logs_schema) = self.logs_schema
-        {
+        if let Some(logs) = self.logs {
             let value = match key {
                 consts::TIME_UNIX_NANO => self.fields.get(OtapLogRecordField::TimeUnixNano, logs),
-                consts::OBSERVED_TIME_UNIX_NANO => self.fields.get(OtapLogRecordField::ObservedTimeUnixNano, logs),
-                consts::SEVERITY_NUMBER => self.fields.get(OtapLogRecordField::SeverityNumber, logs),
+                consts::OBSERVED_TIME_UNIX_NANO => self
+                    .fields
+                    .get(OtapLogRecordField::ObservedTimeUnixNano, logs),
+                consts::SEVERITY_NUMBER => {
+                    self.fields.get(OtapLogRecordField::SeverityNumber, logs)
+                }
                 consts::SEVERITY_TEXT => self.fields.get(OtapLogRecordField::SeverityText, logs),
                 consts::BODY => self.fields.get(OtapLogRecordField::Body, logs),
                 consts::TRACE_ID => self.fields.get(OtapLogRecordField::TraceId, logs),
@@ -1238,8 +1233,10 @@ impl RecordTable for OtapLogRecordBatch<'_, '_> {
             };
 
             return match value {
-                OtapValue::Read(v) | OtapValue::Set(v) => Some(RecordTableValue::Dictionary(v.clone())),
-                _ => None
+                OtapValue::Read(v) | OtapValue::Set(v) => {
+                    Some(RecordTableValue::Dictionary(v.clone()))
+                }
+                _ => None,
             };
         }
 
@@ -1254,13 +1251,13 @@ impl Display for OtapLogRecordBatch<'_, '_> {
 }
 
 #[derive(Debug)]
-pub struct OtapResource<'record> {
+pub struct OtapResource<'pipeline, 'record> {
     resource_struct: &'record StructArray,
-    attributes: Option<OtapAttributes<'record>>,
+    attributes: Option<OtapAttributes<'pipeline, 'record>>,
 }
 
-impl RecordTable for OtapResource<'_> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+impl<'pipeline> RecordTable<'pipeline> for OtapResource<'pipeline, '_> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         if key == consts::ATTRIBUTES || key == "Attributes" {
             if let Some(attributes) = &self.attributes {
                 return Some(RecordTableValue::Table(attributes));
@@ -1273,20 +1270,20 @@ impl RecordTable for OtapResource<'_> {
     }
 }
 
-impl Display for OtapResource<'_> {
+impl Display for OtapResource<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Resource(RecordCount={})", self.resource_struct.len())
     }
 }
 
 #[derive(Debug)]
-pub struct OtapScope<'record> {
+pub struct OtapScope<'pipeline, 'record> {
     scope_struct: &'record StructArray,
-    attributes: Option<OtapAttributes<'record>>,
+    attributes: Option<OtapAttributes<'pipeline, 'record>>,
 }
 
-impl RecordTable for OtapScope<'_> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+impl<'pipeline> RecordTable<'pipeline> for OtapScope<'pipeline, '_> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         if key == consts::ATTRIBUTES || key == "Attributes" {
             if let Some(attributes) = &self.attributes {
                 return Some(RecordTableValue::Table(attributes));
@@ -1313,7 +1310,7 @@ impl RecordTable for OtapScope<'_> {
     }
 }
 
-impl Display for OtapScope<'_> {
+impl Display for OtapScope<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Scope(RecordCount={})", self.scope_struct.len())
     }
@@ -1650,10 +1647,10 @@ pub enum OtapValue<'pipeline> {
 }
 
 #[derive(Debug)]
-pub struct OtapAttributes<'record> {
+pub struct OtapAttributes<'pipeline, 'record> {
     ids: OtapIds<'record>,
     id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
-    cache: RefCell<AHashMap<Box<str>, RecordTableDictionary>>,
+    cache: RefCell<AHashMap<Box<str>, Dictionary<'pipeline>>>,
     attributes_batch: &'record RecordBatch,
     attribute_parent_ids: OnceCell<PrimitiveArray<UInt16Type>>,
     attribute_keys:
@@ -1670,11 +1667,11 @@ pub struct OtapAttributes<'record> {
     attribute_ser_values: Option<&'record GenericBinaryArray<i32>>,
 }
 
-impl<'record> OtapAttributes<'record> {
+impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
     pub fn new(
         ids: OtapIds<'record>,
         attributes_batch: &'record RecordBatch,
-    ) -> OtapAttributes<'record> {
+    ) -> OtapAttributes<'pipeline, 'record> {
         let strings = attributes_batch
             .column_by_name(consts::ATTRIBUTE_STR)
             .expect("strings")
@@ -1961,8 +1958,8 @@ impl<'record> OtapAttributes<'record> {
     }
 }
 
-impl<'record> RecordTable for OtapAttributes<'record> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+impl<'pipeline, 'record> RecordTable<'pipeline> for OtapAttributes<'pipeline, 'record> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         let mut cache = self.cache.borrow_mut();
 
         if let Some(d) = cache.get(key) {
@@ -2047,17 +2044,17 @@ impl<'record> RecordTable for OtapAttributes<'record> {
                 PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
             };
 
-            RecordTableDictionary::new(keys, RecordTableDictionaryValueArray::Vec(values.into()))
+            Dictionary::new(keys, DictionaryValueArray::Vec(values.into()))
         } else {
             let key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
 
-            RecordTableDictionary::new(
+            Dictionary::new(
                 PrimitiveArray::<UInt16Type>::new(
                     key_buffer.into(),
                     Some(NullBuffer::new_null(record_count)),
                 )
                 .into(),
-                RecordTableDictionaryValueArray::Vec(vec![].into()),
+                DictionaryValueArray::Vec(vec![].into()),
             )
         };
 
@@ -2069,7 +2066,7 @@ impl<'record> RecordTable for OtapAttributes<'record> {
     }
 }
 
-impl Display for OtapAttributes<'_> {
+impl Display for OtapAttributes<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -2087,7 +2084,7 @@ enum AttributeValueOrIndex {
 fn build_logs_body_dictionary(
     logs: &RecordBatch,
     logs_schema: &Schema,
-) -> Option<RecordTableDictionary> {
+) -> Option<Dictionary<'static>> {
     if let Some(body_column) = logs_schema.column_with_name(consts::BODY) {
         let body_struct = logs.column(body_column.0).as_struct();
 
@@ -2099,7 +2096,7 @@ fn build_logs_body_dictionary(
 
 fn build_logs_body_dictionary_from_struct(
     body_struct: &StructArray,
-) -> Option<RecordTableDictionary> {
+) -> Option<Dictionary<'static>> {
     if let Some(body_type) = body_struct.column_by_name(consts::ATTRIBUTE_TYPE) {
         let body_types = body_type.as_primitive::<UInt8Type>();
 
@@ -2312,9 +2309,9 @@ fn build_logs_body_dictionary_from_struct(
             unsafe { key_writer.set_null_unchecked(key_index) };
         }
 
-        return Some(RecordTableDictionary::new(
+        return Some(Dictionary::new(
             key_builder.finish().into(),
-            RecordTableDictionaryValueArray::Vec(values.into()),
+            DictionaryValueArray::Vec(values.into()),
         ));
     }
 

@@ -7,13 +7,15 @@ use data_engine_expressions::*;
 
 use crate::{engine_diagnostic::*, *};
 
-pub struct ExecutionContext<'a, 'pipeline, TRecords: ColumnarRecords> {
+pub struct ExecutionContext<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>> {
     diagnostics: ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline>,
     pipeline: &'pipeline PipelineExpression,
     records: Option<TRecords>,
 }
 
-impl<'a, 'pipeline, TRecords: ColumnarRecords> ExecutionContext<'a, 'pipeline, TRecords> {
+impl<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>
+    ExecutionContext<'a, 'pipeline, TRecords>
+{
     pub(crate) fn new(
         diagnostic_level: ColumnarEngineDiagnosticLevel,
         diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,

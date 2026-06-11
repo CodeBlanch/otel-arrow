@@ -9,7 +9,7 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression,
 };
 
-pub fn execute_length_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn execute_length_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     length_scalar_expression: &'pipeline LengthScalarExpression,
 ) -> ResolvedScalarValue<'pipeline, 'a> {
@@ -170,8 +170,7 @@ mod tests {
                         build_dictionary(
                             vec![Some(0), Some(0), None, Some(1), Some(1), None],
                             vec![ValueOrRef::Integer(11), ValueOrRef::Integer(0),]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }

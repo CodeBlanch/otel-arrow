@@ -15,7 +15,7 @@ use crate::{
     *,
 };
 
-pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     scalar_expression: &'pipeline ScalarExpression,
 ) -> ResolvedScalarValue<'pipeline, 'a> {

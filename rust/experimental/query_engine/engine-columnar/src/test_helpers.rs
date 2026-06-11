@@ -29,7 +29,7 @@ pub(crate) fn run_scalar_expression_test<FValidate>(
 pub(crate) fn build_dictionary(
     keys: Vec<Option<u16>>,
     values: Vec<ValueOrRef<'static>>,
-) -> RecordTableDictionary {
+) -> Dictionary<'static> {
     let mut key_builder = PrimitiveBuilder::<UInt16Type>::new();
 
     for key in keys {
@@ -41,20 +41,17 @@ pub(crate) fn build_dictionary(
 
     let keys = key_builder.finish();
 
-    RecordTableDictionary::new(
-        keys.into(),
-        RecordTableDictionaryValueArray::Vec(values.into()),
-    )
+    Dictionary::new(keys.into(), DictionaryValueArray::Vec(values.into()))
 }
 
 #[derive(Debug)]
-pub(crate) struct TestRecords {
-    values: HashMap<Box<str>, RecordTableDictionary>,
-    attached_records: Option<HashMap<Box<str>, TestRecords>>,
+pub(crate) struct TestRecords<'pipeline> {
+    values: HashMap<Box<str>, Dictionary<'pipeline>>,
+    attached_records: Option<HashMap<Box<str>, TestRecords<'pipeline>>>,
 }
 
-impl TestRecords {
-    pub fn new(values: HashMap<Box<str>, RecordTableDictionary>) -> TestRecords {
+impl<'pipeline> TestRecords<'pipeline> {
+    pub fn new(values: HashMap<Box<str>, Dictionary<'pipeline>>) -> TestRecords {
         Self {
             values,
             attached_records: None,
@@ -62,9 +59,9 @@ impl TestRecords {
     }
 
     pub fn with_attached_records(
-        values: HashMap<Box<str>, RecordTableDictionary>,
-        attached_records: HashMap<Box<str>, TestRecords>,
-    ) -> TestRecords {
+        values: HashMap<Box<str>, Dictionary<'pipeline>>,
+        attached_records: HashMap<Box<str>, TestRecords<'pipeline>>,
+    ) -> TestRecords<'pipeline> {
         Self {
             values,
             attached_records: Some(attached_records),
@@ -72,7 +69,7 @@ impl TestRecords {
     }
 }
 
-impl ColumnarRecords for TestRecords {
+impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
     fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
         None
     }
@@ -85,22 +82,22 @@ impl ColumnarRecords for TestRecords {
         self.values.len()
     }
 
-    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable> {
+    fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable<'pipeline>> {
         self.attached_records
             .as_ref()
             .and_then(|a| a.get(name).map(|v| v as &dyn RecordTable))
     }
 }
 
-impl RecordTable for TestRecords {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'_>> {
+impl<'pipeline> RecordTable<'pipeline> for TestRecords<'pipeline> {
+    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         self.values
             .get(key)
             .map(|v| RecordTableValue::Dictionary(v.clone()))
     }
 }
 
-impl Display for TestRecords {
+impl Display for TestRecords<'_> {
     fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Ok(())
     }

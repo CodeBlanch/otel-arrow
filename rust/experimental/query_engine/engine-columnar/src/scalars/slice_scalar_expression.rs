@@ -7,7 +7,7 @@ use crate::{
     execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
-pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords>(
+pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &'a ExecutionContext<'a, 'pipeline, TRecords>,
     slice_scalar_expression: &'pipeline SliceScalarExpression,
 ) -> ResolvedScalarValue<'pipeline, 'a> {
@@ -735,8 +735,7 @@ mod tests {
                                 ValueOrRef::String(StringValueOrRef::new_owned("lo".into())),
                                 ValueOrRef::String(StringValueOrRef::new_owned("db".into())),
                             ]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -781,8 +780,7 @@ mod tests {
                                 )),
                                 ValueOrRef::String(StringValueOrRef::new_owned("dbye".into())),
                             ]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -949,8 +947,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_dictionary(vec![None, None, None, None, None, None], vec![])
-                            .as_dictionary(),
+                        build_dictionary(vec![None, None, None, None, None, None], vec![]),
                         actual
                     );
                 }
@@ -1065,8 +1062,7 @@ mod tests {
                             vec![ValueOrRef::Array(
                                 [ValueOrRef::Integer(1), ValueOrRef::Integer(2),].into()
                             ),]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -1112,8 +1108,7 @@ mod tests {
                                 ]
                                 .into()
                             ),]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -1144,7 +1139,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_dictionary(vec![None, None, None, None], vec![]).as_dictionary(),
+                        build_dictionary(vec![None, None, None, None], vec![]),
                         actual
                     );
                 }
@@ -1243,8 +1238,7 @@ mod tests {
                                 ValueOrRef::String(StringValueOrRef::new_owned("he".into())),
                                 ValueOrRef::String(StringValueOrRef::new_owned("dbye".into())),
                             ]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -1289,8 +1283,7 @@ mod tests {
                             vec![ValueOrRef::String(StringValueOrRef::new_owned(
                                 "hello world".into()
                             )),]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -1330,8 +1323,7 @@ mod tests {
                             vec![ValueOrRef::String(StringValueOrRef::new_owned(
                                 "hello world".into()
                             )),]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -1369,7 +1361,7 @@ mod tests {
             ScalarExpression::Slice(slice_invalid_range),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
-                    assert_eq!(build_dictionary(vec![None], vec![]).as_dictionary(), actual);
+                    assert_eq!(build_dictionary(vec![None], vec![]), actual);
                 }
                 _ => panic!("test failure"),
             },
@@ -1462,8 +1454,7 @@ mod tests {
                                 ),
                                 ValueOrRef::Array([ValueOrRef::Integer(3),].into(),),
                             ]
-                        )
-                        .as_dictionary(),
+                        ),
                         actual
                     );
                 }
@@ -1501,7 +1492,7 @@ mod tests {
             ScalarExpression::Slice(slice_invalid_range),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
-                    assert_eq!(build_dictionary(vec![None], vec![]).as_dictionary(), actual);
+                    assert_eq!(build_dictionary(vec![None], vec![]), actual);
                 }
                 _ => panic!("test failure"),
             },
@@ -1519,8 +1510,7 @@ mod tests {
                             ValueOrRef::String(StringValueOrRef::new_owned("goodbye world".into())),
                             ValueOrRef::String(StringValueOrRef::new_owned("goodbye".into())),
                         ]
-                    )
-                    .as_dictionary(),
+                    ),
                     actual
                 );
             }
@@ -1543,8 +1533,7 @@ mod tests {
                             ]
                             .into()
                         ),]
-                    )
-                    .as_dictionary(),
+                    ),
                     actual
                 );
             }
