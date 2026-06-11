@@ -362,7 +362,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                         }
                     }
                 },
-                DataExpression::Conditional(_) => todo!(),
+                DataExpression::Branch(_) => todo!(),
                 DataExpression::Output(_) => todo!(),
             }
         }
