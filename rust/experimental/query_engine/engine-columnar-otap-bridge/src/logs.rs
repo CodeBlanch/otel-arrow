@@ -480,6 +480,13 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     }
 }
 
+#[cfg(test)]
+impl Default for OtapLogRecordBatchFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
     diagnostic_receiver: &T,
     expression: &'pipeline dyn Expression,
@@ -536,7 +543,7 @@ fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceive
         || format!("Field '{field:?}' set to: {value}"),
     );
 
-    fields.set(field, OtapValue::Set(value).into());
+    fields.set(field, OtapValue::Set(value));
 
     ColumnarRecordsWriteResult::Success
 }
@@ -751,7 +758,7 @@ fn update_map_value_for_path<'a>(
     remaining_path: &[ColumnarEngineSelectionPath<'a>],
     value: ValueOrRef<'a>,
 ) {
-    if let Some(current_path) = remaining_path.get(0) {
+    if let Some(current_path) = remaining_path.first() {
         let path_value = match current_path {
             ColumnarEngineSelectionPath::Key { expression, value } => {
                 ValueOrRef::String(value.clone())
@@ -787,7 +794,7 @@ fn update_map_value_for_path<'a>(
 
 fn update_array_value_for_path<'a>(
     key_index: usize,
-    array: &mut Vec<ValueOrRef<'a>>,
+    array: &mut [ValueOrRef<'a>],
     mut current_index: i64,
     remaining_path: &[ColumnarEngineSelectionPath<'a>],
     value: ValueOrRef<'a>,
@@ -802,7 +809,7 @@ fn update_array_value_for_path<'a>(
         return;
     }
 
-    if let Some(current_path) = remaining_path.get(0) {
+    if let Some(current_path) = remaining_path.first() {
         let path_value = match current_path {
             ColumnarEngineSelectionPath::Key { expression, value } => {
                 ValueOrRef::String(value.clone())
@@ -1184,19 +1191,19 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
     }
 }
 
-impl<'pipeline> Into<OtapLogRecordState<'pipeline>> for OtapLogRecordBatch<'pipeline, '_> {
-    fn into(self) -> OtapLogRecordState<'pipeline> {
+impl<'pipeline> From<OtapLogRecordBatch<'pipeline, '_>> for OtapLogRecordState<'pipeline> {
+    fn from(val: OtapLogRecordBatch<'pipeline, '_>) -> Self {
         OtapLogRecordState {
-            decoded_attribute_ids: self.attributes.map(|v| v.into_parts()).unwrap_or_default(),
-            decoded_scope_ids: self
+            decoded_attribute_ids: val.attributes.map(|v| v.into_parts()).unwrap_or_default(),
+            decoded_scope_ids: val
                 .scope
                 .and_then(|v| v.attributes.map(|v| v.into_parts()))
                 .unwrap_or_default(),
-            decoded_resource_ids: self
+            decoded_resource_ids: val
                 .resource
                 .and_then(|v| v.attributes.map(|v| v.into_parts()))
                 .unwrap_or_default(),
-            fields: self.fields,
+            fields: val.fields,
             attributes: OnceCell::new(),
         }
     }
@@ -1368,19 +1375,10 @@ impl<'record> OtapIds<'record> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct OtapDecodedIds {
     ids: Option<PrimitiveArray<UInt16Type>>,
     parent_ids: Option<PrimitiveArray<UInt16Type>>,
-}
-
-impl Default for OtapDecodedIds {
-    fn default() -> Self {
-        Self {
-            ids: None,
-            parent_ids: None,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1558,7 +1556,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                         logs.column(time_unix_nano_column.0),
                     )
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::ObservedTimeUnixNano => {
@@ -1569,7 +1567,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                         logs.column(observed_time_unix_nano_column.0),
                     )
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::SeverityNumber => {
@@ -1579,7 +1577,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                         logs.column(severity_number_column.0),
                     )
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::SeverityText => {
@@ -1589,7 +1587,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                         logs.column(severity_text_column.0),
                     )
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::TraceId => {
@@ -1598,7 +1596,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                         logs.column(trace_id_column.0),
                     )
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::SpanId => {
@@ -1607,7 +1605,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                         logs.column(span_id_column.0),
                     )
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::Flags => {
@@ -1615,7 +1613,7 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                     && let Some(d) =
                         primitive_array_reader::<UInt32Type>(logs.column(flags_column.0))
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::EventName => {
@@ -1624,17 +1622,23 @@ impl<'pipeline> OtapLogRecordFields<'pipeline> {
                     && let Some(d) =
                         adaptive_dictionary_reader::<StringArray>(logs.column(event_name_column.0))
                 {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
             OtapLogRecordField::Body => {
                 if let Some(d) = build_logs_body_dictionary(logs, logs.schema_ref()) {
-                    return OtapValue::Read(d.into());
+                    return OtapValue::Read(d);
                 }
             }
         }
 
         OtapValue::NotFound
+    }
+}
+
+impl<'pipeline> Default for OtapLogRecordFields<'pipeline> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

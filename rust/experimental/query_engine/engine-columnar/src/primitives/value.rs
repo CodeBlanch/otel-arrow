@@ -5,7 +5,6 @@ use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use ahash::AHashMap;
 use chrono::{DateTime, FixedOffset, TimeDelta};
 use data_engine_expressions::*;
 use regex::Regex;
@@ -89,91 +88,6 @@ impl ValueOrRef<'_> {
 }
 
 #[derive(Debug, Clone)]
-pub enum MapValueOrRef<'a> {
-    Ref(&'a (dyn MapValue + 'a)),
-    Owned(Rc<OwnedMapValue<'a>>),
-}
-
-impl<'a> MapValueOrRef<'a> {
-    pub fn as_map_value(&self) -> &'_ (dyn MapValue + 'a) {
-        match self {
-            MapValueOrRef::Ref(m) => *m,
-            MapValueOrRef::Owned(m) => m.as_ref(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct OwnedMapValue<'a> {
-    values: AHashMap<Box<str>, ValueOrRef<'a>>,
-}
-
-impl<'a> OwnedMapValue<'a> {
-    pub fn new() -> OwnedMapValue<'a> {
-        Self {
-            values: AHashMap::new(),
-        }
-    }
-
-    pub fn with_capacity(capacity: usize) -> OwnedMapValue<'a> {
-        Self {
-            values: AHashMap::with_capacity(capacity),
-        }
-    }
-
-    pub fn get_values(&self) -> &AHashMap<Box<str>, ValueOrRef<'a>> {
-        &self.values
-    }
-
-    pub fn get_values_mut(&mut self) -> &mut AHashMap<Box<str>, ValueOrRef<'a>> {
-        &mut self.values
-    }
-}
-
-impl<'a, const N: usize> From<[(Box<str>, ValueOrRef<'a>); N]> for MapValueOrRef<'a> {
-    fn from(arr: [(Box<str>, ValueOrRef<'a>); N]) -> Self {
-        MapValueOrRef::Owned(
-            OwnedMapValue {
-                values: AHashMap::<Box<str>, ValueOrRef<'a>>::from_iter(arr),
-            }
-            .into(),
-        )
-    }
-}
-
-impl<'a> MapValue for OwnedMapValue<'a> {
-    fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    fn contains_key(&self, key: &str) -> bool {
-        self.values.contains_key(key)
-    }
-
-    fn get(&self, key: &str) -> Option<&(dyn AsValue + 'a)> {
-        self.values.get(key).map(|v| v as &dyn AsValue)
-    }
-
-    fn get_static(&self, _key: &str) -> Result<Option<&(dyn AsStaticValue + 'static)>, String> {
-        unreachable!("should never be called by columnar engine")
-    }
-
-    fn get_items(&self, item_callback: &mut dyn KeyValueCallback) -> bool {
-        for (key, value) in self.values.iter() {
-            if !item_callback.next(key, value.to_value()) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-#[derive(Debug, Clone)]
 pub enum RegexValueOrRef<'a> {
     Ref(&'a Regex),
     Owned(Rc<Regex>),
@@ -234,23 +148,8 @@ impl Hash for ValueOrRef<'_> {
             ValueOrRef::Array(a) => {
                 a.hash(state);
             }
-            ValueOrRef::Map(MapValueOrRef::Ref(m)) => {
-                [8].hash(state);
-                m.len().hash(state);
-                m.get_items(&mut KeyValueClosureCallback::new(|k, v| {
-                    k.hash(state);
-                    Into::<ValueOrRef>::into(v).hash(state);
-                    true
-                }));
-            }
-            ValueOrRef::Map(MapValueOrRef::Owned(m)) => {
-                [8].hash(state);
-                m.len().hash(state);
-                for (k, v) in &m.values {
-                    k.hash(state);
-                    [1].hash(state);
-                    v.hash(state);
-                }
+            ValueOrRef::Map(m) => {
+                m.hash(state);
             }
             ValueOrRef::Null => [9].hash(state),
         }

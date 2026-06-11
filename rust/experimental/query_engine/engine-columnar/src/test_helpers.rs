@@ -51,7 +51,7 @@ pub(crate) struct TestRecords<'pipeline> {
 }
 
 impl<'pipeline> TestRecords<'pipeline> {
-    pub fn new(values: HashMap<Box<str>, Dictionary<'pipeline>>) -> TestRecords {
+    pub fn new(values: HashMap<Box<str>, Dictionary<'pipeline>>) -> TestRecords<'pipeline> {
         Self {
             values,
             attached_records: None,

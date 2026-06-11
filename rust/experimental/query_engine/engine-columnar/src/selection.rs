@@ -25,7 +25,7 @@ pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords<'pipeli
                 ValueOrRef::String(key) => match current {
                     ResolvedScalarValue::Table(t) => match t.get_values(key.get_value()) {
                         Some(RecordTableValue::Table(t)) => Some(ResolvedScalarValue::Table(t)),
-                        Some(RecordTableValue::Dictionary(d)) => Some(ResolvedScalarValue::Dictionary(d.into())),
+                        Some(RecordTableValue::Dictionary(d)) => Some(ResolvedScalarValue::Dictionary(d)),
                         None => None,
                     }
                     ResolvedScalarValue::Dictionary(d) => {

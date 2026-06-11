@@ -63,6 +63,7 @@ impl<'a> ArrayValueOrRef<'a> {
 
 impl Hash for ArrayValueOrRef<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        [7].hash(state);
         match self {
             ArrayValueOrRef::Ref(a) => {
                 hash_array_value(state, *a);
@@ -71,7 +72,6 @@ impl Hash for ArrayValueOrRef<'_> {
                 hash_array_value(state, a.as_array_value());
             }
             ArrayValueOrRef::Owned(a) => {
-                [7].hash(state);
                 a.len().hash(state);
                 for v in &a.values {
                     v.hash(state);
@@ -85,7 +85,6 @@ impl Hash for ArrayValueOrRef<'_> {
 }
 
 fn hash_array_value<H: Hasher>(state: &mut H, a: &dyn ArrayValue) {
-    [7].hash(state);
     a.len().hash(state);
     a.get_items(&mut IndexValueClosureCallback::new(|_, v| {
         Into::<ValueOrRef>::into(v).hash(state);
@@ -272,6 +271,12 @@ impl<'a> ArrayValue for OwnedArrayValue<'a> {
         }
 
         true
+    }
+}
+
+impl<'a> Default for OwnedArrayValue<'a> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
