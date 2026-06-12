@@ -2,47 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    cell::{OnceCell, RefCell},
-    collections::hash_map::Entry,
-    fmt::Display,
-    hash::Hash,
-    ops::Deref,
-    rc::Rc,
-    sync::Arc,
+    cell::OnceCell, collections::hash_map::Entry, fmt::Display, ops::Deref, rc::Rc, sync::Arc,
 };
 
 use ahash::AHashMap;
-use arrow::{
-    array::*,
-    buffer::{MutableBuffer, NullBuffer},
-    compute::kernels::filter,
-    datatypes::*,
-};
+use arrow::{array::*, compute::kernels::filter, datatypes::*};
 use data_engine_columnar::*;
 use data_engine_expressions::*;
 use otap_df_pdata::{
     encode::record::logs::LogsBodyBuilder,
-    otap::{
-        raw_batch_store::POSITION_LOOKUP,
-        transform::{materialize_parent_id_for_attributes, remove_delta_encoding_from_column},
-    },
+    otap::raw_batch_store::POSITION_LOOKUP,
     proto::opentelemetry::arrow::v1::ArrowPayloadType,
     schema::consts::{self, metadata},
 };
 use roaring::RoaringBitmap;
 use strum::*;
 
-use crate::{
-    filter::{IdBitmap, filter_child_batch},
-    *,
-};
+use crate::{arrow_helpers::*, filter::*, *};
 
 static LOGS_BATCH_POSITION: usize = POSITION_LOOKUP[ArrowPayloadType::Logs as usize];
 static LOG_ATTRIBUTES_BATCH_POSITION: usize = POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize];
-static RESOURCE_ATTRIBUTES_BATCH_POSITION: usize =
-    POSITION_LOOKUP[ArrowPayloadType::ResourceAttrs as usize];
-static SCOPE_ATTRIBUTES_BATCH_POSITION: usize =
-    POSITION_LOOKUP[ArrowPayloadType::ScopeAttrs as usize];
 
 pub struct OtapLogRecordBatchFactory {
     diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
@@ -73,46 +52,27 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         if let Some(logs) = batches[LOGS_BATCH_POSITION].as_ref() {
             let logs_schema = logs.schema_ref();
 
-            let attributes = if let Some(id_column) = logs_schema.column_with_name(consts::ID)
-                && let Some(attributes_batch) = batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref()
-            {
-                Some(OtapAttributes::new(
-                    OtapIds::new(
-                        logs.column(id_column.0).as_primitive::<UInt16Type>(),
-                        id_column
-                            .1
-                            .metadata()
-                            .get(metadata::COLUMN_ENCODING)
-                            .map(|v| v.as_str()),
-                    ),
-                    attributes_batch,
-                ))
-            } else {
-                None
-            };
+            let attributes =
+                if let Some(attributes_batch) = batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref() {
+                    Some(OtapAttributes::new(
+                        OtapIds::from_batch(logs),
+                        attributes_batch,
+                    ))
+                } else {
+                    None
+                };
 
             let resource = if let Some(resource_column) =
                 logs_schema.column_with_name(consts::RESOURCE)
                 && let Some(resource_struct) = logs.column(resource_column.0).as_struct_opt()
             {
-                if let DataType::Struct(fields) = resource_struct.data_type()
-                    && let Some(id_column) = fields.find(consts::ID)
-                    && let Some(resource_attributes_batch) =
-                        batches[RESOURCE_ATTRIBUTES_BATCH_POSITION].as_ref()
+                if let Some(resource_attributes_batch) =
+                    batches[RESOURCE_ATTRIBUTES_BATCH_POSITION].as_ref()
                 {
                     Some(OtapResource {
                         resource_struct,
                         attributes: Some(OtapAttributes::new(
-                            OtapIds::new(
-                                resource_struct
-                                    .column(id_column.0)
-                                    .as_primitive::<UInt16Type>(),
-                                id_column
-                                    .1
-                                    .metadata()
-                                    .get(metadata::COLUMN_ENCODING)
-                                    .map(|v| v.as_str()),
-                            ),
+                            OtapIds::from_struct(resource_struct),
                             resource_attributes_batch,
                         )),
                     })
@@ -129,24 +89,13 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             let scope = if let Some(scope_column) = logs_schema.column_with_name(consts::SCOPE)
                 && let Some(scope_struct) = logs.column(scope_column.0).as_struct_opt()
             {
-                if let DataType::Struct(fields) = scope_struct.data_type()
-                    && let Some(id_column) = fields.find(consts::ID)
-                    && let Some(scope_attributes_batch) =
-                        batches[SCOPE_ATTRIBUTES_BATCH_POSITION].as_ref()
+                if let Some(scope_attributes_batch) =
+                    batches[SCOPE_ATTRIBUTES_BATCH_POSITION].as_ref()
                 {
                     Some(OtapScope {
                         scope_struct,
                         attributes: Some(OtapAttributes::new(
-                            OtapIds::new(
-                                scope_struct
-                                    .column(id_column.0)
-                                    .as_primitive::<UInt16Type>(),
-                                id_column
-                                    .1
-                                    .metadata()
-                                    .get(metadata::COLUMN_ENCODING)
-                                    .map(|v| v.as_str()),
-                            ),
+                            OtapIds::from_struct(scope_struct),
                             scope_attributes_batch,
                         )),
                     })
@@ -190,13 +139,15 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 return;
             }
 
+            let mut attributes_state = state.attributes.as_mut();
+
             let mut decoded_ids = [
                 (consts::ID, None),
                 (consts::SCOPE, None),
                 (consts::RESOURCE, None),
             ];
             let mut decode = false;
-            if let Some(ids) = state.decoded_attribute_ids.ids.take() {
+            if let Some(ids) = attributes_state.as_mut().and_then(|a| a.0.ids.take()) {
                 decoded_ids[0].1 = Some(ids);
                 decode = true;
             }
@@ -236,7 +187,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if !ids.is_empty() {
                         batches[LOG_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
                             &ids,
-                            state.decoded_attribute_ids.parent_ids.take(),
+                            attributes_state.and_then(|a| a.0.parent_ids.take()),
                             &attributes_batch,
                         );
                     }
@@ -332,6 +283,64 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             } => {
                 let field = match get_log_record_schema().normalize_key(root_key.get_value()) {
                     consts::ATTRIBUTES => {
+                        if path.is_empty() {
+                            // support replace all attributes with a map
+                            todo!()
+                        }
+
+                        match path.first().expect("has path") {
+                            ColumnarEngineSelectionPath::Key {
+                                expression,
+                                value: key,
+                            } => {
+                                let attributes_state = state.attributes.take();
+                                let attributes_batch =
+                                    batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref();
+
+                                let attributes = if let Some(attributes_batch) = attributes_batch {
+                                    match attributes_state {
+                                        None => Some(OtapAttributes::new(
+                                            OtapIds::from_batch(logs),
+                                            attributes_batch,
+                                        )),
+                                        Some((decoded_ids, values)) => {
+                                            let ids = if let Some(decoded_ids) = decoded_ids.ids {
+                                                OtapIds::from_decoded(decoded_ids)
+                                            } else {
+                                                OtapIds::from_batch(logs)
+                                            };
+                                            Some(OtapAttributes::from_parts(
+                                                ids,
+                                                decoded_ids.parent_ids,
+                                                values,
+                                                attributes_batch,
+                                            ))
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                // todo: need to add an id to log if it didn't have attributes before
+                                // todo: need to create attributes structure if it doesn't exist
+                                // todo: need to track new logs being added to attributes
+
+                                /*let (ids, values) = attributes_state.as_mut().expect("has values");
+
+                                let value = match values.entry(key.get_value().into()) {
+                                    Entry::Occupied(occupied) => occupied.into_mut(),
+                                    Entry::Vacant(vacant) => todo!(),
+                                };*/
+
+                                state.attributes = attributes.map(|v| v.into_parts());
+                            }
+                            ColumnarEngineSelectionPath::Index { expression, value } => todo!(),
+                            ColumnarEngineSelectionPath::Dictionary { expression, value } => {
+                                todo!()
+                            }
+                        }
+
                         todo!()
                     }
                     consts::BODY => OtapLogRecordField::Body,
@@ -882,195 +891,6 @@ fn update_any_value_for_path<'a>(
     }
 }
 
-fn set_column<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
-    diagnostic_receiver: &TDiagnosticReceiver,
-    expression: &'a dyn Expression,
-    batch: RecordBatch,
-    column_name: &str,
-    value: Dictionary,
-    array_transform: fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
-) -> RecordBatch {
-    let (keys, values) = value.into_parts();
-
-    let transformed_values = array_transform(keys, values);
-
-    write_column_values_to_batch(
-        diagnostic_receiver,
-        expression,
-        batch,
-        column_name,
-        transformed_values,
-    )
-}
-
-fn remove_column<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
-    diagnostic_receiver: &TDiagnosticReceiver,
-    expression: &'a dyn Expression,
-    batch: RecordBatch,
-    column_name: &str,
-) -> RecordBatch {
-    if let Some((column_id, _)) = batch.schema_ref().column_with_name(column_name) {
-        diagnostic_receiver.add_diagnostic_if_enabled(
-            ColumnarEngineDiagnosticLevel::Info,
-            expression,
-            || format!("Column '{column_name}' removed",),
-        );
-
-        let (mut schema, mut columns, count) = batch.into_parts();
-
-        let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
-
-        schema_builder.remove(column_id);
-        columns.remove(column_id);
-
-        schema = Arc::new(schema_builder.finish());
-
-        unsafe { RecordBatch::new_unchecked(schema, columns, count) }
-    } else {
-        batch
-    }
-}
-
-fn write_column_values_to_batch<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
-    diagnostic_receiver: &TDiagnosticReceiver,
-    expression: &'a dyn Expression,
-    batch: RecordBatch,
-    column_name: &str,
-    transformed_values: Option<Arc<dyn Array>>,
-) -> RecordBatch {
-    let values = match transformed_values {
-        None => {
-            return remove_column(diagnostic_receiver, expression, batch, column_name);
-        }
-        Some(values) => values,
-    };
-
-    if diagnostic_receiver.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Info) {
-        let null_count = values.null_count();
-
-        diagnostic_receiver.add_diagnostic(ColumnarEngineDiagnostic::new(
-            ColumnarEngineDiagnosticLevel::Info,
-            expression,
-            format!(
-                "Column '{column_name}' updated [{} valid row(s), {} null row(s)]",
-                values.len() - null_count,
-                null_count
-            ),
-        ));
-    }
-
-    let (mut schema, mut columns, count) = batch.into_parts();
-
-    let mut schema_builder = SchemaBuilder::from(schema.fields().clone());
-
-    let field = Field::new(column_name, values.data_type().clone(), true);
-
-    if let Some((column_id, _)) = schema.column_with_name(column_name) {
-        *schema_builder.field_mut(column_id) = field.into();
-        columns[column_id] = values;
-    } else {
-        schema_builder.push(field);
-        columns.push(values);
-    }
-
-    schema = Arc::new(schema_builder.finish());
-
-    unsafe { RecordBatch::new_unchecked(schema, columns, count) }
-}
-
-fn adaptive_dictionary_reader<V: Array + 'static>(
-    array: &Arc<dyn Array>,
-) -> Option<Dictionary<'static>> {
-    Some(match array.data_type() {
-        DataType::Dictionary(d, _) => match d.as_ref() {
-            DataType::UInt8 => array
-                .as_dictionary::<UInt8Type>()
-                .downcast_dict::<V>()
-                .expect("array values were an unexpected type")
-                .into(),
-            DataType::UInt16 => array
-                .as_dictionary::<UInt16Type>()
-                .downcast_dict::<V>()
-                .expect("array values were an unexpected type")
-                .into(),
-            d => panic!("array values with '{d}' keys are not supported"),
-        },
-        d => panic!("array values with '{d}' keys are not supported"),
-    })
-}
-
-fn primitive_array_reader<T: ArrowPrimitiveType>(
-    array: &Arc<dyn Array>,
-) -> Option<Dictionary<'static>> {
-    Some(Dictionary::from_array::<UInt16Type, _>(
-        array.as_primitive::<T>(),
-    ))
-}
-
-fn adaptive_dictionary_writer<'a, T: Array + 'static, FTransform>(
-    keys: DictionaryKeyArray,
-    values: DictionaryValueArray<'a>,
-    transform: FTransform,
-) -> Option<Arc<dyn Array>>
-where
-    FTransform: Fn(DictionaryValueArray<'a>) -> (T, Option<AHashMap<usize, Option<usize>>>),
-{
-    let (transformed_values, lookup) = transform(values);
-
-    Some(match transformed_values.len() {
-        v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
-            keys.transform_into_key_array(lookup),
-            Arc::new(transformed_values),
-        )),
-        _ => Arc::new(DictionaryArray::<UInt16Type>::new(
-            keys.transform_into_key_array(lookup),
-            Arc::new(transformed_values),
-        )),
-    })
-}
-
-fn primitive_array_writer<'a, T: ArrowPrimitiveType, FTransform>(
-    keys: DictionaryKeyArray,
-    values: DictionaryValueArray<'a>,
-    transform: FTransform,
-) -> Option<Arc<dyn Array>>
-where
-    T::Native: Hash + Eq + TryFrom<i64>,
-    PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
-    FTransform:
-        Fn(DictionaryValueArray<'a>) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>),
-{
-    let (transformed_values, lookup) = transform(values);
-
-    let key_length = keys.len();
-
-    if transformed_values.len() == key_length {
-        return Some(Arc::new(transformed_values));
-    }
-
-    let mut builder = PrimitiveBuilder::<T>::with_capacity(key_length);
-
-    for key_index in 0..key_length {
-        if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
-            let transformed_value_index = match lookup.as_ref() {
-                Some(lookup) => lookup.get(&value_index).and_then(|v| *v),
-                None => Some(value_index),
-            };
-
-            if let Some(transformed_value_index) = transformed_value_index {
-                builder.append_value(unsafe {
-                    transformed_values.value_unchecked(transformed_value_index)
-                });
-                continue;
-            }
-        }
-
-        builder.append_null();
-    }
-
-    Some(Arc::new(builder.finish()))
-}
-
 fn body_writer(
     keys: DictionaryKeyArray,
     values: DictionaryValueArray<'_>,
@@ -1194,17 +1014,16 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
 impl<'pipeline> From<OtapLogRecordBatch<'pipeline, '_>> for OtapLogRecordState<'pipeline> {
     fn from(val: OtapLogRecordBatch<'pipeline, '_>) -> Self {
         OtapLogRecordState {
-            decoded_attribute_ids: val.attributes.map(|v| v.into_parts()).unwrap_or_default(),
+            fields: val.fields,
+            attributes: val.attributes.map(|v| v.into_parts()),
             decoded_scope_ids: val
                 .scope
-                .and_then(|v| v.attributes.map(|v| v.into_parts()))
+                .and_then(|v| v.attributes.map(|v| v.into_parts().0))
                 .unwrap_or_default(),
             decoded_resource_ids: val
                 .resource
-                .and_then(|v| v.attributes.map(|v| v.into_parts()))
+                .and_then(|v| v.attributes.map(|v| v.into_parts().0))
                 .unwrap_or_default(),
-            fields: val.fields,
-            attributes: OnceCell::new(),
         }
     }
 }
@@ -1258,136 +1077,11 @@ impl Display for OtapLogRecordBatch<'_, '_> {
 }
 
 #[derive(Debug)]
-pub struct OtapResource<'pipeline, 'record> {
-    resource_struct: &'record StructArray,
-    attributes: Option<OtapAttributes<'pipeline, 'record>>,
-}
-
-impl<'pipeline> RecordTable<'pipeline> for OtapResource<'pipeline, '_> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
-        if key == consts::ATTRIBUTES || key == "Attributes" {
-            if let Some(attributes) = &self.attributes {
-                return Some(RecordTableValue::Table(attributes));
-            } else {
-                return None;
-            }
-        }
-
-        None
-    }
-}
-
-impl Display for OtapResource<'_, '_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Resource(RecordCount={})", self.resource_struct.len())
-    }
-}
-
-#[derive(Debug)]
-pub struct OtapScope<'pipeline, 'record> {
-    scope_struct: &'record StructArray,
-    attributes: Option<OtapAttributes<'pipeline, 'record>>,
-}
-
-impl<'pipeline> RecordTable<'pipeline> for OtapScope<'pipeline, '_> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
-        if key == consts::ATTRIBUTES || key == "Attributes" {
-            if let Some(attributes) = &self.attributes {
-                return Some(RecordTableValue::Table(attributes));
-            } else {
-                return None;
-            }
-        }
-
-        let values = match key {
-            consts::NAME | "Name"
-                if let Some(name_column) = self.scope_struct.column_by_name(consts::NAME) =>
-            {
-                adaptive_dictionary_reader::<StringArray>(name_column)
-            }
-            consts::VERSION | "Version"
-                if let Some(version_column) = self.scope_struct.column_by_name(consts::VERSION) =>
-            {
-                adaptive_dictionary_reader::<StringArray>(version_column)
-            }
-            _ => return None,
-        };
-
-        values.map(RecordTableValue::Dictionary)
-    }
-}
-
-impl Display for OtapScope<'_, '_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Scope(RecordCount={})", self.scope_struct.len())
-    }
-}
-
-#[derive(Debug)]
-pub struct OtapIds<'record> {
-    encoding: Option<&'record str>,
-    encoded: &'record PrimitiveArray<UInt16Type>,
-    decoded: OnceCell<PrimitiveArray<UInt16Type>>,
-}
-
-impl<'record> OtapIds<'record> {
-    pub fn new(
-        encoded_ids: &'record PrimitiveArray<UInt16Type>,
-        encoding: Option<&'record str>,
-    ) -> OtapIds<'record> {
-        Self {
-            encoding,
-            encoded: encoded_ids,
-            decoded: OnceCell::new(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.encoded.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.encoded.len()
-    }
-
-    pub fn get_ids(&self) -> &PrimitiveArray<UInt16Type> {
-        self.decoded.get_or_init(|| self.init())
-    }
-
-    pub fn into_parts(mut self) -> Option<PrimitiveArray<UInt16Type>> {
-        if self.encoding == Some(metadata::encodings::PLAIN) {
-            None
-        } else {
-            Some(
-                self.decoded
-                    .take()
-                    .unwrap_or_else(|| remove_delta_encoding_from_column(self.encoded)),
-            )
-        }
-    }
-
-    fn init(&self) -> PrimitiveArray<UInt16Type> {
-        if self.encoding == Some(metadata::encodings::PLAIN) {
-            self.encoded.clone()
-        } else {
-            remove_delta_encoding_from_column(self.encoded)
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct OtapDecodedIds {
-    ids: Option<PrimitiveArray<UInt16Type>>,
-    parent_ids: Option<PrimitiveArray<UInt16Type>>,
-}
-
-#[derive(Debug)]
 pub struct OtapLogRecordState<'pipeline> {
-    decoded_attribute_ids: OtapDecodedIds,
+    fields: OtapLogRecordFields<'pipeline>,
+    attributes: Option<(OtapDecodedIds, AHashMap<Box<str>, OtapValue<'pipeline>>)>,
     decoded_scope_ids: OtapDecodedIds,
     decoded_resource_ids: OtapDecodedIds,
-    fields: OtapLogRecordFields<'pipeline>,
-    attributes: OnceCell<AHashMap<Box<str>, OtapValue<'pipeline>>>,
 }
 
 #[derive(VariantArray, EnumCount, Debug, Copy, Clone)]
@@ -1640,449 +1334,6 @@ impl<'pipeline> Default for OtapLogRecordFields<'pipeline> {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug)]
-pub enum OtapValue<'pipeline> {
-    NotFound,
-    Removed,
-    Read(Dictionary<'pipeline>),
-    Set(Dictionary<'pipeline>),
-}
-
-#[derive(Debug)]
-pub struct OtapAttributes<'pipeline, 'record> {
-    ids: OtapIds<'record>,
-    id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
-    cache: RefCell<AHashMap<Box<str>, Dictionary<'pipeline>>>,
-    attributes_batch: &'record RecordBatch,
-    attribute_parent_ids: OnceCell<PrimitiveArray<UInt16Type>>,
-    attribute_keys:
-        TypedDictionaryArray<'record, UInt8Type, GenericByteArray<GenericStringType<i32>>>,
-    attribute_types: &'record PrimitiveArray<UInt8Type>,
-    attribute_string_keys: &'record PrimitiveArray<UInt16Type>,
-    attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
-    attribute_ints: Option<TypedDictionaryArray<'record, UInt16Type, PrimitiveArray<Int64Type>>>,
-    attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
-    attribute_bools: Option<&'record BooleanArray>,
-    attribute_bytes_keys: Option<&'record PrimitiveArray<UInt16Type>>,
-    attribute_bytes_values: Option<&'record GenericBinaryArray<i32>>,
-    attribute_ser_keys: Option<&'record PrimitiveArray<UInt16Type>>,
-    attribute_ser_values: Option<&'record GenericBinaryArray<i32>>,
-}
-
-impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
-    pub fn new(
-        ids: OtapIds<'record>,
-        attributes_batch: &'record RecordBatch,
-    ) -> OtapAttributes<'pipeline, 'record> {
-        let strings = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_STR)
-            .expect("strings")
-            .as_dictionary::<UInt16Type>()
-            .downcast_dict::<StringArray>()
-            .expect("Attribute strings were an unexpected type");
-
-        let bytes = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_BYTES)
-            .map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<BinaryArray>()
-                    .expect("Attribute bytes were an unexpected type")
-            });
-
-        let ser = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_SER)
-            .map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<BinaryArray>()
-                    .expect("Attribute ser was an unexpected type")
-            });
-
-        Self {
-            ids,
-            id_to_record_index_map: OnceCell::new(),
-            cache: RefCell::new(AHashMap::new()),
-            attributes_batch,
-            attribute_parent_ids: OnceCell::new(),
-            attribute_keys: attributes_batch
-                .column_by_name(consts::ATTRIBUTE_KEY)
-                .expect("has keys")
-                .as_dictionary::<UInt8Type>()
-                .downcast_dict::<StringArray>()
-                .expect("Attribute keys were an unexpected type"),
-            attribute_types: attributes_batch
-                .column_by_name(consts::ATTRIBUTE_TYPE)
-                .expect("has types")
-                .as_primitive::<UInt8Type>(),
-            attribute_string_keys: strings.keys(),
-            attribute_string_values: strings.values(),
-            attribute_ints: attributes_batch
-                .column_by_name(consts::ATTRIBUTE_INT)
-                .map(|c| {
-                    c.as_dictionary::<UInt16Type>()
-                        .downcast_dict::<PrimitiveArray<Int64Type>>()
-                        .expect("Attribute ints were an unexpected type")
-                }),
-            attribute_doubles: attributes_batch
-                .column_by_name(consts::ATTRIBUTE_DOUBLE)
-                .map(|c| c.as_primitive::<Float64Type>()),
-            attribute_bools: attributes_batch
-                .column_by_name(consts::ATTRIBUTE_BOOL)
-                .map(|c| c.as_boolean()),
-            attribute_bytes_keys: bytes.map(|v| v.keys()),
-            attribute_bytes_values: bytes.map(|v| v.values()),
-            attribute_ser_keys: ser.map(|v| v.keys()),
-            attribute_ser_values: ser.map(|v| v.values()),
-        }
-    }
-
-    pub fn into_parts(mut self) -> OtapDecodedIds {
-        let parent_id_column = self
-            .attributes_batch
-            .schema_ref()
-            .column_with_name(consts::PARENT_ID)
-            .expect("has parent ids");
-
-        let parent_ids = if parent_id_column
-            .1
-            .metadata()
-            .get(metadata::COLUMN_ENCODING)
-            .map(|v| v.as_str())
-            == Some(metadata::encodings::PLAIN)
-        {
-            None
-        } else {
-            Some(
-                self.attribute_parent_ids
-                    .take()
-                    .unwrap_or_else(|| self.init_parent_ids(parent_id_column.0)),
-            )
-        };
-
-        OtapDecodedIds {
-            ids: self.ids.into_parts(),
-            parent_ids,
-        }
-    }
-
-    fn get_parent_ids(&self) -> &PrimitiveArray<UInt16Type> {
-        self.attribute_parent_ids.get_or_init(|| {
-            let parent_id_column = self
-                .attributes_batch
-                .schema_ref()
-                .column_with_name(consts::PARENT_ID)
-                .expect("has parent ids");
-
-            if parent_id_column
-                .1
-                .metadata()
-                .get(metadata::COLUMN_ENCODING)
-                .map(|v| v.as_str())
-                == Some(metadata::encodings::PLAIN)
-            {
-                self.attributes_batch
-                    .column(parent_id_column.0)
-                    .as_primitive::<UInt16Type>()
-                    .clone()
-            } else {
-                self.init_parent_ids(parent_id_column.0)
-            }
-        })
-    }
-
-    fn init_parent_ids(&self, parent_id_column: usize) -> PrimitiveArray<UInt16Type> {
-        materialize_parent_id_for_attributes::<u16>(self.attributes_batch)
-            .expect("materialized batch")
-            .column(parent_id_column)
-            .as_primitive::<UInt16Type>()
-            .clone()
-    }
-
-    fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
-        // Note: id_map is an array of parent_ids (record identifier in the
-        // attribute table) to the actual index of the record in the root table.
-        self.id_to_record_index_map.get_or_init(|| {
-            let ids = self.ids.get_ids();
-            let mut id_map_length = ids.len();
-            let mut id_map_buffer = MutableBuffer::from_len_zeroed(id_map_length * 2);
-            let mut id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
-            for (record_index, id) in ids.iter().enumerate() {
-                if let Some(id) = id {
-                    let id = id as usize;
-                    if id >= id_map_length {
-                        // If the data is malformed or a filter was run there
-                        // could be parent ids greater than the number of
-                        // records. In this case we need additional capacity to
-                        // make the lookup array the correct size.
-                        let additional_capacity = id - id_map_length + 1;
-                        id_map_buffer.extend_zeros(additional_capacity * 2);
-                        id_map_length += additional_capacity;
-                        id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
-                    }
-                    unsafe { *id_map.add(id) = record_index as u16 };
-                }
-            }
-            PrimitiveArray::<UInt16Type>::new(id_map_buffer.into(), None)
-        })
-    }
-
-    fn get_attribute_value_or_index(
-        &self,
-        attribute_index: usize,
-        attribute_type: u8,
-    ) -> Option<AttributeValueOrIndex> {
-        /*
-        pub enum AttributeValueType {
-            Empty = 0,
-            Str = 1,
-            Int = 2,
-            Double = 3,
-            Bool = 4,
-            Map = 5,
-            Slice = 6,
-            Bytes = 7,
-        }
-        */
-        match attribute_type {
-            0 => {}
-            1 => {
-                let keys = self.attribute_string_keys;
-                if keys.is_valid(attribute_index) {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
-            }
-            2 => {
-                return Some(
-                    if let Some(ints) = self.attribute_ints
-                        && ints.is_valid(attribute_index)
-                    {
-                        let value = unsafe { ints.value_unchecked(attribute_index) };
-                        AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::Integer(0))
-                    },
-                );
-            }
-            3 => {
-                return Some(
-                    if let Some(doubles) = self.attribute_doubles
-                        && doubles.is_valid(attribute_index)
-                    {
-                        let value = unsafe { doubles.value_unchecked(attribute_index) };
-                        AttributeValueOrIndex::Value(ValueOrRef::Double(value))
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::Double(0f64))
-                    },
-                );
-            }
-            4 => {
-                if let Some(bools) = self.attribute_bools
-                    && bools.is_valid(attribute_index)
-                {
-                    let value = unsafe { bools.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
-                }
-            }
-            5 | 6 => {
-                if let Some(keys) = self.attribute_ser_keys
-                    && keys.is_valid(attribute_index)
-                {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
-            }
-            7 => {
-                if let Some(keys) = self.attribute_bytes_keys
-                    && keys.is_valid(attribute_index)
-                {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
-            }
-            d => todo!("Attribute type '{d}' is not supported"),
-        }
-
-        None
-    }
-
-    fn get_attribute_value(
-        &self,
-        attribute_type: u8,
-        attribute_value_index: u16,
-    ) -> ValueOrRef<'static> {
-        /*
-        pub enum AttributeValueType {
-            Empty = 0,
-            Str = 1,
-            Int = 2,
-            Double = 3,
-            Bool = 4,
-            Map = 5,
-            Slice = 6,
-            Bytes = 7,
-        }
-        */
-        match attribute_type {
-            1 => ValueOrRef::String(StringValueOrRef::Buffer({
-                let strings = self.attribute_string_values;
-                let offsets = strings.value_offsets();
-                let start =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize) } as usize;
-                let end =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize + 1) } as usize;
-                strings
-                    .values()
-                    .slice_with_length(start, end - start)
-                    .clone()
-            })),
-            5 | 6 => {
-                let value = unsafe {
-                    self.attribute_ser_values
-                        .unwrap()
-                        .value_unchecked(attribute_value_index as usize)
-                };
-
-                // todo: Should we log deserialization failure somewhere?
-                crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
-            }
-            7 => ValueOrRef::Array(ArrayValueOrRef::Buffer({
-                let bytes = self.attribute_bytes_values.unwrap();
-                let offsets = bytes.value_offsets();
-                let start =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize) } as usize;
-                let end =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize + 1) } as usize;
-                let buffer = bytes.values().slice_with_length(start, end - start).clone();
-                BufferArray::new_u8(buffer)
-            })),
-            d => todo!("Attribute type '{d}' is not supported"),
-        }
-    }
-}
-
-impl<'pipeline, 'record> RecordTable<'pipeline> for OtapAttributes<'pipeline, 'record> {
-    fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
-        let mut cache = self.cache.borrow_mut();
-
-        if let Some(d) = cache.get(key) {
-            return Some(RecordTableValue::Dictionary(d.clone()));
-        }
-
-        let record_count = self.ids.len();
-
-        let value = if let Some(value_index) = self
-            .attribute_keys
-            .values()
-            .iter()
-            .flatten()
-            .position(|v| v == key)
-        {
-            let mut key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
-            let keys = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
-
-            let mut null_buffer =
-                MutableBuffer::from_len_zeroed(arrow::util::bit_util::ceil(record_count, 8));
-            let nulls = null_buffer.typed_data_mut::<u8>().as_mut_ptr();
-            let mut null_count = record_count;
-
-            let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
-            let mut values = Vec::with_capacity(record_count);
-
-            let value_index = value_index as u8;
-            let attribute_count = self.attribute_keys.len();
-
-            let attribute_keys = self.attribute_keys.keys().values().as_ptr();
-            let attribute_types = self.attribute_types.values().as_ptr();
-            let attribute_parent_ids = self.get_parent_ids().values().as_ptr();
-            let id_to_record_index_map = self.get_id_to_record_index_map().values().as_ptr();
-
-            for attribute_index in 0..attribute_count {
-                if unsafe { *attribute_keys.add(attribute_index) } == value_index {
-                    let attribute_type = unsafe { *attribute_types.add(attribute_index) };
-                    if let Some(attribute_value) =
-                        self.get_attribute_value_or_index(attribute_index, attribute_type)
-                    {
-                        let index = match attribute_value {
-                            AttributeValueOrIndex::ValueIndex(attribute_value_index) => {
-                                let lookup_key = ((attribute_type as usize) << 16)
-                                    | attribute_value_index as usize;
-                                match value_lookup.entry(lookup_key) {
-                                    Entry::Occupied(occupied) => *occupied.get(),
-                                    Entry::Vacant(vacant) => {
-                                        let index = values.len();
-                                        values.push(self.get_attribute_value(
-                                            attribute_type,
-                                            attribute_value_index,
-                                        ));
-                                        *vacant.insert(index as u16)
-                                    }
-                                }
-                            }
-                            AttributeValueOrIndex::Value(attribute_value) => {
-                                let index = values.len() as u16;
-                                values.push(attribute_value);
-                                index
-                            }
-                        };
-
-                        let parent_id = unsafe { *attribute_parent_ids.add(attribute_index) };
-                        let record_index =
-                            unsafe { *id_to_record_index_map.add(parent_id as usize) };
-
-                        unsafe { *keys.add(record_index as usize) = index };
-                        unsafe { arrow::util::bit_util::set_bit_raw(nulls, record_index as usize) };
-                        null_count -= 1;
-                    }
-                }
-            }
-
-            let keys = if null_count > 0 {
-                PrimitiveArray::<UInt16Type>::new(
-                    key_buffer.into(),
-                    NullBufferBuilder::new_from_buffer(null_buffer, record_count).finish(),
-                )
-                .into()
-            } else {
-                PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
-            };
-
-            Dictionary::new(keys, DictionaryValueArray::Vec(values.into()))
-        } else {
-            let key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
-
-            Dictionary::new(
-                PrimitiveArray::<UInt16Type>::new(
-                    key_buffer.into(),
-                    Some(NullBuffer::new_null(record_count)),
-                )
-                .into(),
-                DictionaryValueArray::Vec(vec![].into()),
-            )
-        };
-
-        let copy = value.clone();
-
-        cache.insert(key.into(), value);
-
-        Some(RecordTableValue::Dictionary(copy))
-    }
-}
-
-impl Display for OtapAttributes<'_, '_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Attributes(RecordCount={})",
-            self.attributes_batch.num_rows()
-        )
-    }
-}
-
-enum AttributeValueOrIndex {
-    ValueIndex(u16),
-    Value(ValueOrRef<'static>),
 }
 
 fn build_logs_body_dictionary(

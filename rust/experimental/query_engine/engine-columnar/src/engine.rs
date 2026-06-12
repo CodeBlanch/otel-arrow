@@ -202,7 +202,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 
                                 factory.filter(&mut state, &mut batches, values.as_boolean());
 
-                                let new_records = factory.create(Some(state), &batches);
+                                let new_records = factory.create(None, &batches);
 
                                 let dropped_count = current_batch_record_count - new_records.len();
 
