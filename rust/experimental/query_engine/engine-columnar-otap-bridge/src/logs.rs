@@ -52,15 +52,9 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         if let Some(logs) = batches[LOGS_BATCH_POSITION].as_ref() {
             let logs_schema = logs.schema_ref();
 
-            let attributes =
-                if let Some(attributes_batch) = batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref() {
-                    Some(OtapAttributes::new(
-                        OtapIds::from_batch(logs),
-                        attributes_batch,
-                    ))
-                } else {
-                    None
-                };
+            let attributes = batches[LOG_ATTRIBUTES_BATCH_POSITION]
+                .as_ref()
+                .map(|v| OtapAttributes::new(OtapIds::from_batch(logs), v));
 
             let resource = if let Some(resource_column) =
                 logs_schema.column_with_name(consts::RESOURCE)
@@ -147,7 +141,10 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                 (consts::RESOURCE, None),
             ];
             let mut decode = false;
-            if let Some(ids) = attributes_state.as_mut().and_then(|a| a.0.ids.take()) {
+            if let Some(ids) = attributes_state
+                .as_mut()
+                .and_then(|a| a.decoded_ids.ids.take())
+            {
                 decoded_ids[0].1 = Some(ids);
                 decode = true;
             }
@@ -187,7 +184,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if !ids.is_empty() {
                         batches[LOG_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
                             &ids,
-                            attributes_state.and_then(|a| a.0.parent_ids.take()),
+                            attributes_state.and_then(|a| a.decoded_ids.parent_ids.take()),
                             &attributes_batch,
                         );
                     }
@@ -303,27 +300,29 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                                             OtapIds::from_batch(logs),
                                             attributes_batch,
                                         )),
-                                        Some((decoded_ids, values)) => {
-                                            let ids = if let Some(decoded_ids) = decoded_ids.ids {
+                                        Some(attributes_state) => {
+                                            let ids = if let Some(decoded_ids) =
+                                                attributes_state.decoded_ids.ids
+                                            {
                                                 OtapIds::from_decoded(decoded_ids)
                                             } else {
                                                 OtapIds::from_batch(logs)
                                             };
                                             Some(OtapAttributes::from_parts(
                                                 ids,
-                                                decoded_ids.parent_ids,
-                                                values,
+                                                attributes_state.decoded_ids.parent_ids,
+                                                attributes_state.id_to_record_index_map,
+                                                attributes_state.values,
                                                 attributes_batch,
                                             ))
                                         }
-                                        _ => None,
                                     }
                                 } else {
+                                    // todo: need to create attributes structure if it doesn't exist
                                     None
                                 };
 
                                 // todo: need to add an id to log if it didn't have attributes before
-                                // todo: need to create attributes structure if it doesn't exist
                                 // todo: need to track new logs being added to attributes
 
                                 /*let (ids, values) = attributes_state.as_mut().expect("has values");
@@ -1018,11 +1017,11 @@ impl<'pipeline> From<OtapLogRecordBatch<'pipeline, '_>> for OtapLogRecordState<'
             attributes: val.attributes.map(|v| v.into_parts()),
             decoded_scope_ids: val
                 .scope
-                .and_then(|v| v.attributes.map(|v| v.into_parts().0))
+                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids))
                 .unwrap_or_default(),
             decoded_resource_ids: val
                 .resource
-                .and_then(|v| v.attributes.map(|v| v.into_parts().0))
+                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids))
                 .unwrap_or_default(),
         }
     }
@@ -1079,7 +1078,7 @@ impl Display for OtapLogRecordBatch<'_, '_> {
 #[derive(Debug)]
 pub struct OtapLogRecordState<'pipeline> {
     fields: OtapLogRecordFields<'pipeline>,
-    attributes: Option<(OtapDecodedIds, AHashMap<Box<str>, OtapValue<'pipeline>>)>,
+    attributes: Option<OtapAttributesState<'pipeline>>,
     decoded_scope_ids: OtapDecodedIds,
     decoded_resource_ids: OtapDecodedIds,
 }

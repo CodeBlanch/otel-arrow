@@ -79,7 +79,7 @@ impl<'record> OtapIds<'record> {
 
     pub fn is_empty(&self) -> bool {
         self.decoded.get().map_or_else(
-            || self.encoded.map_or(true, |v| v.is_empty()),
+            || self.encoded.is_none_or(|v| v.is_empty()),
             |v| v.is_empty(),
         )
     }
@@ -163,7 +163,7 @@ impl<'record> OtapParentIds<'record> {
 
     pub fn is_empty(&self) -> bool {
         self.decoded.get().map_or_else(
-            || self.encoded.map_or(true, |v| v.is_empty()),
+            || self.encoded.is_none_or(|v| v.is_empty()),
             |v| v.is_empty(),
         )
     }

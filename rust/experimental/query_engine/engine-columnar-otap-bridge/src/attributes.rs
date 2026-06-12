@@ -46,7 +46,26 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
         Self::new_internal(
             ids,
             OtapParentIds::new(attributes_batch),
+            None,
             AHashMap::new(),
+            attributes_batch,
+        )
+    }
+
+    pub fn from_parts(
+        ids: OtapIds<'record>,
+        decoded_parent_ids: Option<PrimitiveArray<UInt16Type>>,
+        id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
+        values: AHashMap<Box<str>, OtapValue<'pipeline>>,
+        attributes_batch: &'record RecordBatch,
+    ) -> OtapAttributes<'pipeline, 'record> {
+        Self::new_internal(
+            ids,
+            decoded_parent_ids
+                .map(OtapParentIds::from_decoded)
+                .unwrap_or_else(|| OtapParentIds::new(attributes_batch)),
+            id_to_record_index_map,
+            values,
             attributes_batch,
         )
     }
@@ -54,6 +73,7 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
     fn new_internal(
         ids: OtapIds<'record>,
         parent_ids: OtapParentIds<'record>,
+        id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
         values: AHashMap<Box<str>, OtapValue<'pipeline>>,
         attributes_batch: &'record RecordBatch,
     ) -> OtapAttributes<'pipeline, 'record> {
@@ -80,10 +100,18 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
                     .expect("Attribute ser was an unexpected type")
             });
 
+        let id_to_record_index_map = if let Some(id_to_record_index_map) = id_to_record_index_map {
+            let v = OnceCell::new();
+            v.set(id_to_record_index_map).expect("set");
+            v
+        } else {
+            OnceCell::new()
+        };
+
         Self {
             ids,
             parent_ids,
-            id_to_record_index_map: OnceCell::new(),
+            id_to_record_index_map,
             values: RefCell::new(values),
             attributes_batch,
             attribute_keys: attributes_batch
@@ -118,30 +146,15 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
         }
     }
 
-    pub fn from_parts(
-        ids: OtapIds<'record>,
-        decoded_parent_ids: Option<PrimitiveArray<UInt16Type>>,
-        values: AHashMap<Box<str>, OtapValue<'pipeline>>,
-        attributes_batch: &'record RecordBatch,
-    ) -> OtapAttributes<'pipeline, 'record> {
-        Self::new_internal(
-            ids,
-            decoded_parent_ids
-                .map(|v| OtapParentIds::from_decoded(v))
-                .unwrap_or_else(|| OtapParentIds::new(attributes_batch)),
-            values,
-            attributes_batch,
-        )
-    }
-
-    pub fn into_parts(self) -> (OtapDecodedIds, AHashMap<Box<str>, OtapValue<'pipeline>>) {
-        (
-            OtapDecodedIds {
+    pub fn into_parts(mut self) -> OtapAttributesState<'pipeline> {
+        OtapAttributesState {
+            decoded_ids: OtapDecodedIds {
                 ids: self.ids.into_parts(),
                 parent_ids: self.parent_ids.into_parts(),
             },
-            self.values.take(),
-        )
+            id_to_record_index_map: self.id_to_record_index_map.take(),
+            values: self.values.take(),
+        }
     }
 
     fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
@@ -433,4 +446,11 @@ impl Display for OtapAttributes<'_, '_> {
 enum AttributeValueOrIndex {
     ValueIndex(u16),
     Value(ValueOrRef<'static>),
+}
+
+#[derive(Debug)]
+pub struct OtapAttributesState<'pipeline> {
+    pub decoded_ids: OtapDecodedIds,
+    pub id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
+    pub values: AHashMap<Box<str>, OtapValue<'pipeline>>,
 }
