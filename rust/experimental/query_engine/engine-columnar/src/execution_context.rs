@@ -67,9 +67,9 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>
         self.records.as_ref()
     }
 
-    /*pub fn get_records_mut(&mut self) -> Option<&mut TRecords> {
+    pub fn get_records_mut(&mut self) -> Option<&mut TRecords> {
         self.records.as_mut()
-    }*/
+    }
 
     /*pub fn take_records(&mut self) -> Option<TRecords> {
         self.records.take()

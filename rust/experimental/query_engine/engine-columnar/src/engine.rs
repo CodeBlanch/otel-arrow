@@ -305,33 +305,19 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                 let root = &path[0];
                                 let path = &path[1..];
 
-                                let mut state =
-                                    execution_context.into_parts().expect("has records").into();
-
-                                let write_result = factory.set(
-                                    &ColumnarEngineDiagnosticReceiverImpl::new(
-                                        diagnostic_level,
-                                        &self.diagnostics,
-                                    ),
-                                    s,
-                                    &mut state,
-                                    &mut batches,
-                                    root,
-                                    path,
-                                    None,
-                                    value.into_dictionary(key_data_type, key_count),
-                                );
-
-                                execution_context = ExecutionContext::new(
-                                    diagnostic_level,
-                                    //&self.engine.external_function_implementations,
-                                    &self.diagnostics,
-                                    pipeline,
-                                    //&self.global_variables,
-                                    //&self.summaries,
-                                    Some(factory.create(Some(state), &batches)),
-                                    //None,
-                                );
+                                let write_result = execution_context
+                                    .get_records_mut()
+                                    .expect("has records")
+                                    .set_values(
+                                        &ColumnarEngineDiagnosticReceiverImpl::new(
+                                            diagnostic_level,
+                                            &self.diagnostics,
+                                        ),
+                                        expression,
+                                        root,
+                                        path,
+                                        None,
+                                        value.into_dictionary(key_data_type, key_count));
 
                                 match write_result {
                                     ColumnarRecordsWriteResult::Success => {

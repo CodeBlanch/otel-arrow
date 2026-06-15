@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    cell::OnceCell, collections::hash_map::Entry, fmt::Display, ops::Deref, rc::Rc, sync::Arc,
+    cell::OnceCell, collections::hash_map::Entry, fmt::Display, ops::{Deref, DerefMut}, rc::Rc, sync::Arc,
 };
 
 use ahash::AHashMap;
@@ -143,7 +143,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             let mut decode = false;
             if let Some(ids) = attributes_state
                 .as_mut()
-                .and_then(|a| a.decoded_ids.ids.take())
+                .and_then(|a| a.decoded_ids.as_mut())
+                .and_then(|a| a.ids.take())
             {
                 decoded_ids[0].1 = Some(ids);
                 decode = true;
@@ -184,7 +185,7 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if !ids.is_empty() {
                         batches[LOG_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
                             &ids,
-                            attributes_state.and_then(|a| a.decoded_ids.parent_ids.take()),
+                            attributes_state.and_then(|a| a.decoded_ids.as_mut()).and_then(|a| a.parent_ids.take()),
                             &attributes_batch,
                         );
                     }
@@ -256,201 +257,6 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         }
 
         *batches = [None, None, None, None];
-    }
-
-    fn set<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
-        &self,
-        diagnostic_receiver: &T,
-        expression: &'pipeline dyn Expression,
-        state: &mut OtapLogRecordState<'pipeline>,
-        batches: &mut [Option<RecordBatch>; 4],
-        root: &ColumnarEngineSelectionPath<'pipeline>,
-        path: &[ColumnarEngineSelectionPath<'pipeline>],
-        key_filter: Option<&RoaringBitmap>,
-        value: Dictionary<'pipeline>,
-    ) -> ColumnarRecordsWriteResult {
-        let logs = batches[LOGS_BATCH_POSITION]
-            .as_ref()
-            .expect("has log records");
-
-        match root {
-            ColumnarEngineSelectionPath::Key {
-                expression: key_expression,
-                value: root_key,
-            } => {
-                let field = match get_log_record_schema().normalize_key(root_key.get_value()) {
-                    consts::ATTRIBUTES => {
-                        if path.is_empty() {
-                            // support replace all attributes with a map
-                            todo!()
-                        }
-
-                        match path.first().expect("has path") {
-                            ColumnarEngineSelectionPath::Key {
-                                expression,
-                                value: key,
-                            } => {
-                                let attributes_state = state.attributes.take();
-                                let attributes_batch =
-                                    batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref();
-
-                                let attributes = if let Some(attributes_batch) = attributes_batch {
-                                    match attributes_state {
-                                        None => Some(OtapAttributes::new(
-                                            OtapIds::from_batch(logs),
-                                            attributes_batch,
-                                        )),
-                                        Some(attributes_state) => {
-                                            let ids = if let Some(decoded_ids) =
-                                                attributes_state.decoded_ids.ids
-                                            {
-                                                OtapIds::from_decoded(decoded_ids)
-                                            } else {
-                                                OtapIds::from_batch(logs)
-                                            };
-                                            Some(OtapAttributes::from_parts(
-                                                ids,
-                                                attributes_state.decoded_ids.parent_ids,
-                                                attributes_state.id_to_record_index_map,
-                                                attributes_state.values,
-                                                attributes_batch,
-                                            ))
-                                        }
-                                    }
-                                } else {
-                                    // todo: need to create attributes structure if it doesn't exist
-                                    None
-                                };
-
-                                // todo: need to add an id to log if it didn't have attributes before
-                                // todo: need to track new logs being added to attributes
-
-                                /*let (ids, values) = attributes_state.as_mut().expect("has values");
-
-                                let value = match values.entry(key.get_value().into()) {
-                                    Entry::Occupied(occupied) => occupied.into_mut(),
-                                    Entry::Vacant(vacant) => todo!(),
-                                };*/
-
-                                state.attributes = attributes.map(|v| v.into_parts());
-                            }
-                            ColumnarEngineSelectionPath::Index { expression, value } => todo!(),
-                            ColumnarEngineSelectionPath::Dictionary { expression, value } => {
-                                todo!()
-                            }
-                        }
-
-                        todo!()
-                    }
-                    consts::BODY => OtapLogRecordField::Body,
-                    consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
-                    consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
-                    consts::SEVERITY_NUMBER => OtapLogRecordField::SeverityNumber,
-                    consts::SEVERITY_TEXT => OtapLogRecordField::SeverityText,
-                    consts::TRACE_ID => OtapLogRecordField::TraceId,
-                    consts::SPAN_ID => OtapLogRecordField::SpanId,
-                    consts::FLAGS => OtapLogRecordField::Flags,
-                    consts::EVENT_NAME => OtapLogRecordField::EventName,
-                    f => {
-                        diagnostic_receiver.add_diagnostic_if_enabled(
-                            ColumnarEngineDiagnosticLevel::Warn,
-                            *key_expression,
-                            || format!("Field '{f}' does not exist on log record"),
-                        );
-                        return ColumnarRecordsWriteResult::NotFound;
-                    }
-                };
-
-                process_log_record_field_update(
-                    diagnostic_receiver,
-                    expression,
-                    field,
-                    &mut state.fields,
-                    logs,
-                    *key_expression,
-                    path,
-                    key_filter,
-                    &value,
-                )
-            }
-            ColumnarEngineSelectionPath::Dictionary {
-                expression: keys_expression,
-                value: root_keys,
-            } => {
-                let key_length = root_keys.len();
-
-                let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
-                    AHashMap::with_capacity(key_length);
-
-                match key_filter {
-                    Some(v) => build_plan(root_keys, &mut plan, v.iter().map(|v| v as usize)),
-                    None => build_plan(root_keys, &mut plan, 0..key_length),
-                }
-
-                let mut written_data_count = 0;
-                let plan_count = plan.len();
-
-                for (key, key_filter) in plan.into_iter() {
-                    let field = match get_log_record_schema().normalize_key(key.get_value()) {
-                        consts::BODY => OtapLogRecordField::Body,
-                        consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
-                        consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
-                        consts::SEVERITY_NUMBER => OtapLogRecordField::SeverityNumber,
-                        consts::SEVERITY_TEXT => OtapLogRecordField::SeverityText,
-                        consts::TRACE_ID => OtapLogRecordField::TraceId,
-                        consts::SPAN_ID => OtapLogRecordField::SpanId,
-                        consts::FLAGS => OtapLogRecordField::Flags,
-                        consts::EVENT_NAME => OtapLogRecordField::EventName,
-                        f => {
-                            diagnostic_receiver.add_diagnostic_if_enabled(
-                                ColumnarEngineDiagnosticLevel::Warn,
-                                *keys_expression,
-                                || format!("Field '{f}' does not exist on log record"),
-                            );
-                            continue;
-                        }
-                    };
-
-                    let logs = batches[LOGS_BATCH_POSITION]
-                        .as_ref()
-                        .expect("has log records");
-
-                    if process_log_record_field_update(
-                        diagnostic_receiver,
-                        expression,
-                        field,
-                        &mut state.fields,
-                        logs,
-                        *keys_expression,
-                        path,
-                        Some(&key_filter),
-                        &value,
-                    ) != ColumnarRecordsWriteResult::NotFound
-                    {
-                        written_data_count += 1;
-                    }
-                }
-
-                if written_data_count == 0 {
-                    ColumnarRecordsWriteResult::NotFound
-                } else if written_data_count == plan_count {
-                    ColumnarRecordsWriteResult::Success
-                } else {
-                    ColumnarRecordsWriteResult::PartialSuccess
-                }
-            }
-            ColumnarEngineSelectionPath::Index {
-                expression,
-                value: _,
-            } => {
-                diagnostic_receiver.add_diagnostic_if_enabled(
-                    ColumnarEngineDiagnosticLevel::Warn,
-                    *expression,
-                    || "Log record cannot be accessed by array index".into(),
-                );
-                ColumnarRecordsWriteResult::NotFound
-            }
-        }
     }
 
     fn apply<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
@@ -1008,6 +814,177 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
             _ => None,
         }
     }
+
+    fn set_values<T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
+        &mut self,
+        diagnostic_receiver: &T,
+        expression: &'pipeline dyn Expression,
+        root: &ColumnarEngineSelectionPath<'pipeline>,
+        path: &[ColumnarEngineSelectionPath<'pipeline>],
+        key_filter: Option<&RoaringBitmap>,
+        values: Dictionary<'pipeline>,
+    ) -> ColumnarRecordsWriteResult {
+        let logs = self.logs.expect("has logs");
+
+        if key_filter.map_or(false, |v| v.is_empty()) {
+            return ColumnarRecordsWriteResult::Success;
+        }
+
+        match root {
+            ColumnarEngineSelectionPath::Key {
+                expression: key_expression,
+                value: root_key,
+            } => {
+                let field = match get_log_record_schema().normalize_key(root_key.get_value()) {
+                    consts::ATTRIBUTES => {
+                        if path.is_empty() {
+                            // support replace all attributes with a map
+                            todo!()
+                        }
+
+                        match path.first().expect("has path") {
+                            ColumnarEngineSelectionPath::Key {
+                                expression: attribute_key_expression,
+                                value: attribute_key,
+                            } => {
+                                let attributes = self.attributes.get_or_insert_with(|| OtapAttributes::new_empty());
+
+                                let mut attributes_values_borrow = attributes.get_values(attribute_key.get_value());
+
+                                let attributes_values = match std::mem::replace(attributes_values_borrow.deref_mut(), OtapValue::Removed) {
+                                    OtapValue::NotFound | OtapValue::Removed => Dictionary::new_null_with_data_type(logs.num_rows(), DataType::UInt16),
+                                    OtapValue::Read(v)
+                                        | OtapValue::Set(v) => v,
+                                };
+
+                                let attributes_values = if path.len() > 2 {
+                                    update_dictionary_values_for_path(attributes_values, key_filter, &path[1], &path[2..], &values)
+                                } else {
+                                    attributes_values.with_values(key_filter, &values)
+                                };
+
+                                diagnostic_receiver.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Verbose,
+                                    expression,
+                                    || format!("Attribute '{}' set to: {attributes_values}", attribute_key.get_value()),
+                                );
+
+                                *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+
+                                return ColumnarRecordsWriteResult::Success;
+                            }
+                            ColumnarEngineSelectionPath::Index { expression, value } => todo!(),
+                            ColumnarEngineSelectionPath::Dictionary { expression, value } => {
+                                todo!()
+                            }
+                        }
+                    }
+                    consts::BODY => OtapLogRecordField::Body,
+                    consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
+                    consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
+                    consts::SEVERITY_NUMBER => OtapLogRecordField::SeverityNumber,
+                    consts::SEVERITY_TEXT => OtapLogRecordField::SeverityText,
+                    consts::TRACE_ID => OtapLogRecordField::TraceId,
+                    consts::SPAN_ID => OtapLogRecordField::SpanId,
+                    consts::FLAGS => OtapLogRecordField::Flags,
+                    consts::EVENT_NAME => OtapLogRecordField::EventName,
+                    f => {
+                        diagnostic_receiver.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Warn,
+                            *key_expression,
+                            || format!("Field '{f}' does not exist on log record"),
+                        );
+                        return ColumnarRecordsWriteResult::NotFound;
+                    }
+                };
+
+                process_log_record_field_update(
+                    diagnostic_receiver,
+                    expression,
+                    field,
+                    &mut self.fields,
+                    logs,
+                    *key_expression,
+                    path,
+                    key_filter,
+                    &values,
+                )
+            }
+            ColumnarEngineSelectionPath::Dictionary {
+                expression: keys_expression,
+                value: root_keys,
+            } => {
+                let key_length = root_keys.len();
+
+                let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
+                    AHashMap::with_capacity(key_length);
+
+                match key_filter {
+                    Some(v) => build_plan(root_keys, &mut plan, v.iter().map(|v| v as usize)),
+                    None => build_plan(root_keys, &mut plan, 0..key_length),
+                }
+
+                let mut written_data_count = 0;
+                let plan_count = plan.len();
+
+                for (key, key_filter) in plan.into_iter() {
+                    let field = match get_log_record_schema().normalize_key(key.get_value()) {
+                        consts::BODY => OtapLogRecordField::Body,
+                        consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
+                        consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
+                        consts::SEVERITY_NUMBER => OtapLogRecordField::SeverityNumber,
+                        consts::SEVERITY_TEXT => OtapLogRecordField::SeverityText,
+                        consts::TRACE_ID => OtapLogRecordField::TraceId,
+                        consts::SPAN_ID => OtapLogRecordField::SpanId,
+                        consts::FLAGS => OtapLogRecordField::Flags,
+                        consts::EVENT_NAME => OtapLogRecordField::EventName,
+                        f => {
+                            diagnostic_receiver.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                *keys_expression,
+                                || format!("Field '{f}' does not exist on log record"),
+                            );
+                            continue;
+                        }
+                    };
+
+                    if process_log_record_field_update(
+                        diagnostic_receiver,
+                        expression,
+                        field,
+                        &mut self.fields,
+                        logs,
+                        *keys_expression,
+                        path,
+                        Some(&key_filter),
+                        &values,
+                    ) != ColumnarRecordsWriteResult::NotFound
+                    {
+                        written_data_count += 1;
+                    }
+                }
+
+                if written_data_count == 0 {
+                    ColumnarRecordsWriteResult::NotFound
+                } else if written_data_count == plan_count {
+                    ColumnarRecordsWriteResult::Success
+                } else {
+                    ColumnarRecordsWriteResult::PartialSuccess
+                }
+            }
+            ColumnarEngineSelectionPath::Index {
+                expression,
+                value: _,
+            } => {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    *expression,
+                    || "Log record cannot be accessed by array index".into(),
+                );
+                ColumnarRecordsWriteResult::NotFound
+            }
+        }
+    }
 }
 
 impl<'pipeline> From<OtapLogRecordBatch<'pipeline, '_>> for OtapLogRecordState<'pipeline> {
@@ -1017,11 +994,11 @@ impl<'pipeline> From<OtapLogRecordBatch<'pipeline, '_>> for OtapLogRecordState<'
             attributes: val.attributes.map(|v| v.into_parts()),
             decoded_scope_ids: val
                 .scope
-                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids))
+                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids.expect("has ids")))
                 .unwrap_or_default(),
             decoded_resource_ids: val
                 .resource
-                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids))
+                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids.expect("has ids")))
                 .unwrap_or_default(),
         }
     }

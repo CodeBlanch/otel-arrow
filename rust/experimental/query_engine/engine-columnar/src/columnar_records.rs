@@ -26,18 +26,6 @@ pub trait ColumnarRecordsFactory<const BATCH_SIZE: usize> {
         filter: &BooleanArray,
     );
 
-    fn set<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
-        &self,
-        diagnostic_receiver: &T,
-        expression: &'pipeline dyn Expression,
-        state: &mut Self::State<'pipeline>,
-        batches: &mut [Option<RecordBatch>; BATCH_SIZE],
-        root: &ColumnarEngineSelectionPath<'pipeline>,
-        path: &[ColumnarEngineSelectionPath<'pipeline>],
-        key_filter: Option<&RoaringBitmap>,
-        value: Dictionary<'pipeline>,
-    ) -> ColumnarRecordsWriteResult;
-
     fn apply<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &self,
         diagnostic_receiver: &T,
@@ -82,6 +70,16 @@ pub trait ColumnarRecords<'pipeline>: RecordTable<'pipeline> {
     }
 
     fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable<'pipeline>>;
+
+    fn set_values<T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
+        &mut self,
+        diagnostic_receiver: &T,
+        expression: &'pipeline dyn Expression,
+        root: &ColumnarEngineSelectionPath<'pipeline>,
+        path: &[ColumnarEngineSelectionPath<'pipeline>],
+        key_filter: Option<&RoaringBitmap>,
+        values: Dictionary<'pipeline>,
+    ) -> ColumnarRecordsWriteResult;
 }
 
 pub trait RecordTable<'pipeline>: Display + Debug {

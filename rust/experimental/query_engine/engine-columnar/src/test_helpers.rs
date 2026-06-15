@@ -5,6 +5,7 @@ use std::{cell::RefCell, collections::HashMap, fmt::Display};
 
 use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
+use roaring::RoaringBitmap;
 
 use crate::{execution_context::*, resolved_value::*, scalars::execute_scalar_expression, *};
 
@@ -86,6 +87,18 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
         self.attached_records
             .as_ref()
             .and_then(|a| a.get(name).map(|v| v as &dyn RecordTable))
+    }
+
+    fn set_values<T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
+        &mut self,
+        _diagnostic_receiver: &T,
+        _expression: &'pipeline dyn Expression,
+        _root: &ColumnarEngineSelectionPath<'pipeline>,
+        _path: &[ColumnarEngineSelectionPath<'pipeline>],
+        _key_filter: Option<&RoaringBitmap>,
+        _values: Dictionary<'pipeline>,
+    ) -> ColumnarRecordsWriteResult {
+        todo!()
     }
 }
 
