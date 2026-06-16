@@ -317,7 +317,8 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                         root,
                                         path,
                                         None,
-                                        value.into_dictionary(key_data_type, key_count));
+                                        value.into_dictionary(key_data_type, key_count),
+                                    );
 
                                 match write_result {
                                     ColumnarRecordsWriteResult::Success => {

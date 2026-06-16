@@ -4,23 +4,20 @@
 use std::{
     cell::{OnceCell, RefCell, RefMut},
     collections::hash_map::Entry,
-    fmt::Display, ops::Deref,
+    fmt::Display,
+    ops::Deref,
 };
 
 use crate::*;
 use ahash::AHashMap;
-use arrow::{
-    array::*,
-    buffer::{MutableBuffer},
-    datatypes::*,
-};
+use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
 use data_engine_columnar::*;
 use otap_df_pdata::schema::consts::{self};
 
 #[derive(Debug)]
 pub struct OtapAttributes<'pipeline, 'record> {
     values: RefCell<AHashMap<Box<str>, OtapValue<'pipeline>>>,
-    batch: Option<OtapAttributesBatch<'record>>
+    batch: Option<OtapAttributesBatch<'record>>,
 }
 
 impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
@@ -30,14 +27,19 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
     ) -> OtapAttributes<'pipeline, 'record> {
         Self {
             values: RefCell::new(AHashMap::new()),
-            batch: Some(OtapAttributesBatch::new(ids, OtapParentIds::new(attributes_batch), None, attributes_batch)),
+            batch: Some(OtapAttributesBatch::new(
+                ids,
+                OtapParentIds::new(attributes_batch),
+                None,
+                attributes_batch,
+            )),
         }
     }
 
     pub fn new_empty() -> OtapAttributes<'pipeline, 'record> {
         Self {
             values: RefCell::new(AHashMap::new()),
-            batch: None
+            batch: None,
         }
     }
 
@@ -84,10 +86,10 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
                 Entry::Occupied(occupied) => occupied.into_mut(),
                 Entry::Vacant(vacant) => {
                     if let Some(batch) = self.batch.as_ref()
-                        && let Some(value) = batch.get_values(key) {
+                        && let Some(value) = batch.get_values(key)
+                    {
                         vacant.insert(OtapValue::Read(value))
-                    }
-                    else {
+                    } else {
                         vacant.insert(OtapValue::NotFound)
                     }
                 }
@@ -100,10 +102,7 @@ impl<'pipeline, 'record> RecordTable<'pipeline> for OtapAttributes<'pipeline, 'r
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         match self.get_values(key).deref() {
             OtapValue::NotFound | OtapValue::Removed => None,
-            OtapValue::Read(v)
-                | OtapValue::Set(v) => {
-                Some(RecordTableValue::Dictionary(v.clone()))
-            }
+            OtapValue::Read(v) | OtapValue::Set(v) => Some(RecordTableValue::Dictionary(v.clone())),
         }
     }
 }
@@ -113,7 +112,9 @@ impl Display for OtapAttributes<'_, '_> {
         write!(
             f,
             "Attributes(RecordCount={})",
-            self.batch.as_ref().map_or(0, |v| v.attributes_batch.num_rows())
+            self.batch
+                .as_ref()
+                .map_or(0, |v| v.attributes_batch.num_rows())
         )
     }
 }
@@ -292,7 +293,10 @@ impl<'record> OtapAttributesBatch<'record> {
                 PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
             };
 
-            Some(Dictionary::new(keys, DictionaryValueArray::Vec(values.into())))
+            Some(Dictionary::new(
+                keys,
+                DictionaryValueArray::Vec(values.into()),
+            ))
         } else {
             None
         }

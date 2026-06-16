@@ -65,6 +65,25 @@ impl DictionaryKeyArray {
         }
     }
 
+    pub fn is_null(&self) -> bool {
+        match self {
+            DictionaryKeyArray::KeyArray(array) => array.null_count() == array.len(),
+            DictionaryKeyArray::BooleanArray {
+                data_type: _,
+                values,
+            } => values.null_count() == values.len(),
+            DictionaryKeyArray::UniqueValues {
+                data_type: _,
+                length: _,
+            } => false,
+            DictionaryKeyArray::SingleValue {
+                data_type: _,
+                length: _,
+                value_index,
+            } => value_index.is_none(),
+        }
+    }
+
     pub fn data_type(&self) -> DataType {
         match self {
             DictionaryKeyArray::KeyArray(a) => a.data_type().clone(),

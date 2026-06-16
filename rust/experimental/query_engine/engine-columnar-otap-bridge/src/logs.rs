@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    cell::OnceCell, collections::hash_map::Entry, fmt::Display, ops::{Deref, DerefMut}, rc::Rc, sync::Arc,
+    cell::OnceCell,
+    collections::hash_map::Entry,
+    fmt::Display,
+    ops::{Deref, DerefMut},
+    rc::Rc,
+    sync::Arc,
 };
 
 use ahash::AHashMap;
@@ -13,7 +18,7 @@ use otap_df_pdata::{
     encode::record::logs::LogsBodyBuilder,
     otap::raw_batch_store::POSITION_LOOKUP,
     proto::opentelemetry::arrow::v1::ArrowPayloadType,
-    schema::consts::{self, metadata},
+    schema::{FieldExt, consts},
 };
 use roaring::RoaringBitmap;
 use strum::*;
@@ -185,7 +190,9 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     if !ids.is_empty() {
                         batches[LOG_ATTRIBUTES_BATCH_POSITION] = filter_child_batch(
                             &ids,
-                            attributes_state.and_then(|a| a.decoded_ids.as_mut()).and_then(|a| a.parent_ids.take()),
+                            attributes_state
+                                .and_then(|a| a.decoded_ids.as_mut())
+                                .and_then(|a| a.parent_ids.take()),
                             &attributes_batch,
                         );
                     }
@@ -268,6 +275,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
     ) {
         let mut logs = batches[LOGS_BATCH_POSITION].take().expect("has logs");
 
+        let record_count = logs.num_rows();
+
         for field in OtapLogRecordField::VARIANTS {
             if let Some(value) = state.fields.take_if_modified(*field) {
                 let (column_name, transform) = field.get_column_name_and_transform();
@@ -288,6 +297,44 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
                     }
                 }
             }
+        }
+
+        if let Some(attributes) = state.attributes.take()
+            && let Some((ids, attributes)) = attributes_writer(
+                record_count,
+                attributes.decoded_ids,
+                attributes.id_to_record_index_map,
+                attributes.values,
+            )
+        {
+            batches[LOG_ATTRIBUTES_BATCH_POSITION] = Some(attributes);
+
+            let (schema, mut columns, _) = logs.into_parts();
+
+            let mut schema_builder: SchemaBuilder = schema.as_ref().into();
+
+            match schema.column_with_name(consts::ID) {
+                None => {
+                    schema_builder.push(
+                        Field::new(consts::ID, ids.data_type().clone(), false)
+                            .with_plain_encoding(),
+                    );
+                    columns.push(Arc::new(ids));
+                }
+                Some((column_id, field)) => {
+                    let field = field.clone().with_plain_encoding();
+
+                    *schema_builder.field_mut(column_id) = Arc::new(field);
+
+                    columns[column_id] = Arc::new(ids);
+                }
+            }
+
+            logs = RecordBatch::try_new(Arc::new(schema_builder.finish()), columns)
+                .expect("valid logs");
+        } else {
+            logs = remove_column(diagnostic_receiver, expression, logs, consts::ID);
+            batches[LOG_ATTRIBUTES_BATCH_POSITION] = None;
         }
 
         batches[LOGS_BATCH_POSITION] = Some(logs);
@@ -406,12 +453,7 @@ fn replace_id_columns_in_batch<const SIZE: usize>(
 
                 let (struct_column_id, field) = struct_fields.find(consts::ID).expect("has ids");
 
-                let mut field = field.as_ref().clone();
-
-                field.metadata_mut().insert(
-                    metadata::COLUMN_ENCODING.into(),
-                    metadata::encodings::PLAIN.into(),
-                );
+                let field = field.as_ref().clone().with_plain_encoding();
 
                 let mut struct_fields = struct_fields.to_vec();
 
@@ -425,12 +467,7 @@ fn replace_id_columns_in_batch<const SIZE: usize>(
                     struct_nulls,
                 ));
             } else {
-                let mut field = field.clone();
-
-                field.metadata_mut().insert(
-                    metadata::COLUMN_ENCODING.into(),
-                    metadata::encodings::PLAIN.into(),
-                );
+                let field = field.clone().with_plain_encoding();
 
                 *schema_builder.field_mut(column_id) = Arc::new(field);
 
@@ -439,7 +476,7 @@ fn replace_id_columns_in_batch<const SIZE: usize>(
         }
     }
 
-    RecordBatch::try_new(Arc::new(schema_builder.finish()), columns).unwrap()
+    RecordBatch::try_new(Arc::new(schema_builder.finish()), columns).expect("valid batch")
 }
 
 fn update_dictionary_values_for_path<'a>(
@@ -826,7 +863,7 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
     ) -> ColumnarRecordsWriteResult {
         let logs = self.logs.expect("has logs");
 
-        if key_filter.map_or(false, |v| v.is_empty()) {
+        if key_filter.is_some_and(|v| v.is_empty()) {
             return ColumnarRecordsWriteResult::Success;
         }
 
@@ -847,18 +884,34 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
                                 expression: attribute_key_expression,
                                 value: attribute_key,
                             } => {
-                                let attributes = self.attributes.get_or_insert_with(|| OtapAttributes::new_empty());
+                                let attributes = self
+                                    .attributes
+                                    .get_or_insert_with(OtapAttributes::new_empty);
 
-                                let mut attributes_values_borrow = attributes.get_values(attribute_key.get_value());
+                                let mut attributes_values_borrow =
+                                    attributes.get_values(attribute_key.get_value());
 
-                                let attributes_values = match std::mem::replace(attributes_values_borrow.deref_mut(), OtapValue::Removed) {
-                                    OtapValue::NotFound | OtapValue::Removed => Dictionary::new_null_with_data_type(logs.num_rows(), DataType::UInt16),
-                                    OtapValue::Read(v)
-                                        | OtapValue::Set(v) => v,
+                                let attributes_values = match std::mem::replace(
+                                    attributes_values_borrow.deref_mut(),
+                                    OtapValue::Removed,
+                                ) {
+                                    OtapValue::NotFound | OtapValue::Removed => {
+                                        Dictionary::new_null_with_data_type(
+                                            logs.num_rows(),
+                                            DataType::UInt16,
+                                        )
+                                    }
+                                    OtapValue::Read(v) | OtapValue::Set(v) => v,
                                 };
 
                                 let attributes_values = if path.len() > 2 {
-                                    update_dictionary_values_for_path(attributes_values, key_filter, &path[1], &path[2..], &values)
+                                    update_dictionary_values_for_path(
+                                        attributes_values,
+                                        key_filter,
+                                        &path[1],
+                                        &path[2..],
+                                        &values,
+                                    )
                                 } else {
                                     attributes_values.with_values(key_filter, &values)
                                 };
@@ -866,10 +919,16 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
                                 diagnostic_receiver.add_diagnostic_if_enabled(
                                     ColumnarEngineDiagnosticLevel::Verbose,
                                     expression,
-                                    || format!("Attribute '{}' set to: {attributes_values}", attribute_key.get_value()),
+                                    || {
+                                        format!(
+                                            "Attribute '{}' set to: {attributes_values}",
+                                            attribute_key.get_value()
+                                        )
+                                    },
                                 );
 
-                                *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+                                *attributes_values_borrow.deref_mut() =
+                                    OtapValue::Set(attributes_values);
 
                                 return ColumnarRecordsWriteResult::Success;
                             }
@@ -994,11 +1053,17 @@ impl<'pipeline> From<OtapLogRecordBatch<'pipeline, '_>> for OtapLogRecordState<'
             attributes: val.attributes.map(|v| v.into_parts()),
             decoded_scope_ids: val
                 .scope
-                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids.expect("has ids")))
+                .and_then(|v| {
+                    v.attributes
+                        .map(|v| v.into_parts().decoded_ids.expect("has ids"))
+                })
                 .unwrap_or_default(),
             decoded_resource_ids: val
                 .resource
-                .and_then(|v| v.attributes.map(|v| v.into_parts().decoded_ids.expect("has ids")))
+                .and_then(|v| {
+                    v.attributes
+                        .map(|v| v.into_parts().decoded_ids.expect("has ids"))
+                })
                 .unwrap_or_default(),
         }
     }

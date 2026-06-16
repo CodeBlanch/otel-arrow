@@ -1,12 +1,16 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{hash::Hash, sync::Arc};
+use std::{collections::hash_map::Entry, hash::Hash, sync::Arc};
 
 use ahash::AHashMap;
-use arrow::{array::*, datatypes::*};
+use arrow::{array::*, buffer::MutableBuffer, datatypes::*, util::bit_util};
 use data_engine_columnar::*;
 use data_engine_expressions::*;
+use indexmap::IndexSet;
+use otap_df_pdata::schema::{FieldExt, consts};
+
+use crate::{OtapDecodedIds, OtapValue};
 
 pub(crate) fn set_column<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
     diagnostic_receiver: &TDiagnosticReceiver,
@@ -198,4 +202,183 @@ where
     }
 
     Some(Arc::new(builder.finish()))
+}
+
+pub(crate) fn attributes_writer(
+    record_count: usize,
+    decoded_ids: Option<OtapDecodedIds>,
+    id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
+    values: AHashMap<Box<str>, OtapValue<'_>>,
+) -> Option<(Arc<dyn Array>, RecordBatch)> {
+    if values.is_empty() {
+        return None;
+    }
+
+    let mut mapping = Vec::with_capacity(record_count);
+    let mut key_values =
+        IndexSet::with_capacity_and_hasher(record_count, ahash::RandomState::new());
+    let mut types = Vec::with_capacity(record_count);
+    let mut string_values =
+        IndexSet::with_capacity_and_hasher(record_count, ahash::RandomState::new());
+
+    let mut lookup = AHashMap::new();
+
+    for (key, value) in values {
+        match value {
+            OtapValue::NotFound | OtapValue::Removed => continue,
+            OtapValue::Read(v) | OtapValue::Set(v) => {
+                let (keys, values) = v.into_parts();
+                if keys.is_empty() || keys.is_null() {
+                    continue;
+                }
+
+                let (key_index, _) = key_values.insert_full(key);
+
+                lookup.clear();
+
+                for record_key_index in 0..keys.len() {
+                    let value_index = match keys.get_value_index_for_key_index(record_key_index) {
+                        None => continue,
+                        Some(v) => v,
+                    };
+
+                    let value_index = match lookup.entry(value_index) {
+                        Entry::Occupied(occupied) => occupied.into_mut(),
+                        Entry::Vacant(vacant) => match values.get_value_at(value_index) {
+                            ValueOrRef::Null => continue,
+                            ValueOrRef::String(s) => {
+                                let (value_index, _) = string_values.insert_full(s);
+
+                                vacant.insert(value_index)
+                            }
+                            v => todo!(),
+                        },
+                    };
+
+                    types.push(1u8);
+                    mapping.push((record_key_index, key_index, 1u8, *value_index));
+                }
+
+                //println!("appended key: {key}");
+            }
+        }
+    }
+
+    let attribute_count = mapping.len();
+
+    lookup.clear();
+
+    let mut ids_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
+    let mut ids_null_buffer = MutableBuffer::new_null(record_count);
+    let ids = ids_buffer.typed_data_mut::<u16>();
+    let ids_null = ids_null_buffer.typed_data_mut::<u8>();
+
+    let mut parent_ids_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
+    let parent_ids = parent_ids_buffer.typed_data_mut::<u16>();
+
+    let mut keys_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
+    let keys = keys_buffer.typed_data_mut::<u16>();
+
+    let mut strings_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
+    let mut strings_null_buffer = MutableBuffer::new_null(attribute_count);
+    let strings = strings_buffer.typed_data_mut::<u16>();
+    let strings_null = strings_null_buffer.typed_data_mut::<u8>();
+
+    let mut current_parent_id = 0;
+
+    for (attribute_index, (record_key_index, key_index, value_type, value_index)) in
+        mapping.into_iter().enumerate()
+    {
+        let parent_id = match lookup.entry(record_key_index) {
+            Entry::Occupied(occupied) => occupied.into_mut(),
+            Entry::Vacant(vacant) => {
+                ids[record_key_index] = current_parent_id as u16;
+                bit_util::set_bit(ids_null, record_key_index);
+                let r = vacant.insert(current_parent_id);
+                current_parent_id += 1;
+                r
+            }
+        };
+
+        parent_ids[attribute_index] = *parent_id as u16;
+        keys[attribute_index] = key_index as u16;
+
+        match value_type {
+            0 => continue,
+            1 => {
+                strings[attribute_index] = value_index as u16;
+                bit_util::set_bit(strings_null, attribute_index);
+            }
+            _ => todo!(),
+        }
+    }
+
+    let ids = PrimitiveArray::<UInt16Type>::new(
+        ids_buffer.into(),
+        NullBufferBuilder::new_from_buffer(ids_null_buffer, record_count).finish(),
+    );
+
+    let parent_ids = PrimitiveArray::<UInt16Type>::new(parent_ids_buffer.into(), None);
+
+    let keys = DictionaryArray::new(
+        PrimitiveArray::<UInt16Type>::new(keys_buffer.into(), None),
+        Arc::new(StringArray::from(
+            key_values.iter().map(|v| v.as_ref()).collect::<Vec<&str>>(),
+        )),
+    );
+
+    let types = PrimitiveArray::<UInt8Type>::new(types.into(), None);
+
+    let strings = DictionaryArray::new(
+        PrimitiveArray::<UInt16Type>::new(
+            strings_buffer.into(),
+            NullBufferBuilder::new_from_buffer(strings_null_buffer, attribute_count).finish(),
+        ),
+        Arc::new(StringArray::from(
+            string_values
+                .iter()
+                .map(|v| v.as_ref())
+                .collect::<Vec<&str>>(),
+        )),
+    );
+
+    /*println!("ids: {ids:?}");
+    println!("parent_ids: {parent_ids:?}");
+    println!("keys: {keys:?}");
+    println!("types: {types:?}");
+    println!("strings: {strings:?}");*/
+
+    let mut columns: Vec<Arc<dyn Array>> = vec![];
+    let mut fields = vec![];
+
+    fields.push(
+        Field::new(consts::PARENT_ID, parent_ids.data_type().clone(), false).with_plain_encoding(),
+    );
+    columns.push(Arc::new(parent_ids));
+
+    fields.push(Field::new(
+        consts::ATTRIBUTE_KEY,
+        keys.data_type().clone(),
+        false,
+    ));
+    columns.push(Arc::new(keys));
+
+    fields.push(Field::new(
+        consts::ATTRIBUTE_TYPE,
+        types.data_type().clone(),
+        false,
+    ));
+    columns.push(Arc::new(types));
+
+    fields.push(Field::new(
+        consts::ATTRIBUTE_STR,
+        strings.data_type().clone(),
+        true,
+    ));
+    columns.push(Arc::new(strings));
+
+    Some((
+        Arc::new(ids),
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch"),
+    ))
 }
