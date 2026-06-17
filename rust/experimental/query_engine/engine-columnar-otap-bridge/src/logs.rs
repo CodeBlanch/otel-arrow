@@ -300,11 +300,34 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         }
 
         if let Some(attributes) = state.attributes.take_if(|a| a.modified) {
-            if let Some((ids, attributes)) = attributes_writer(
-                record_count,
-                attributes.values,
-                batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref(),
-            ) {
+            let attributes_batch = batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref().map(|b| {
+                match attributes.decoded_ids {
+                    None => OtapAttributesBatch::from_parts(
+                        OtapIds::from_batch(&logs),
+                        None,
+                        attributes.id_to_record_index_map,
+                        b,
+                    ),
+                    Some(decoded_ids) => {
+                        let ids = if let Some(decoded_ids) = decoded_ids.ids {
+                            OtapIds::from_decoded(decoded_ids)
+                        } else {
+                            OtapIds::from_batch(&logs)
+                        };
+
+                        OtapAttributesBatch::from_parts(
+                            ids,
+                            decoded_ids.parent_ids,
+                            attributes.id_to_record_index_map,
+                            b,
+                        )
+                    }
+                }
+            });
+
+            if let Some((ids, attributes)) =
+                attributes_writer(record_count, attributes.values, attributes_batch)
+            {
                 batches[LOG_ATTRIBUTES_BATCH_POSITION] = Some(attributes);
 
                 let (schema, mut columns, _) = logs.into_parts();

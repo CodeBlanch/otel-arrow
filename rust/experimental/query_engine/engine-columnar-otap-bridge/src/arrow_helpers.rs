@@ -209,10 +209,10 @@ where
     Some(Arc::new(builder.finish()))
 }
 
-pub(crate) fn attributes_writer(
+pub(crate) fn attributes_writer<'a>(
     record_count: usize,
-    values: AHashMap<Box<str>, OtapValue<'_>>,
-    batch: Option<&RecordBatch>,
+    values: AHashMap<Box<str>, OtapValue<'a>>,
+    attributes_batch: Option<OtapAttributesBatch<'_>>,
 ) -> Option<(Arc<dyn Array>, RecordBatch)> {
     if values.is_empty() {
         return None;
@@ -221,72 +221,84 @@ pub(crate) fn attributes_writer(
     let mut mapping = Vec::with_capacity(u16::MAX as usize);
     let mut key_values = StringBuilder::new();
     let mut types = Vec::with_capacity(u16::MAX as usize);
-    let mut string_values =
+    let mut string_values: IndexSet<StringValueOrRef<'a>, ahash::RandomState> =
         IndexSet::with_capacity_and_hasher(u16::MAX as usize, ahash::RandomState::new());
     let mut int_values = None;
     let mut double_values = None;
 
     let mut lookup = AHashMap::new();
 
+    let mut process_attribute = |key: &str, value: Dictionary<'a>| {
+        let (keys, values) = value.into_parts();
+        if keys.is_empty() || keys.is_null() {
+            return;
+        }
+
+        let key_index = key_values.len();
+        key_values.append_value(key);
+
+        lookup.clear();
+
+        for record_key_index in 0..keys.len() {
+            let value_index = match keys.get_value_index_for_key_index(record_key_index) {
+                None => continue,
+                Some(v) => v,
+            };
+
+            let (attribute_type, value_index) = match lookup.entry(value_index) {
+                Entry::Occupied(occupied) => occupied.into_mut(),
+                Entry::Vacant(vacant) => match values.get_value_at(value_index) {
+                    ValueOrRef::Null => continue,
+                    ValueOrRef::String(s) => {
+                        // todo: check for default value
+                        let (value_index, _) = string_values.insert_full(s);
+                        vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, value_index))
+                    }
+                    ValueOrRef::Integer(i) => {
+                        let ints = int_values.get_or_insert_with(|| {
+                            IndexSet::with_capacity_and_hasher(
+                                u16::MAX as usize,
+                                ahash::RandomState::new(),
+                            )
+                        });
+                        // todo: check for default value
+                        let (value_index, _) = ints.insert_full(i);
+                        vacant.insert((INT_ATTRIBUTE_VALUE_TYPE, value_index))
+                    }
+                    ValueOrRef::Double(d) => {
+                        let doubles = double_values
+                            .get_or_insert_with(|| Vec::with_capacity(u16::MAX as usize));
+                        // todo: check for default value
+                        let value_index = doubles.len();
+                        doubles.push(d);
+                        vacant.insert((DOUBLE_ATTRIBUTE_VALUE_TYPE, value_index))
+                    }
+                    ValueOrRef::Boolean(b) => {
+                        vacant.insert((BOOL_ATTRIBUTE_VALUE_TYPE, if b { 1 } else { 0 }))
+                    }
+                    v => todo!(),
+                },
+            };
+
+            types.push(*attribute_type);
+            mapping.push((record_key_index, key_index, *attribute_type, *value_index));
+        }
+    };
+
+    if let Some(attributes_batch) = attributes_batch {
+        for key in attributes_batch.get_keys().iter().flatten() {
+            if !values.contains_key(key)
+                && let Some(v) = attributes_batch.get_values(key)
+            {
+                process_attribute(key, v);
+            }
+        }
+    }
+
     for (key, value) in values {
         match value {
             OtapValue::NotFound | OtapValue::Removed => continue,
-            OtapValue::Read(v) | OtapValue::Set(v) => {
-                let (keys, values) = v.into_parts();
-                if keys.is_empty() || keys.is_null() {
-                    continue;
-                }
-
-                let key_index = key_values.len();
-                key_values.append_value(key.as_ref());
-
-                lookup.clear();
-
-                for record_key_index in 0..keys.len() {
-                    let value_index = match keys.get_value_index_for_key_index(record_key_index) {
-                        None => continue,
-                        Some(v) => v,
-                    };
-
-                    let (attribute_type, value_index) = match lookup.entry(value_index) {
-                        Entry::Occupied(occupied) => occupied.into_mut(),
-                        Entry::Vacant(vacant) => match values.get_value_at(value_index) {
-                            ValueOrRef::Null => continue,
-                            ValueOrRef::String(s) => {
-                                // todo: check for default value
-                                let (value_index, _) = string_values.insert_full(s);
-                                vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, value_index))
-                            }
-                            ValueOrRef::Integer(i) => {
-                                let ints = int_values.get_or_insert_with(|| {
-                                    IndexSet::with_capacity_and_hasher(
-                                        u16::MAX as usize,
-                                        ahash::RandomState::new(),
-                                    )
-                                });
-                                // todo: check for default value
-                                let (value_index, _) = ints.insert_full(i);
-                                vacant.insert((INT_ATTRIBUTE_VALUE_TYPE, value_index))
-                            }
-                            ValueOrRef::Double(d) => {
-                                let doubles = double_values
-                                    .get_or_insert_with(|| Vec::with_capacity(u16::MAX as usize));
-                                // todo: check for default value
-                                let value_index = doubles.len();
-                                doubles.push(d);
-                                vacant.insert((DOUBLE_ATTRIBUTE_VALUE_TYPE, value_index))
-                            }
-                            ValueOrRef::Boolean(b) => {
-                                todo!()
-                            }
-                            v => todo!(),
-                        },
-                    };
-
-                    types.push(*attribute_type);
-                    mapping.push((record_key_index, key_index, *attribute_type, *value_index));
-                }
-            }
+            OtapValue::Read(v) | OtapValue::Set(v) => process_attribute(key.as_ref(), v),
         }
     }
 
@@ -365,9 +377,8 @@ pub(crate) fn attributes_writer(
                 };
             }
             BOOL_ATTRIBUTE_VALUE_TYPE => {
-                let bools = bools.get_or_insert_with(|| {
-                    AttributeArrayBuilder::<UInt8Type>::new(bit_util::ceil(attribute_count, 8))
-                });
+                let bools =
+                    bools.get_or_insert_with(|| AttributeBooleanArrayBuilder::new(attribute_count));
 
                 bools.set_bit(key_index, value_index > 0);
             }
@@ -456,12 +467,7 @@ pub(crate) fn attributes_writer(
     }
 
     if let Some(bools) = bools {
-        let (keys, null) = bools.into_parts();
-
-        let bools = BooleanArray::new(
-            BooleanBuffer::new(keys.into(), 0, attribute_count),
-            NullBufferBuilder::new_from_buffer(null, attribute_count).build(),
-        );
+        let bools = bools.finish();
 
         fields.push(Field::new(
             consts::ATTRIBUTE_BOOL,
@@ -559,21 +565,6 @@ impl<K: ArrowPrimitiveType> AttributeArrayBuilder<K> {
         }
     }
 
-    pub fn set_bit(&mut self, key_index: usize, value: bool) {
-        let i = key_index / 8;
-        let b = 1 << (key_index % 8);
-
-        if value {
-            self.key_buffer[i] |= b
-        }
-
-        self.null_buffer[i] |= b;
-    }
-
-    pub fn into_parts(self) -> (MutableBuffer, MutableBuffer) {
-        (self.key_buffer, self.null_buffer)
-    }
-
     pub fn finish(self) -> PrimitiveArray<K> {
         PrimitiveArray::<K>::new(
             self.key_buffer.into(),
@@ -603,5 +594,39 @@ impl<'a, K: ArrowPrimitiveType> AttributeArrayWriter<'a, K> {
         let b = 1 << (key_index % 8);
 
         unsafe { *self.null_buffer.add(i) |= b };
+    }
+}
+
+pub struct AttributeBooleanArrayBuilder {
+    key_length: usize,
+    key_buffer: MutableBuffer,
+    null_buffer: MutableBuffer,
+}
+
+impl AttributeBooleanArrayBuilder {
+    pub fn new(key_length: usize) -> AttributeBooleanArrayBuilder {
+        Self {
+            key_length,
+            key_buffer: MutableBuffer::from_len_zeroed(bit_util::ceil(key_length, 8)),
+            null_buffer: MutableBuffer::new_null(key_length),
+        }
+    }
+
+    pub fn set_bit(&mut self, key_index: usize, value: bool) {
+        let i = key_index / 8;
+        let b = 1 << (key_index % 8);
+
+        if value {
+            self.key_buffer[i] |= b
+        }
+
+        self.null_buffer[i] |= b;
+    }
+
+    pub fn finish(self) -> BooleanArray {
+        BooleanArray::new(
+            BooleanBuffer::new(self.key_buffer.into(), 0, self.key_length),
+            NullBufferBuilder::new_from_buffer(self.null_buffer, self.key_length).build(),
+        )
     }
 }

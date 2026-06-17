@@ -139,7 +139,7 @@ impl Display for OtapAttributes<'_, '_> {
 }
 
 #[derive(Debug)]
-struct OtapAttributesBatch<'record> {
+pub struct OtapAttributesBatch<'record> {
     ids: OtapIds<'record>,
     parent_ids: OtapParentIds<'record>,
     id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
@@ -229,6 +229,26 @@ impl<'record> OtapAttributesBatch<'record> {
             attribute_ser_keys: ser.map(|v| v.keys()),
             attribute_ser_values: ser.map(|v| v.values()),
         }
+    }
+
+    pub fn from_parts(
+        ids: OtapIds<'record>,
+        decoded_parent_ids: Option<PrimitiveArray<UInt16Type>>,
+        id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
+        attributes_batch: &'record RecordBatch,
+    ) -> OtapAttributesBatch<'record> {
+        Self::new(
+            ids,
+            decoded_parent_ids
+                .map(OtapParentIds::from_decoded)
+                .unwrap_or_else(|| OtapParentIds::new(attributes_batch)),
+            id_to_record_index_map,
+            attributes_batch,
+        )
+    }
+
+    pub fn get_keys(&self) -> &'record StringArray {
+        self.attribute_keys.values()
     }
 
     pub fn get_values(&self, key: &str) -> Option<Dictionary<'static>> {
