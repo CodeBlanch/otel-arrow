@@ -299,41 +299,41 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
             }
         }
 
-        if let Some(attributes) = state.attributes.take()
-            && let Some((ids, attributes)) = attributes_writer(
+        if let Some(attributes) = state.attributes.take_if(|a| a.modified) {
+            if let Some((ids, attributes)) = attributes_writer(
                 record_count,
                 attributes.values,
                 batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref(),
-            )
-        {
-            batches[LOG_ATTRIBUTES_BATCH_POSITION] = Some(attributes);
+            ) {
+                batches[LOG_ATTRIBUTES_BATCH_POSITION] = Some(attributes);
 
-            let (schema, mut columns, _) = logs.into_parts();
+                let (schema, mut columns, _) = logs.into_parts();
 
-            let mut schema_builder: SchemaBuilder = schema.as_ref().into();
+                let mut schema_builder: SchemaBuilder = schema.as_ref().into();
 
-            match schema.column_with_name(consts::ID) {
-                None => {
-                    schema_builder.push(
-                        Field::new(consts::ID, ids.data_type().clone(), false)
-                            .with_plain_encoding(),
-                    );
-                    columns.push(Arc::new(ids));
+                match schema.column_with_name(consts::ID) {
+                    None => {
+                        schema_builder.push(
+                            Field::new(consts::ID, ids.data_type().clone(), false)
+                                .with_plain_encoding(),
+                        );
+                        columns.push(Arc::new(ids));
+                    }
+                    Some((column_id, field)) => {
+                        let field = field.clone().with_plain_encoding();
+
+                        *schema_builder.field_mut(column_id) = Arc::new(field);
+
+                        columns[column_id] = Arc::new(ids);
+                    }
                 }
-                Some((column_id, field)) => {
-                    let field = field.clone().with_plain_encoding();
 
-                    *schema_builder.field_mut(column_id) = Arc::new(field);
-
-                    columns[column_id] = Arc::new(ids);
-                }
+                logs = RecordBatch::try_new(Arc::new(schema_builder.finish()), columns)
+                    .expect("valid logs");
+            } else {
+                logs = remove_column(diagnostic_receiver, expression, logs, consts::ID);
+                batches[LOG_ATTRIBUTES_BATCH_POSITION] = None;
             }
-
-            logs = RecordBatch::try_new(Arc::new(schema_builder.finish()), columns)
-                .expect("valid logs");
-        } else {
-            logs = remove_column(diagnostic_receiver, expression, logs, consts::ID);
-            batches[LOG_ATTRIBUTES_BATCH_POSITION] = None;
         }
 
         batches[LOGS_BATCH_POSITION] = Some(logs);
@@ -887,8 +887,10 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
                                     .attributes
                                     .get_or_insert_with(OtapAttributes::new_empty);
 
-                                let mut attributes_values_borrow =
+                                let (mut attributes_modified, mut attributes_values_borrow) =
                                     attributes.get_values(attribute_key.get_value());
+
+                                *attributes_modified = true;
 
                                 let attributes_values = match std::mem::replace(
                                     attributes_values_borrow.deref_mut(),

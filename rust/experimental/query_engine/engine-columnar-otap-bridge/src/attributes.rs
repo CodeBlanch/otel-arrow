@@ -26,7 +26,7 @@ pub(crate) const BYTES_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Bytes as u
 
 #[derive(Debug)]
 pub struct OtapAttributes<'pipeline, 'record> {
-    values: RefCell<AHashMap<Box<str>, OtapValue<'pipeline>>>,
+    values: RefCell<(bool, AHashMap<Box<str>, OtapValue<'pipeline>>)>,
     batch: Option<OtapAttributesBatch<'record>>,
 }
 
@@ -36,7 +36,7 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
         attributes_batch: &'record RecordBatch,
     ) -> OtapAttributes<'pipeline, 'record> {
         Self {
-            values: RefCell::new(AHashMap::new()),
+            values: RefCell::new((false, AHashMap::new())),
             batch: Some(OtapAttributesBatch::new(
                 ids,
                 OtapParentIds::new(attributes_batch),
@@ -48,7 +48,7 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
 
     pub fn new_empty() -> OtapAttributes<'pipeline, 'record> {
         Self {
-            values: RefCell::new(AHashMap::new()),
+            values: RefCell::new((false, AHashMap::new())),
             batch: None,
         }
     }
@@ -72,6 +72,8 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
     }*/
 
     pub fn into_parts(self) -> OtapAttributesState<'pipeline> {
+        let (modified, values) = self.values.take();
+
         if let Some(mut batch) = self.batch {
             OtapAttributesState {
                 decoded_ids: Some(OtapDecodedIds {
@@ -79,20 +81,25 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
                     parent_ids: batch.parent_ids.into_parts(),
                 }),
                 id_to_record_index_map: batch.id_to_record_index_map.take(),
-                values: self.values.take(),
+                modified,
+                values,
             }
         } else {
             OtapAttributesState {
                 decoded_ids: None,
                 id_to_record_index_map: None,
-                values: self.values.take(),
+                modified,
+                values,
             }
         }
     }
 
-    pub(crate) fn get_values(&self, key: &str) -> RefMut<'_, OtapValue<'pipeline>> {
-        RefMut::map(self.values.borrow_mut(), |values| {
-            match values.entry(key.into()) {
+    pub(crate) fn get_values(
+        &self,
+        key: &str,
+    ) -> (RefMut<'_, bool>, RefMut<'_, OtapValue<'pipeline>>) {
+        RefMut::map_split(self.values.borrow_mut(), |(modified, values)| {
+            let value = match values.entry(key.into()) {
                 Entry::Occupied(occupied) => occupied.into_mut(),
                 Entry::Vacant(vacant) => {
                     if let Some(batch) = self.batch.as_ref()
@@ -103,14 +110,16 @@ impl<'pipeline, 'record> OtapAttributes<'pipeline, 'record> {
                         vacant.insert(OtapValue::NotFound)
                     }
                 }
-            }
+            };
+
+            (modified, value)
         })
     }
 }
 
 impl<'pipeline, 'record> RecordTable<'pipeline> for OtapAttributes<'pipeline, 'record> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
-        match self.get_values(key).deref() {
+        match self.get_values(key).1.deref() {
             OtapValue::NotFound | OtapValue::Removed => None,
             OtapValue::Read(v) | OtapValue::Set(v) => Some(RecordTableValue::Dictionary(v.clone())),
         }
@@ -506,7 +515,7 @@ impl<'a> Iterator for AdaptiveDictionaryReaderKeyIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             AdaptiveDictionaryReaderKeyIterator::UInt8(i) => i.next().map(|v| *v as u16),
-            AdaptiveDictionaryReaderKeyIterator::UInt16(i) => i.next().map(|v| *v),
+            AdaptiveDictionaryReaderKeyIterator::UInt16(i) => i.next().copied(),
         }
     }
 }
@@ -520,6 +529,6 @@ enum AttributeValueOrIndex {
 pub struct OtapAttributesState<'pipeline> {
     pub decoded_ids: Option<OtapDecodedIds>,
     pub id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
-    //pub modified: bool,
+    pub modified: bool,
     pub values: AHashMap<Box<str>, OtapValue<'pipeline>>,
 }
