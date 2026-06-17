@@ -6,13 +6,23 @@ use std::{
     collections::hash_map::Entry,
     fmt::Display,
     ops::Deref,
+    sync::Arc,
 };
 
 use crate::*;
 use ahash::AHashMap;
 use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
 use data_engine_columnar::*;
-use otap_df_pdata::schema::consts::{self};
+use otap_df_pdata::{otlp::attributes::*, schema::consts};
+
+pub(crate) const EMPTY_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Empty as u8;
+pub(crate) const STRING_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Str as u8;
+pub(crate) const INT_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Int as u8;
+pub(crate) const DOUBLE_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Double as u8;
+pub(crate) const BOOL_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Bool as u8;
+pub(crate) const MAP_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Map as u8;
+pub(crate) const SLICE_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Slice as u8;
+pub(crate) const BYTES_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Bytes as u8;
 
 #[derive(Debug)]
 pub struct OtapAttributes<'pipeline, 'record> {
@@ -125,8 +135,7 @@ struct OtapAttributesBatch<'record> {
     parent_ids: OtapParentIds<'record>,
     id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
     attributes_batch: &'record RecordBatch,
-    attribute_keys:
-        TypedDictionaryArray<'record, UInt8Type, GenericByteArray<GenericStringType<i32>>>,
+    attribute_keys: AdaptiveDictionaryReader<'record, GenericByteArray<GenericStringType<i32>>>,
     attribute_types: &'record PrimitiveArray<UInt8Type>,
     attribute_string_keys: &'record PrimitiveArray<UInt16Type>,
     attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
@@ -182,12 +191,11 @@ impl<'record> OtapAttributesBatch<'record> {
             parent_ids,
             id_to_record_index_map,
             attributes_batch,
-            attribute_keys: attributes_batch
-                .column_by_name(consts::ATTRIBUTE_KEY)
-                .expect("has keys")
-                .as_dictionary::<UInt8Type>()
-                .downcast_dict::<StringArray>()
-                .expect("Attribute keys were an unexpected type"),
+            attribute_keys: AdaptiveDictionaryReader::<StringArray>::new(
+                attributes_batch
+                    .column_by_name(consts::ATTRIBUTE_KEY)
+                    .expect("has keys"),
+            ),
             attribute_types: attributes_batch
                 .column_by_name(consts::ATTRIBUTE_TYPE)
                 .expect("has types")
@@ -235,16 +243,14 @@ impl<'record> OtapAttributesBatch<'record> {
             let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
             let mut values = Vec::with_capacity(record_count);
 
-            let value_index = value_index as u8;
-            let attribute_count = self.attribute_keys.len();
+            let value_index = value_index as u16;
 
-            let attribute_keys = self.attribute_keys.keys().values().as_ptr();
             let attribute_types = self.attribute_types.values().as_ptr();
             let attribute_parent_ids = self.parent_ids.get_ids().values().as_ptr();
             let id_to_record_index_map = self.get_id_to_record_index_map().values().as_ptr();
 
-            for attribute_index in 0..attribute_count {
-                if unsafe { *attribute_keys.add(attribute_index) } == value_index {
+            for (attribute_index, key_value_index) in self.attribute_keys.key_iter().enumerate() {
+                if key_value_index == value_index {
                     let attribute_type = unsafe { *attribute_types.add(attribute_index) };
                     if let Some(attribute_value) =
                         self.get_attribute_value_or_index(attribute_index, attribute_type)
@@ -286,7 +292,7 @@ impl<'record> OtapAttributesBatch<'record> {
             let keys = if null_count > 0 {
                 PrimitiveArray::<UInt16Type>::new(
                     key_buffer.into(),
-                    NullBufferBuilder::new_from_buffer(null_buffer, record_count).finish(),
+                    NullBufferBuilder::new_from_buffer(null_buffer, record_count).build(),
                 )
                 .into()
             } else {
@@ -335,28 +341,16 @@ impl<'record> OtapAttributesBatch<'record> {
         attribute_index: usize,
         attribute_type: u8,
     ) -> Option<AttributeValueOrIndex> {
-        /*
-        pub enum AttributeValueType {
-            Empty = 0,
-            Str = 1,
-            Int = 2,
-            Double = 3,
-            Bool = 4,
-            Map = 5,
-            Slice = 6,
-            Bytes = 7,
-        }
-        */
         match attribute_type {
-            0 => {}
-            1 => {
+            EMPTY_ATTRIBUTE_VALUE_TYPE => {}
+            STRING_ATTRIBUTE_VALUE_TYPE => {
                 let keys = self.attribute_string_keys;
                 if keys.is_valid(attribute_index) {
                     let value_index = unsafe { keys.value_unchecked(attribute_index) };
                     return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
-            2 => {
+            INT_ATTRIBUTE_VALUE_TYPE => {
                 return Some(
                     if let Some(ints) = self.attribute_ints
                         && ints.is_valid(attribute_index)
@@ -368,7 +362,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     },
                 );
             }
-            3 => {
+            DOUBLE_ATTRIBUTE_VALUE_TYPE => {
                 return Some(
                     if let Some(doubles) = self.attribute_doubles
                         && doubles.is_valid(attribute_index)
@@ -380,7 +374,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     },
                 );
             }
-            4 => {
+            BOOL_ATTRIBUTE_VALUE_TYPE => {
                 if let Some(bools) = self.attribute_bools
                     && bools.is_valid(attribute_index)
                 {
@@ -388,7 +382,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
                 }
             }
-            5 | 6 => {
+            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
                 if let Some(keys) = self.attribute_ser_keys
                     && keys.is_valid(attribute_index)
                 {
@@ -396,7 +390,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
-            7 => {
+            BYTES_ATTRIBUTE_VALUE_TYPE => {
                 if let Some(keys) = self.attribute_bytes_keys
                     && keys.is_valid(attribute_index)
                 {
@@ -415,20 +409,8 @@ impl<'record> OtapAttributesBatch<'record> {
         attribute_type: u8,
         attribute_value_index: u16,
     ) -> ValueOrRef<'static> {
-        /*
-        pub enum AttributeValueType {
-            Empty = 0,
-            Str = 1,
-            Int = 2,
-            Double = 3,
-            Bool = 4,
-            Map = 5,
-            Slice = 6,
-            Bytes = 7,
-        }
-        */
         match attribute_type {
-            1 => ValueOrRef::String(StringValueOrRef::Buffer({
+            STRING_ATTRIBUTE_VALUE_TYPE => ValueOrRef::String(StringValueOrRef::Buffer({
                 let strings = self.attribute_string_values;
                 let offsets = strings.value_offsets();
                 let start =
@@ -440,7 +422,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     .slice_with_length(start, end - start)
                     .clone()
             })),
-            5 | 6 => {
+            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
                 let value = unsafe {
                     self.attribute_ser_values
                         .unwrap()
@@ -450,7 +432,7 @@ impl<'record> OtapAttributesBatch<'record> {
                 // todo: Should we log deserialization failure somewhere?
                 crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
             }
-            7 => ValueOrRef::Array(ArrayValueOrRef::Buffer({
+            BYTES_ATTRIBUTE_VALUE_TYPE => ValueOrRef::Array(ArrayValueOrRef::Buffer({
                 let bytes = self.attribute_bytes_values.unwrap();
                 let offsets = bytes.value_offsets();
                 let start =
@@ -465,6 +447,70 @@ impl<'record> OtapAttributesBatch<'record> {
     }
 }
 
+#[derive(Debug)]
+enum AdaptiveDictionaryReader<'a, V> {
+    UInt8(TypedDictionaryArray<'a, UInt8Type, V>),
+    UInt16(TypedDictionaryArray<'a, UInt16Type, V>),
+}
+
+impl<'a, V: 'static> AdaptiveDictionaryReader<'a, V> {
+    pub fn new(array: &'a Arc<dyn Array>) -> AdaptiveDictionaryReader<'a, V> {
+        match array.data_type() {
+            DataType::Dictionary(key_type, _) if key_type.as_ref() == &DataType::UInt8 => {
+                AdaptiveDictionaryReader::UInt8(
+                    array
+                        .as_dictionary::<UInt8Type>()
+                        .downcast_dict::<V>()
+                        .expect("Array was an unexpected type"),
+                )
+            }
+            DataType::Dictionary(key_type, _) if key_type.as_ref() == &DataType::UInt16 => {
+                AdaptiveDictionaryReader::UInt16(
+                    array
+                        .as_dictionary::<UInt16Type>()
+                        .downcast_dict::<V>()
+                        .expect("Array was an unexpected type"),
+                )
+            }
+            d => todo!("DataType '{d}' is not supported"),
+        }
+    }
+
+    pub fn key_iter(&self) -> AdaptiveDictionaryReaderKeyIterator<'a> {
+        match self {
+            AdaptiveDictionaryReader::UInt8(d) => {
+                AdaptiveDictionaryReaderKeyIterator::UInt8(d.keys().values().iter())
+            }
+            AdaptiveDictionaryReader::UInt16(d) => {
+                AdaptiveDictionaryReaderKeyIterator::UInt16(d.keys().values().iter())
+            }
+        }
+    }
+
+    pub fn values(&self) -> &'a V {
+        match self {
+            AdaptiveDictionaryReader::UInt8(d) => d.values(),
+            AdaptiveDictionaryReader::UInt16(d) => d.values(),
+        }
+    }
+}
+
+enum AdaptiveDictionaryReaderKeyIterator<'a> {
+    UInt8(core::slice::Iter<'a, u8>),
+    UInt16(core::slice::Iter<'a, u16>),
+}
+
+impl<'a> Iterator for AdaptiveDictionaryReaderKeyIterator<'a> {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            AdaptiveDictionaryReaderKeyIterator::UInt8(i) => i.next().map(|v| *v as u16),
+            AdaptiveDictionaryReaderKeyIterator::UInt16(i) => i.next().map(|v| *v),
+        }
+    }
+}
+
 enum AttributeValueOrIndex {
     ValueIndex(u16),
     Value(ValueOrRef<'static>),
@@ -474,5 +520,6 @@ enum AttributeValueOrIndex {
 pub struct OtapAttributesState<'pipeline> {
     pub decoded_ids: Option<OtapDecodedIds>,
     pub id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
+    //pub modified: bool,
     pub values: AHashMap<Box<str>, OtapValue<'pipeline>>,
 }

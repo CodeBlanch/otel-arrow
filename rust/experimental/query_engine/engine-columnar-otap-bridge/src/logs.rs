@@ -302,9 +302,8 @@ impl ColumnarRecordsFactory<4> for OtapLogRecordBatchFactory {
         if let Some(attributes) = state.attributes.take()
             && let Some((ids, attributes)) = attributes_writer(
                 record_count,
-                attributes.decoded_ids,
-                attributes.id_to_record_index_map,
                 attributes.values,
+                batches[LOG_ATTRIBUTES_BATCH_POSITION].as_ref(),
             )
         {
             batches[LOG_ATTRIBUTES_BATCH_POSITION] = Some(attributes);
@@ -1413,20 +1412,8 @@ fn build_logs_body_dictionary_from_struct(
 
         for (key_index, body_type) in body_types.values().iter().enumerate() {
             match *body_type {
-                /*
-                pub enum AttributeValueType {
-                    Empty = 0,
-                    Str = 1,
-                    Int = 2,
-                    Double = 3,
-                    Bool = 4,
-                    Map = 5,
-                    Slice = 6,
-                    Bytes = 7,
-                }
-                */
-                0 => {}
-                1 => {
+                EMPTY_ATTRIBUTE_VALUE_TYPE => {}
+                STRING_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_strings) = body_strings.get_or_init(|| {
                         body_struct.column_by_name(consts::ATTRIBUTE_STR).map(|v| {
                             v.as_dictionary::<UInt16Type>()
@@ -1457,7 +1444,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                2 => {
+                INT_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_ints) = body_ints.get_or_init(|| {
                         body_struct.column_by_name(consts::ATTRIBUTE_INT).map(|v| {
                             v.as_dictionary::<UInt16Type>()
@@ -1482,7 +1469,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                3 => {
+                DOUBLE_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_doubles) = body_doubles.get_or_init(|| {
                         body_struct
                             .column_by_name(consts::ATTRIBUTE_DOUBLE)
@@ -1495,7 +1482,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                4 => {
+                BOOL_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_bools) = body_bools.get_or_init(|| {
                         body_struct
                             .column_by_name(consts::ATTRIBUTE_BOOL)
@@ -1508,7 +1495,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                5 => {
+                MAP_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_ser) = body_ser.get_or_init(|| {
                         body_struct.column_by_name(consts::ATTRIBUTE_SER).map(|v| {
                             v.as_dictionary::<UInt16Type>()
@@ -1536,7 +1523,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                6 => {
+                SLICE_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_ser) = body_ser.get_or_init(|| {
                         body_struct.column_by_name(consts::ATTRIBUTE_SER).map(|v| {
                             v.as_dictionary::<UInt16Type>()
@@ -1564,7 +1551,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                7 => {
+                BYTES_ATTRIBUTE_VALUE_TYPE => {
                     if let Some(body_bytes) = body_bytes.get_or_init(|| {
                         body_struct
                             .column_by_name(consts::ATTRIBUTE_BYTES)

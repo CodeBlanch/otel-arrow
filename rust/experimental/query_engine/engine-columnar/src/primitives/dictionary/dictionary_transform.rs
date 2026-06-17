@@ -56,8 +56,7 @@ impl<'a> Dictionary<'a> {
 
                 BooleanArray::new(
                     BooleanBufferBuilder::new_from_buffer(key_buffer, length).finish(),
-                    null_buffer
-                        .and_then(|v| NullBufferBuilder::new_from_buffer(v, length).finish()),
+                    null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, length).build()),
                 )
             }
             DictionaryKeyArray::SingleValue {
@@ -264,7 +263,7 @@ where
 
     BooleanArray::new(
         BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
-        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).finish()),
+        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).build()),
     )
 }
 

@@ -463,7 +463,7 @@ impl<K: ArrowDictionaryKeyType> DictionaryKeyArrayBuilder<K> {
     pub fn get_writer(&mut self) -> DictionaryKeyArrayWriter<'_, K> {
         DictionaryKeyArrayWriter {
             key_bit_length: self.key_bit_length,
-            key_builder: self.key_buffer.typed_data_mut::<K::Native>(),
+            key_builder: self.key_buffer.typed_data_mut::<K::Native>().as_mut_ptr(),
             null_buffer: &mut self.null_buffer,
         }
     }
@@ -472,14 +472,14 @@ impl<K: ArrowDictionaryKeyType> DictionaryKeyArrayBuilder<K> {
         PrimitiveArray::<K>::new(
             self.key_buffer.into(),
             self.null_buffer
-                .and_then(|v| NullBufferBuilder::new_from_buffer(v, self.key_length).finish()),
+                .and_then(|v| NullBufferBuilder::new_from_buffer(v, self.key_length).build()),
         )
     }
 }
 
 pub struct DictionaryKeyArrayWriter<'a, K: ArrowDictionaryKeyType> {
     key_bit_length: usize,
-    key_builder: &'a mut [K::Native],
+    key_builder: *mut K::Native,
     null_buffer: &'a mut Option<MutableBuffer>,
 }
 
@@ -489,7 +489,7 @@ impl<'a, K: ArrowDictionaryKeyType> DictionaryKeyArrayWriter<'a, K> {
     /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
     pub unsafe fn set_value_index_unchecked(&mut self, key_index: usize, value_index: usize) {
         unsafe {
-            *self.key_builder.as_mut_ptr().add(key_index) =
+            *self.key_builder.add(key_index) =
                 <K as ArrowPrimitiveType>::Native::from_usize(value_index)
                     .expect("transformed value index converted to output size")
         }
@@ -503,7 +503,7 @@ impl<'a, K: ArrowDictionaryKeyType> DictionaryKeyArrayWriter<'a, K> {
         key_index: usize,
         value_index: K::Native,
     ) {
-        unsafe { *self.key_builder.as_mut_ptr().add(key_index) = value_index }
+        unsafe { *self.key_builder.add(key_index) = value_index }
     }
 
     /// # Safety

@@ -1,16 +1,21 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::hash_map::Entry, hash::Hash, sync::Arc};
+use std::{collections::hash_map::Entry, hash::Hash, marker::PhantomData, sync::Arc};
 
 use ahash::AHashMap;
-use arrow::{array::*, buffer::MutableBuffer, datatypes::*, util::bit_util};
+use arrow::{
+    array::*,
+    buffer::{BooleanBuffer, MutableBuffer},
+    datatypes::*,
+    util::bit_util,
+};
 use data_engine_columnar::*;
 use data_engine_expressions::*;
 use indexmap::IndexSet;
 use otap_df_pdata::schema::{FieldExt, consts};
 
-use crate::{OtapDecodedIds, OtapValue};
+use crate::*;
 
 pub(crate) fn set_column<'a, TDiagnosticReceiver: ColumnarEngineDiagnosticReceiver<'a>>(
     diagnostic_receiver: &TDiagnosticReceiver,
@@ -206,20 +211,20 @@ where
 
 pub(crate) fn attributes_writer(
     record_count: usize,
-    decoded_ids: Option<OtapDecodedIds>,
-    id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
     values: AHashMap<Box<str>, OtapValue<'_>>,
+    batch: Option<&RecordBatch>,
 ) -> Option<(Arc<dyn Array>, RecordBatch)> {
     if values.is_empty() {
         return None;
     }
 
-    let mut mapping = Vec::with_capacity(record_count);
-    let mut key_values =
-        IndexSet::with_capacity_and_hasher(record_count, ahash::RandomState::new());
-    let mut types = Vec::with_capacity(record_count);
+    let mut mapping = Vec::with_capacity(u16::MAX as usize);
+    let mut key_values = StringBuilder::new();
+    let mut types = Vec::with_capacity(u16::MAX as usize);
     let mut string_values =
-        IndexSet::with_capacity_and_hasher(record_count, ahash::RandomState::new());
+        IndexSet::with_capacity_and_hasher(u16::MAX as usize, ahash::RandomState::new());
+    let mut int_values = None;
+    let mut double_values = None;
 
     let mut lookup = AHashMap::new();
 
@@ -232,7 +237,8 @@ pub(crate) fn attributes_writer(
                     continue;
                 }
 
-                let (key_index, _) = key_values.insert_full(key);
+                let key_index = key_values.len();
+                key_values.append_value(key.as_ref());
 
                 lookup.clear();
 
@@ -242,24 +248,44 @@ pub(crate) fn attributes_writer(
                         Some(v) => v,
                     };
 
-                    let value_index = match lookup.entry(value_index) {
+                    let (attribute_type, value_index) = match lookup.entry(value_index) {
                         Entry::Occupied(occupied) => occupied.into_mut(),
                         Entry::Vacant(vacant) => match values.get_value_at(value_index) {
                             ValueOrRef::Null => continue,
                             ValueOrRef::String(s) => {
+                                // todo: check for default value
                                 let (value_index, _) = string_values.insert_full(s);
-
-                                vacant.insert(value_index)
+                                vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, value_index))
+                            }
+                            ValueOrRef::Integer(i) => {
+                                let ints = int_values.get_or_insert_with(|| {
+                                    IndexSet::with_capacity_and_hasher(
+                                        u16::MAX as usize,
+                                        ahash::RandomState::new(),
+                                    )
+                                });
+                                // todo: check for default value
+                                let (value_index, _) = ints.insert_full(i);
+                                vacant.insert((INT_ATTRIBUTE_VALUE_TYPE, value_index))
+                            }
+                            ValueOrRef::Double(d) => {
+                                let doubles = double_values
+                                    .get_or_insert_with(|| Vec::with_capacity(u16::MAX as usize));
+                                // todo: check for default value
+                                let value_index = doubles.len();
+                                doubles.push(d);
+                                vacant.insert((DOUBLE_ATTRIBUTE_VALUE_TYPE, value_index))
+                            }
+                            ValueOrRef::Boolean(b) => {
+                                todo!()
                             }
                             v => todo!(),
                         },
                     };
 
-                    types.push(1u8);
-                    mapping.push((record_key_index, key_index, 1u8, *value_index));
+                    types.push(*attribute_type);
+                    mapping.push((record_key_index, key_index, *attribute_type, *value_index));
                 }
-
-                //println!("appended key: {key}");
             }
         }
     }
@@ -270,44 +296,80 @@ pub(crate) fn attributes_writer(
 
     let mut ids_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
     let mut ids_null_buffer = MutableBuffer::new_null(record_count);
-    let ids = ids_buffer.typed_data_mut::<u16>();
-    let ids_null = ids_null_buffer.typed_data_mut::<u8>();
+    let ids = ids_buffer.typed_data_mut::<u16>().as_mut_ptr();
+    let ids_null = &mut ids_null_buffer;
 
     let mut parent_ids_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
-    let parent_ids = parent_ids_buffer.typed_data_mut::<u16>();
+    let parent_ids = parent_ids_buffer.typed_data_mut::<u16>().as_mut_ptr();
 
-    let mut keys_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
-    let keys = keys_buffer.typed_data_mut::<u16>();
+    let mut keys_buffer = AdaptiveDictionaryWriter::new(attribute_count, key_values.len());
+    let mut keys = keys_buffer.get_writer();
 
     let mut strings_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
     let mut strings_null_buffer = MutableBuffer::new_null(attribute_count);
-    let strings = strings_buffer.typed_data_mut::<u16>();
-    let strings_null = strings_null_buffer.typed_data_mut::<u8>();
+    let strings = strings_buffer.typed_data_mut::<u16>().as_mut_ptr();
+    let strings_null = &mut strings_null_buffer;
+
+    let mut ints = None;
+    let mut doubles = None;
+    let mut bools = None;
 
     let mut current_parent_id = 0;
 
     for (attribute_index, (record_key_index, key_index, value_type, value_index)) in
         mapping.into_iter().enumerate()
     {
-        let parent_id = match lookup.entry(record_key_index) {
+        let (_, parent_id) = match lookup.entry(record_key_index) {
             Entry::Occupied(occupied) => occupied.into_mut(),
             Entry::Vacant(vacant) => {
-                ids[record_key_index] = current_parent_id as u16;
+                unsafe { *ids.add(record_key_index) = current_parent_id as u16 };
                 bit_util::set_bit(ids_null, record_key_index);
-                let r = vacant.insert(current_parent_id);
+                let r = vacant.insert((0, current_parent_id));
                 current_parent_id += 1;
                 r
             }
         };
 
-        parent_ids[attribute_index] = *parent_id as u16;
-        keys[attribute_index] = key_index as u16;
+        unsafe { *parent_ids.add(attribute_index) = *parent_id as u16 };
+        unsafe { keys.set_value_index_unchecked(attribute_index, key_index) };
 
         match value_type {
-            0 => continue,
-            1 => {
-                strings[attribute_index] = value_index as u16;
+            EMPTY_ATTRIBUTE_VALUE_TYPE => continue,
+            STRING_ATTRIBUTE_VALUE_TYPE => {
+                unsafe { *strings.add(attribute_index) = value_index as u16 };
                 bit_util::set_bit(strings_null, attribute_index);
+            }
+            INT_ATTRIBUTE_VALUE_TYPE => {
+                let ints = ints.get_or_insert_with(|| {
+                    AttributeArrayBuilder::<UInt16Type>::new(attribute_count)
+                });
+
+                unsafe {
+                    ints.get_writer()
+                        .set_value_index_typed_unchecked(attribute_index, value_index as u16)
+                };
+            }
+            DOUBLE_ATTRIBUTE_VALUE_TYPE => {
+                let doubles = doubles.get_or_insert_with(|| {
+                    AttributeArrayBuilder::<Float64Type>::new(attribute_count)
+                });
+
+                unsafe {
+                    doubles.get_writer().set_value_index_typed_unchecked(
+                        attribute_index,
+                        *double_values
+                            .as_ref()
+                            .expect("has doubles")
+                            .get_unchecked(value_index),
+                    )
+                };
+            }
+            BOOL_ATTRIBUTE_VALUE_TYPE => {
+                let bools = bools.get_or_insert_with(|| {
+                    AttributeArrayBuilder::<UInt8Type>::new(bit_util::ceil(attribute_count, 8))
+                });
+
+                bools.set_bit(key_index, value_index > 0);
             }
             _ => todo!(),
         }
@@ -315,24 +377,19 @@ pub(crate) fn attributes_writer(
 
     let ids = PrimitiveArray::<UInt16Type>::new(
         ids_buffer.into(),
-        NullBufferBuilder::new_from_buffer(ids_null_buffer, record_count).finish(),
+        NullBufferBuilder::new_from_buffer(ids_null_buffer, record_count).build(),
     );
 
     let parent_ids = PrimitiveArray::<UInt16Type>::new(parent_ids_buffer.into(), None);
 
-    let keys = DictionaryArray::new(
-        PrimitiveArray::<UInt16Type>::new(keys_buffer.into(), None),
-        Arc::new(StringArray::from(
-            key_values.iter().map(|v| v.as_ref()).collect::<Vec<&str>>(),
-        )),
-    );
+    let keys = keys_buffer.finish(Arc::new(key_values.finish()));
 
     let types = PrimitiveArray::<UInt8Type>::new(types.into(), None);
 
     let strings = DictionaryArray::new(
         PrimitiveArray::<UInt16Type>::new(
             strings_buffer.into(),
-            NullBufferBuilder::new_from_buffer(strings_null_buffer, attribute_count).finish(),
+            NullBufferBuilder::new_from_buffer(strings_null_buffer, attribute_count).build(),
         ),
         Arc::new(StringArray::from(
             string_values
@@ -341,12 +398,6 @@ pub(crate) fn attributes_writer(
                 .collect::<Vec<&str>>(),
         )),
     );
-
-    /*println!("ids: {ids:?}");
-    println!("parent_ids: {parent_ids:?}");
-    println!("keys: {keys:?}");
-    println!("types: {types:?}");
-    println!("strings: {strings:?}");*/
 
     let mut columns: Vec<Arc<dyn Array>> = vec![];
     let mut fields = vec![];
@@ -377,8 +428,180 @@ pub(crate) fn attributes_writer(
     ));
     columns.push(Arc::new(strings));
 
+    if let (Some(int_keys), Some(int_values)) = (ints, int_values) {
+        let ints = DictionaryArray::new(
+            int_keys.finish(),
+            Arc::new(PrimitiveArray::<Int64Type>::from(
+                int_values.into_iter().collect::<Vec<i64>>(),
+            )),
+        );
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_INT,
+            ints.data_type().clone(),
+            true,
+        ));
+        columns.push(Arc::new(ints));
+    }
+
+    if let Some(doubles) = doubles {
+        let doubles = doubles.finish();
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_DOUBLE,
+            doubles.data_type().clone(),
+            true,
+        ));
+        columns.push(Arc::new(doubles));
+    }
+
+    if let Some(bools) = bools {
+        let (keys, null) = bools.into_parts();
+
+        let bools = BooleanArray::new(
+            BooleanBuffer::new(keys.into(), 0, attribute_count),
+            NullBufferBuilder::new_from_buffer(null, attribute_count).build(),
+        );
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_BOOL,
+            bools.data_type().clone(),
+            true,
+        ));
+        columns.push(Arc::new(bools));
+    }
+
     Some((
         Arc::new(ids),
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch"),
     ))
+}
+
+enum AdaptiveDictionaryWriter {
+    UInt8(MutableBuffer),
+    UInt16(MutableBuffer),
+}
+
+impl AdaptiveDictionaryWriter {
+    pub fn new(record_count: usize, value_count: usize) -> AdaptiveDictionaryWriter {
+        if value_count <= u8::MAX as usize {
+            AdaptiveDictionaryWriter::UInt8(MutableBuffer::from_len_zeroed(record_count))
+        } else {
+            AdaptiveDictionaryWriter::UInt16(MutableBuffer::from_len_zeroed(record_count * 2))
+        }
+    }
+
+    pub fn get_writer(&'_ mut self) -> AdaptiveDictionaryKeyWriter<'_> {
+        match self {
+            AdaptiveDictionaryWriter::UInt8(b) => AdaptiveDictionaryKeyWriter::UInt8(
+                b.typed_data_mut::<u8>().as_mut_ptr(),
+                Default::default(),
+            ),
+            AdaptiveDictionaryWriter::UInt16(b) => AdaptiveDictionaryKeyWriter::UInt16(
+                b.typed_data_mut::<u16>().as_mut_ptr(),
+                Default::default(),
+            ),
+        }
+    }
+
+    pub fn finish(self, values: Arc<dyn Array>) -> Arc<dyn Array> {
+        match self {
+            AdaptiveDictionaryWriter::UInt8(b) => Arc::new(DictionaryArray::new(
+                PrimitiveArray::<UInt8Type>::new(b.into(), None),
+                values,
+            )),
+            AdaptiveDictionaryWriter::UInt16(b) => Arc::new(DictionaryArray::new(
+                PrimitiveArray::<UInt16Type>::new(b.into(), None),
+                values,
+            )),
+        }
+    }
+}
+
+enum AdaptiveDictionaryKeyWriter<'a> {
+    UInt8(*mut u8, PhantomData<&'a usize>),
+    UInt16(*mut u16, PhantomData<&'a usize>),
+}
+
+impl<'a> AdaptiveDictionaryKeyWriter<'a> {
+    pub unsafe fn set_value_index_unchecked(&mut self, key_index: usize, value_index: usize) {
+        unsafe {
+            match self {
+                AdaptiveDictionaryKeyWriter::UInt8(b, _) => *b.add(key_index) = value_index as u8,
+                AdaptiveDictionaryKeyWriter::UInt16(b, _) => *b.add(key_index) = value_index as u16,
+            }
+        }
+    }
+}
+
+pub struct AttributeArrayBuilder<K: ArrowPrimitiveType> {
+    key_length: usize,
+    key_buffer: MutableBuffer,
+    null_buffer: MutableBuffer,
+    marker: PhantomData<K>,
+}
+
+impl<K: ArrowPrimitiveType> AttributeArrayBuilder<K> {
+    pub fn new(key_length: usize) -> AttributeArrayBuilder<K> {
+        Self {
+            key_length,
+            key_buffer: MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length),
+            null_buffer: MutableBuffer::new_null(key_length),
+            marker: Default::default(),
+        }
+    }
+
+    pub fn get_writer(&mut self) -> AttributeArrayWriter<'_, K> {
+        AttributeArrayWriter {
+            key_builder: self.key_buffer.typed_data_mut::<K::Native>().as_mut_ptr(),
+            null_buffer: self.null_buffer.typed_data_mut::<u8>().as_mut_ptr(),
+            marker: Default::default(),
+        }
+    }
+
+    pub fn set_bit(&mut self, key_index: usize, value: bool) {
+        let i = key_index / 8;
+        let b = 1 << (key_index % 8);
+
+        if value {
+            self.key_buffer[i] |= b
+        }
+
+        self.null_buffer[i] |= b;
+    }
+
+    pub fn into_parts(self) -> (MutableBuffer, MutableBuffer) {
+        (self.key_buffer, self.null_buffer)
+    }
+
+    pub fn finish(self) -> PrimitiveArray<K> {
+        PrimitiveArray::<K>::new(
+            self.key_buffer.into(),
+            NullBufferBuilder::new_from_buffer(self.null_buffer, self.key_length).build(),
+        )
+    }
+}
+
+pub struct AttributeArrayWriter<'a, K: ArrowPrimitiveType> {
+    key_builder: *mut K::Native,
+    null_buffer: *mut u8,
+    marker: PhantomData<&'a usize>,
+}
+
+impl<'a, K: ArrowPrimitiveType> AttributeArrayWriter<'a, K> {
+    /// # Safety
+    ///
+    /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
+    pub unsafe fn set_value_index_typed_unchecked(
+        &mut self,
+        key_index: usize,
+        value_index: K::Native,
+    ) {
+        unsafe { *self.key_builder.add(key_index) = value_index }
+
+        let i = key_index / 8;
+        let b = 1 << (key_index % 8);
+
+        unsafe { *self.null_buffer.add(i) |= b };
+    }
 }
