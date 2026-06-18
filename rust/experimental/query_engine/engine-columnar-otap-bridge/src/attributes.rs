@@ -247,8 +247,16 @@ impl<'record> OtapAttributesBatch<'record> {
         )
     }
 
-    pub fn get_keys(&self) -> &'record StringArray {
-        self.attribute_keys.values()
+    pub(crate) fn get_keys(&self) -> &'_ AdaptiveDictionaryReader<'record, StringArray> {
+        &self.attribute_keys
+    }
+
+    pub(crate) fn get_attribute_types(&self) -> &'record PrimitiveArray<UInt8Type> {
+        self.attribute_types
+    }
+
+    pub(crate) fn get_attribute_parent_ids(&self) -> &'_ PrimitiveArray<UInt16Type> {
+        self.parent_ids.get_ids()
     }
 
     pub fn get_values(&self, key: &str) -> Option<Dictionary<'static>> {
@@ -271,8 +279,6 @@ impl<'record> OtapAttributesBatch<'record> {
 
             let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
             let mut values = Vec::with_capacity(record_count);
-
-            let value_index = value_index as u16;
 
             let attribute_types = self.attribute_types.values().as_ptr();
             let attribute_parent_ids = self.parent_ids.get_ids().values().as_ptr();
@@ -337,7 +343,7 @@ impl<'record> OtapAttributesBatch<'record> {
         }
     }
 
-    fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
+    pub(crate) fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
         // Note: id_map is an array of parent_ids (record identifier in the
         // attribute table) to the actual index of the record in the root table.
         self.id_to_record_index_map.get_or_init(|| {
@@ -365,7 +371,7 @@ impl<'record> OtapAttributesBatch<'record> {
         })
     }
 
-    fn get_attribute_value_or_index(
+    pub(crate) fn get_attribute_value_or_index(
         &self,
         attribute_index: usize,
         attribute_type: u8,
@@ -374,10 +380,12 @@ impl<'record> OtapAttributesBatch<'record> {
             EMPTY_ATTRIBUTE_VALUE_TYPE => {}
             STRING_ATTRIBUTE_VALUE_TYPE => {
                 let keys = self.attribute_string_keys;
-                if keys.is_valid(attribute_index) {
+                return Some(if keys.is_valid(attribute_index) {
                     let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
+                    AttributeValueOrIndex::ValueIndex(value_index)
+                } else {
+                    AttributeValueOrIndex::Value(ValueOrRef::String(StringValueOrRef::Empty))
+                });
             }
             INT_ATTRIBUTE_VALUE_TYPE => {
                 return Some(
@@ -433,7 +441,7 @@ impl<'record> OtapAttributesBatch<'record> {
         None
     }
 
-    fn get_attribute_value(
+    pub(crate) fn get_attribute_value(
         &self,
         attribute_type: u8,
         attribute_value_index: u16,
@@ -477,7 +485,7 @@ impl<'record> OtapAttributesBatch<'record> {
 }
 
 #[derive(Debug)]
-enum AdaptiveDictionaryReader<'a, V> {
+pub(crate) enum AdaptiveDictionaryReader<'a, V> {
     UInt8(TypedDictionaryArray<'a, UInt8Type, V>),
     UInt16(TypedDictionaryArray<'a, UInt16Type, V>),
 }
@@ -524,23 +532,23 @@ impl<'a, V: 'static> AdaptiveDictionaryReader<'a, V> {
     }
 }
 
-enum AdaptiveDictionaryReaderKeyIterator<'a> {
+pub(crate) enum AdaptiveDictionaryReaderKeyIterator<'a> {
     UInt8(core::slice::Iter<'a, u8>),
     UInt16(core::slice::Iter<'a, u16>),
 }
 
 impl<'a> Iterator for AdaptiveDictionaryReaderKeyIterator<'a> {
-    type Item = u16;
+    type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            AdaptiveDictionaryReaderKeyIterator::UInt8(i) => i.next().map(|v| *v as u16),
-            AdaptiveDictionaryReaderKeyIterator::UInt16(i) => i.next().copied(),
+            AdaptiveDictionaryReaderKeyIterator::UInt8(i) => i.next().map(|v| *v as usize),
+            AdaptiveDictionaryReaderKeyIterator::UInt16(i) => i.next().map(|v| *v as usize),
         }
     }
 }
 
-enum AttributeValueOrIndex {
+pub(crate) enum AttributeValueOrIndex {
     ValueIndex(u16),
     Value(ValueOrRef<'static>),
 }

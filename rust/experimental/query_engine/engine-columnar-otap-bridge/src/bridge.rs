@@ -1657,7 +1657,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = &results.included_records;
+        let final_batch = results.included_records;
 
         assert_eq!(
             3,
@@ -1671,6 +1671,23 @@ mod tests {
                 .get(ArrowPayloadType::LogAttrs)
                 .map_or(0, |v| v.num_rows())
         );
+
+        if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
+            let logs = &logs.resource_logs[0].scope_logs[0].log_records;
+
+            let expected = KeyValue {
+                key: "new_attr".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("hello world".into())),
+                }),
+            };
+
+            assert_eq!(&expected, &logs[0].attributes[0]);
+            assert_eq!(&expected, &logs[1].attributes[0]);
+            assert_eq!(&expected, &logs[2].attributes[0]);
+        } else {
+            panic!()
+        }
     }
 
     #[test]
@@ -1680,6 +1697,7 @@ mod tests {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![
                         LogRecord::build()
+                            .severity_text("log1")
                             .attributes(vec![
                                 KeyValue {
                                     key: "attr1".into(),
@@ -1696,13 +1714,14 @@ mod tests {
                                 KeyValue {
                                     key: "attr3".into(),
                                     value: Some(AnyValue {
-                                        value: Some(Value::StringValue("value1".into())),
+                                        value: Some(Value::DoubleValue(0f64)),
                                     }),
                                 },
                             ])
                             .finish(),
-                        LogRecord::build().finish(),
+                        LogRecord::build().severity_text("log2").finish(),
                         LogRecord::build()
+                            .severity_text("log3")
                             .attributes(vec![
                                 KeyValue {
                                     key: "attr1".into(),
@@ -1768,7 +1787,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = &results.included_records;
+        let final_batch = results.included_records;
 
         assert_eq!(
             3,
@@ -1782,5 +1801,78 @@ mod tests {
                 .get(ArrowPayloadType::LogAttrs)
                 .map_or(0, |v| v.num_rows())
         );
+
+        if let OtlpProtoMessage::Logs(logs) = otap_to_otlp(&OtapArrowRecords::Logs(final_batch)) {
+            let logs = &logs.resource_logs[0].scope_logs[0].log_records;
+
+            let expected_new_attr = KeyValue {
+                key: "new_attr".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("hello world".into())),
+                }),
+            };
+
+            let expected_attr1_value1 = KeyValue {
+                key: "attr1".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("value1".into())),
+                }),
+            };
+
+            let expected_attr1_value2 = KeyValue {
+                key: "attr1".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("value2".into())),
+                }),
+            };
+
+            let expected_attr2_value1 = KeyValue {
+                key: "attr2".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("value1".into())),
+                }),
+            };
+
+            let expected_attr3_double_0 = KeyValue {
+                key: "attr3".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::DoubleValue(0f64)),
+                }),
+            };
+
+            let expected_attr3_bool_true = KeyValue {
+                key: "attr3".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::BoolValue(true)),
+                }),
+            };
+
+            let log1 = &logs
+                .iter()
+                .find(|l| l.severity_text == "log1")
+                .expect("has log1");
+            let log2 = &logs
+                .iter()
+                .find(|l| l.severity_text == "log2")
+                .expect("has log2");
+            let log3 = &logs
+                .iter()
+                .find(|l| l.severity_text == "log3")
+                .expect("has log3");
+
+            assert_eq!(&expected_attr1_value1, &log1.attributes[0]);
+            assert_eq!(&expected_attr2_value1, &log1.attributes[1]);
+            assert_eq!(&expected_attr3_double_0, &log1.attributes[2]);
+            assert_eq!(&expected_new_attr, &log1.attributes[3]);
+
+            assert_eq!(&expected_new_attr, &log2.attributes[0]);
+
+            assert_eq!(&expected_attr1_value2, &log3.attributes[0]);
+            assert_eq!(&expected_attr2_value1, &log3.attributes[1]);
+            assert_eq!(&expected_attr3_bool_true, &log3.attributes[2]);
+            assert_eq!(&expected_new_attr, &log3.attributes[3]);
+        } else {
+            panic!()
+        }
     }
 }

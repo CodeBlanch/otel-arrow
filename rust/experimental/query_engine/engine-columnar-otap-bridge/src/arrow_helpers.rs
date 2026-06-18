@@ -226,71 +226,126 @@ pub(crate) fn attributes_writer<'a>(
     let mut int_values = None;
     let mut double_values = None;
 
-    let mut lookup = AHashMap::new();
-
-    let mut process_attribute = |key: &str, value: Dictionary<'a>| {
-        let (keys, values) = value.into_parts();
-        if keys.is_empty() || keys.is_null() {
-            return;
-        }
-
-        let key_index = key_values.len();
-        key_values.append_value(key);
-
-        lookup.clear();
-
-        for record_key_index in 0..keys.len() {
-            let value_index = match keys.get_value_index_for_key_index(record_key_index) {
-                None => continue,
-                Some(v) => v,
-            };
-
-            let (attribute_type, value_index) = match lookup.entry(value_index) {
-                Entry::Occupied(occupied) => occupied.into_mut(),
-                Entry::Vacant(vacant) => match values.get_value_at(value_index) {
-                    ValueOrRef::Null => continue,
-                    ValueOrRef::String(s) => {
-                        // todo: check for default value
-                        let (value_index, _) = string_values.insert_full(s);
-                        vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, value_index))
-                    }
-                    ValueOrRef::Integer(i) => {
-                        let ints = int_values.get_or_insert_with(|| {
-                            IndexSet::with_capacity_and_hasher(
-                                u16::MAX as usize,
-                                ahash::RandomState::new(),
-                            )
-                        });
-                        // todo: check for default value
-                        let (value_index, _) = ints.insert_full(i);
-                        vacant.insert((INT_ATTRIBUTE_VALUE_TYPE, value_index))
-                    }
-                    ValueOrRef::Double(d) => {
-                        let doubles = double_values
-                            .get_or_insert_with(|| Vec::with_capacity(u16::MAX as usize));
-                        // todo: check for default value
-                        let value_index = doubles.len();
-                        doubles.push(d);
-                        vacant.insert((DOUBLE_ATTRIBUTE_VALUE_TYPE, value_index))
-                    }
-                    ValueOrRef::Boolean(b) => {
-                        vacant.insert((BOOL_ATTRIBUTE_VALUE_TYPE, if b { 1 } else { 0 }))
-                    }
-                    v => todo!(),
-                },
-            };
-
-            types.push(*attribute_type);
-            mapping.push((record_key_index, key_index, *attribute_type, *value_index));
-        }
-    };
+    let mut lookup: AHashMap<(u8, usize), (u8, Option<usize>)> = AHashMap::new();
 
     if let Some(attributes_batch) = attributes_batch {
-        for key in attributes_batch.get_keys().iter().flatten() {
-            if !values.contains_key(key)
-                && let Some(v) = attributes_batch.get_values(key)
+        let attribute_keys = attributes_batch.get_keys();
+        let attribute_key_values = attribute_keys.values();
+
+        let mut keys_to_process = AHashMap::with_capacity(attribute_key_values.len());
+
+        for (value_index, key) in attribute_key_values.iter().enumerate() {
+            if let Some(key) = key
+                && !values.contains_key(key)
             {
-                process_attribute(key, v);
+                let new_key_index = key_values.len();
+                key_values.append_value(key);
+
+                keys_to_process.insert(value_index, new_key_index);
+            }
+        }
+
+        if !keys_to_process.is_empty() {
+            let attributes_types = attributes_batch.get_attribute_types().values().as_ptr();
+            let attribute_parent_ids = attributes_batch
+                .get_attribute_parent_ids()
+                .values()
+                .as_ptr();
+            let id_to_record_index_map = attributes_batch
+                .get_id_to_record_index_map()
+                .values()
+                .as_ptr();
+
+            for (key_index, key_value_index) in attribute_keys.key_iter().enumerate() {
+                if let Some(new_key_index) = keys_to_process.get(&key_value_index) {
+                    let attribute_type = unsafe { *attributes_types.add(key_index) };
+
+                    if let Some(value) =
+                        attributes_batch.get_attribute_value_or_index(key_index, attribute_type)
+                    {
+                        let parent_id = unsafe { *attribute_parent_ids.add(key_index) };
+                        let record_index =
+                            unsafe { *id_to_record_index_map.add(parent_id as usize) } as usize;
+
+                        let (value, value_index) = match value {
+                            AttributeValueOrIndex::ValueIndex(i) => {
+                                if let Some((_, new_value_index)) =
+                                    lookup.get(&(attribute_type, i as usize))
+                                {
+                                    types.push(attribute_type);
+                                    mapping.push((
+                                        record_index,
+                                        *new_key_index,
+                                        attribute_type,
+                                        *new_value_index,
+                                    ));
+                                    continue;
+                                }
+
+                                (
+                                    attributes_batch.get_attribute_value(attribute_type, i),
+                                    Some(i),
+                                )
+                            }
+                            AttributeValueOrIndex::Value(v) => (v, None),
+                        };
+
+                        let new_value_index = match value {
+                            ValueOrRef::Null => continue,
+                            ValueOrRef::String(s) => {
+                                if s.is_empty() {
+                                    None
+                                } else {
+                                    let (value_index, _) = string_values.insert_full(s);
+                                    Some(value_index)
+                                }
+                            }
+                            ValueOrRef::Integer(i) => {
+                                if i == 0 {
+                                    None
+                                } else {
+                                    let ints = int_values.get_or_insert_with(|| {
+                                        IndexSet::with_capacity_and_hasher(
+                                            u16::MAX as usize,
+                                            ahash::RandomState::new(),
+                                        )
+                                    });
+                                    let (value_index, _) = ints.insert_full(i);
+                                    Some(value_index)
+                                }
+                            }
+                            ValueOrRef::Double(d) => {
+                                if d == 0f64 {
+                                    None
+                                } else {
+                                    let doubles = double_values.get_or_insert_with(|| {
+                                        Vec::with_capacity(u16::MAX as usize)
+                                    });
+                                    let value_index = doubles.len();
+                                    doubles.push(d);
+                                    Some(value_index)
+                                }
+                            }
+                            ValueOrRef::Boolean(b) => Some(if b { 1 } else { 0 }),
+                            v => todo!(),
+                        };
+
+                        types.push(attribute_type);
+                        mapping.push((
+                            record_index,
+                            *new_key_index,
+                            attribute_type,
+                            new_value_index,
+                        ));
+
+                        if let Some(value_index) = value_index {
+                            lookup.insert(
+                                (attribute_type, value_index as usize),
+                                (attribute_type, new_value_index),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -298,13 +353,82 @@ pub(crate) fn attributes_writer<'a>(
     for (key, value) in values {
         match value {
             OtapValue::NotFound | OtapValue::Removed => continue,
-            OtapValue::Read(v) | OtapValue::Set(v) => process_attribute(key.as_ref(), v),
+            OtapValue::Read(value) | OtapValue::Set(value) => {
+                let (keys, values) = value.into_parts();
+                if keys.is_empty() || keys.is_null() {
+                    continue;
+                }
+
+                let new_key_index = key_values.len();
+                key_values.append_value(key);
+
+                lookup.clear();
+
+                for record_index in 0..keys.len() {
+                    let value_index = match keys.get_value_index_for_key_index(record_index) {
+                        None => continue,
+                        Some(v) => v,
+                    };
+
+                    let (attribute_type, new_value_index) = match lookup
+                        .entry((u8::MAX, value_index))
+                    {
+                        Entry::Occupied(occupied) => occupied.into_mut(),
+                        Entry::Vacant(vacant) => match values.get_value_at(value_index) {
+                            ValueOrRef::Null => continue,
+                            ValueOrRef::String(s) => {
+                                if s.is_empty() {
+                                    vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, None))
+                                } else {
+                                    let (value_index, _) = string_values.insert_full(s);
+                                    vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                }
+                            }
+                            ValueOrRef::Integer(i) => {
+                                if i == 0 {
+                                    vacant.insert((INT_ATTRIBUTE_VALUE_TYPE, None))
+                                } else {
+                                    let ints = int_values.get_or_insert_with(|| {
+                                        IndexSet::with_capacity_and_hasher(
+                                            u16::MAX as usize,
+                                            ahash::RandomState::new(),
+                                        )
+                                    });
+                                    let (value_index, _) = ints.insert_full(i);
+                                    vacant.insert((INT_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                }
+                            }
+                            ValueOrRef::Double(d) => {
+                                if d == 0f64 {
+                                    vacant.insert((DOUBLE_ATTRIBUTE_VALUE_TYPE, None))
+                                } else {
+                                    let doubles = double_values.get_or_insert_with(|| {
+                                        Vec::with_capacity(u16::MAX as usize)
+                                    });
+                                    let value_index = doubles.len();
+                                    doubles.push(d);
+                                    vacant.insert((DOUBLE_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                }
+                            }
+                            ValueOrRef::Boolean(b) => vacant
+                                .insert((BOOL_ATTRIBUTE_VALUE_TYPE, Some(if b { 1 } else { 0 }))),
+                            v => todo!(),
+                        },
+                    };
+
+                    types.push(*attribute_type);
+                    mapping.push((
+                        record_index,
+                        new_key_index,
+                        *attribute_type,
+                        *new_value_index,
+                    ));
+                }
+            }
         }
     }
 
     let attribute_count = mapping.len();
-
-    lookup.clear();
 
     let mut ids_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
     let mut ids_null_buffer = MutableBuffer::new_null(record_count);
@@ -326,63 +450,67 @@ pub(crate) fn attributes_writer<'a>(
     let mut doubles = None;
     let mut bools = None;
 
+    lookup.clear();
     let mut current_parent_id = 0;
 
-    for (attribute_index, (record_key_index, key_index, value_type, value_index)) in
+    for (new_attribute_index, (record_index, new_key_index, attribute_type, new_value_index)) in
         mapping.into_iter().enumerate()
     {
-        let (_, parent_id) = match lookup.entry(record_key_index) {
+        let (_, parent_id) = match lookup.entry((u8::MAX, record_index)) {
             Entry::Occupied(occupied) => occupied.into_mut(),
             Entry::Vacant(vacant) => {
-                unsafe { *ids.add(record_key_index) = current_parent_id as u16 };
-                bit_util::set_bit(ids_null, record_key_index);
-                let r = vacant.insert((0, current_parent_id));
+                unsafe { *ids.add(record_index) = current_parent_id as u16 };
+                bit_util::set_bit(ids_null, record_index);
+                let r = vacant.insert((u8::MAX, Some(current_parent_id)));
                 current_parent_id += 1;
                 r
             }
         };
 
-        unsafe { *parent_ids.add(attribute_index) = *parent_id as u16 };
-        unsafe { keys.set_value_index_unchecked(attribute_index, key_index) };
+        unsafe { *parent_ids.add(new_attribute_index) = parent_id.expect("has parent id") as u16 };
+        unsafe { keys.set_value_index_unchecked(new_attribute_index, new_key_index) };
 
-        match value_type {
-            EMPTY_ATTRIBUTE_VALUE_TYPE => continue,
-            STRING_ATTRIBUTE_VALUE_TYPE => {
-                unsafe { *strings.add(attribute_index) = value_index as u16 };
-                bit_util::set_bit(strings_null, attribute_index);
-            }
-            INT_ATTRIBUTE_VALUE_TYPE => {
-                let ints = ints.get_or_insert_with(|| {
-                    AttributeArrayBuilder::<UInt16Type>::new(attribute_count)
-                });
+        if let Some(value_index) = new_value_index {
+            match attribute_type {
+                STRING_ATTRIBUTE_VALUE_TYPE => {
+                    unsafe { *strings.add(new_attribute_index) = value_index as u16 };
+                    bit_util::set_bit(strings_null, new_attribute_index);
+                }
+                INT_ATTRIBUTE_VALUE_TYPE => {
+                    let ints = ints.get_or_insert_with(|| {
+                        AttributeArrayBuilder::<UInt16Type>::new(attribute_count)
+                    });
 
-                unsafe {
-                    ints.get_writer()
-                        .set_value_index_typed_unchecked(attribute_index, value_index as u16)
-                };
-            }
-            DOUBLE_ATTRIBUTE_VALUE_TYPE => {
-                let doubles = doubles.get_or_insert_with(|| {
-                    AttributeArrayBuilder::<Float64Type>::new(attribute_count)
-                });
+                    unsafe {
+                        ints.get_writer().set_value_index_typed_unchecked(
+                            new_attribute_index,
+                            value_index as u16,
+                        )
+                    };
+                }
+                DOUBLE_ATTRIBUTE_VALUE_TYPE => {
+                    let doubles = doubles.get_or_insert_with(|| {
+                        AttributeArrayBuilder::<Float64Type>::new(attribute_count)
+                    });
 
-                unsafe {
-                    doubles.get_writer().set_value_index_typed_unchecked(
-                        attribute_index,
-                        *double_values
-                            .as_ref()
-                            .expect("has doubles")
-                            .get_unchecked(value_index),
-                    )
-                };
-            }
-            BOOL_ATTRIBUTE_VALUE_TYPE => {
-                let bools =
-                    bools.get_or_insert_with(|| AttributeBooleanArrayBuilder::new(attribute_count));
+                    unsafe {
+                        doubles.get_writer().set_value_index_typed_unchecked(
+                            new_attribute_index,
+                            *double_values
+                                .as_ref()
+                                .expect("has doubles")
+                                .get_unchecked(value_index),
+                        )
+                    };
+                }
+                BOOL_ATTRIBUTE_VALUE_TYPE => {
+                    let bools = bools
+                        .get_or_insert_with(|| AttributeBooleanArrayBuilder::new(attribute_count));
 
-                bools.set_bit(key_index, value_index > 0);
+                    bools.set_bit(new_attribute_index, value_index > 0);
+                }
+                t => panic!("Attribute type '{t}' is not supported"),
             }
-            _ => todo!(),
         }
     }
 
