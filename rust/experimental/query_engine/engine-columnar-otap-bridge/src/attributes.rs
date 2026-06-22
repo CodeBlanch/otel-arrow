@@ -439,7 +439,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
-            d => todo!("Attribute type '{d}' is not supported"),
+            d => panic!("Attribute type '{d}' is not supported"),
         }
 
         None
@@ -473,7 +473,7 @@ impl<'record> OtapAttributesBatch<'record> {
                     attribute_value_index as usize,
                 ))
             })),
-            d => todo!("Attribute type '{d}' is not supported"),
+            d => panic!("Attribute type '{d}' is not supported"),
         }
     }
 
@@ -497,7 +497,7 @@ impl<'record> OtapAttributesBatch<'record> {
                 self.attribute_bytes_values.expect("has bytes values"),
                 attribute_value_index as usize,
             ),
-            d => todo!("Attribute type '{d}' is not supported"),
+            d => panic!("Attribute type '{d}' is not supported"),
         }
     }
 }
@@ -507,8 +507,8 @@ fn get_generic_byte_array_buffer_value<T: ByteArrayType>(
     value_index: usize,
 ) -> Buffer {
     let offsets = bytes.value_offsets();
-    let start = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index as usize) });
-    let end = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index as usize + 1) });
+    let start = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index) });
+    let end = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index + 1) });
     bytes.values().slice_with_length(start, end - start).clone()
 }
 
@@ -537,7 +537,7 @@ impl<'a, V: 'static> AdaptiveDictionaryReader<'a, V> {
                         .expect("Array was an unexpected type"),
                 )
             }
-            d => todo!("DataType '{d}' is not supported"),
+            d => panic!("DataType '{d}' is not supported"),
         }
     }
 

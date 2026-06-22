@@ -402,9 +402,14 @@ fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceive
                 );
                 return ColumnarRecordsWriteResult::NotFound;
             }
-            OtapValue::Read(v) | OtapValue::Set(v) => {
-                update_dictionary_values_for_path(v, key_filter, &path[0], &path[1..], value)
-            }
+            OtapValue::Read(v) | OtapValue::Set(v) => update_dictionary_values_for_path(
+                diagnostic_receiver,
+                v,
+                key_filter,
+                &path[0],
+                &path[1..],
+                value,
+            ),
         }
     } else if let Some(key_filter) = key_filter {
         let existing_values = match fields.take(field, logs) {
@@ -431,11 +436,19 @@ fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceive
     ColumnarRecordsWriteResult::Success
 }
 
-fn build_plan<'pipeline, T: Iterator<Item = usize>>(
+fn build_plan<
+    'pipeline,
+    TDiagnostic: ColumnarEngineDiagnosticReceiver<'pipeline>,
+    TIter: Iterator<Item = usize>,
+>(
+    diagnostic_receiver: &TDiagnostic,
+    expression: &'pipeline dyn Expression,
     root_keys: &Dictionary<'pipeline>,
     plan: &mut AHashMap<StringValueOrRef<'pipeline>, RoaringBitmap>,
-    key_iter: T,
+    key_iter: TIter,
 ) {
+    let mut log_error = false;
+
     for key_index in key_iter {
         match root_keys.get_value(key_index) {
             ValueOrRef::String(key) => {
@@ -450,10 +463,16 @@ fn build_plan<'pipeline, T: Iterator<Item = usize>>(
                     }
                 };
             }
-            v => {
-                // todo: Log
-            }
+            _ => log_error = true,
         }
+    }
+
+    if log_error {
+        diagnostic_receiver.add_diagnostic_if_enabled(
+            ColumnarEngineDiagnosticLevel::Warn,
+            expression,
+            || "Log record can only be accessed by string keys".into(),
+        );
     }
 }
 
@@ -501,7 +520,8 @@ fn replace_id_columns_in_batch<const SIZE: usize>(
     RecordBatch::try_new(Arc::new(schema_builder.finish()), columns).expect("valid batch")
 }
 
-fn update_dictionary_values_for_path<'a>(
+fn update_dictionary_values_for_path<'a, TDiagnostic: ColumnarEngineDiagnosticReceiver<'a>>(
+    diagnostic_receiver: &TDiagnostic,
     source: Dictionary<'a>,
     key_filter: Option<&RoaringBitmap>,
     current_path: &ColumnarEngineSelectionPath<'a>,
@@ -536,15 +556,15 @@ fn update_dictionary_values_for_path<'a>(
                 continue;
             }
 
-            let path_value = match current_path {
+            let (expression, path_value) = match current_path {
                 ColumnarEngineSelectionPath::Key { expression, value } => {
-                    ValueOrRef::String(value.clone())
+                    (expression, ValueOrRef::String(value.clone()))
                 }
                 ColumnarEngineSelectionPath::Index { expression, value } => {
-                    ValueOrRef::Integer(*value)
+                    (expression, ValueOrRef::Integer(*value))
                 }
                 ColumnarEngineSelectionPath::Dictionary { expression, value } => {
-                    value.get_value(key_index)
+                    (expression, value.get_value(key_index))
                 }
             };
 
@@ -562,6 +582,7 @@ fn update_dictionary_values_for_path<'a>(
                                 if let ValueOrRef::Map(MapValueOrRef::Owned(map)) = source_value {
                                     let mut map = map.deref().clone();
                                     update_map_value_for_path(
+                                        diagnostic_receiver,
                                         key_index,
                                         map.get_values_mut(),
                                         key.get_value(),
@@ -573,7 +594,10 @@ fn update_dictionary_values_for_path<'a>(
                                     ));
                                     Some(index)
                                 } else {
-                                    // todo log
+                                    diagnostic_receiver.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        *expression,
+                                        || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), source_value.get_value_type()));
                                     None
                                 }
                             }
@@ -583,6 +607,8 @@ fn update_dictionary_values_for_path<'a>(
                                 {
                                     let mut array = array.deref().clone();
                                     update_array_value_for_path(
+                                        diagnostic_receiver,
+                                        *expression,
                                         key_index,
                                         array.get_values_mut(),
                                         index,
@@ -594,12 +620,18 @@ fn update_dictionary_values_for_path<'a>(
                                     ));
                                     Some(index)
                                 } else {
-                                    // todo log
+                                    diagnostic_receiver.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        *expression,
+                                        || format!("Could not search for array index '{index}' specified in accessor expression because current node is a '{}' value", source_value.get_value_type()));
                                     None
                                 }
                             }
                             v => {
-                                // todo log
+                                diagnostic_receiver.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    *expression,
+                                    || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),);
                                 None
                             }
                         };
@@ -624,7 +656,8 @@ fn update_dictionary_values_for_path<'a>(
     Dictionary::new(key_builder.finish().into(), source_values.into())
 }
 
-fn update_map_value_for_path<'a>(
+fn update_map_value_for_path<'a, TDiagnostic: ColumnarEngineDiagnosticReceiver<'a>>(
+    diagnostic_receiver: &TDiagnostic,
     key_index: usize,
     map: &mut AHashMap<Box<str>, ValueOrRef<'a>>,
     current_key: &str,
@@ -632,13 +665,15 @@ fn update_map_value_for_path<'a>(
     value: ValueOrRef<'a>,
 ) {
     if let Some(current_path) = remaining_path.first() {
-        let path_value = match current_path {
+        let (expression, path_value) = match current_path {
             ColumnarEngineSelectionPath::Key { expression, value } => {
-                ValueOrRef::String(value.clone())
+                (expression, ValueOrRef::String(value.clone()))
             }
-            ColumnarEngineSelectionPath::Index { expression, value } => ValueOrRef::Integer(*value),
+            ColumnarEngineSelectionPath::Index { expression, value } => {
+                (expression, ValueOrRef::Integer(*value))
+            }
             ColumnarEngineSelectionPath::Dictionary { expression, value } => {
-                value.get_value(key_index)
+                (expression, value.get_value(key_index))
             }
         };
 
@@ -646,6 +681,8 @@ fn update_map_value_for_path<'a>(
             let value_for_key = o.insert(ValueOrRef::Null);
 
             o.insert(update_any_value_for_path(
+                diagnostic_receiver,
+                *expression,
                 key_index,
                 value_for_key,
                 path_value,
@@ -665,7 +702,9 @@ fn update_map_value_for_path<'a>(
     }
 }
 
-fn update_array_value_for_path<'a>(
+fn update_array_value_for_path<'a, TDiagnostic: ColumnarEngineDiagnosticReceiver<'a>>(
+    diagnostic_receiver: &TDiagnostic,
+    expression: &'a dyn Expression,
     key_index: usize,
     array: &mut [ValueOrRef<'a>],
     mut current_index: i64,
@@ -678,18 +717,24 @@ fn update_array_value_for_path<'a>(
         current_index += len as i64;
     }
     if current_index < 0 || current_index >= len as i64 {
-        // todo: Log
+        diagnostic_receiver.add_diagnostic_if_enabled(
+            ColumnarEngineDiagnosticLevel::Warn,
+            expression,
+            || format!("Array index '{current_index}' specified in accessor expression is invalid"),
+        );
         return;
     }
 
     if let Some(current_path) = remaining_path.first() {
-        let path_value = match current_path {
+        let (expression, path_value) = match current_path {
             ColumnarEngineSelectionPath::Key { expression, value } => {
-                ValueOrRef::String(value.clone())
+                (expression, ValueOrRef::String(value.clone()))
             }
-            ColumnarEngineSelectionPath::Index { expression, value } => ValueOrRef::Integer(*value),
+            ColumnarEngineSelectionPath::Index { expression, value } => {
+                (expression, ValueOrRef::Integer(*value))
+            }
             ColumnarEngineSelectionPath::Dictionary { expression, value } => {
-                value.get_value(key_index)
+                (expression, value.get_value(key_index))
             }
         };
 
@@ -697,6 +742,8 @@ fn update_array_value_for_path<'a>(
             std::mem::replace(&mut array[current_index as usize], ValueOrRef::Null);
 
         array[current_index as usize] = update_any_value_for_path(
+            diagnostic_receiver,
+            *expression,
             key_index,
             value_for_index,
             path_value,
@@ -708,7 +755,9 @@ fn update_array_value_for_path<'a>(
     }
 }
 
-fn update_any_value_for_path<'a>(
+fn update_any_value_for_path<'a, TDiagnostic: ColumnarEngineDiagnosticReceiver<'a>>(
+    diagnostic_receiver: &TDiagnostic,
+    expression: &'a dyn Expression,
     key_index: usize,
     any_value: ValueOrRef<'a>,
     current_path: ValueOrRef<'a>,
@@ -720,6 +769,7 @@ fn update_any_value_for_path<'a>(
             if let ValueOrRef::Map(MapValueOrRef::Owned(inner_map)) = any_value {
                 let mut inner_map = Rc::unwrap_or_clone(inner_map);
                 update_map_value_for_path(
+                    diagnostic_receiver,
                     key_index,
                     inner_map.get_values_mut(),
                     path_key.get_value(),
@@ -728,7 +778,10 @@ fn update_any_value_for_path<'a>(
                 );
                 ValueOrRef::Map(MapValueOrRef::Owned(inner_map.into()))
             } else {
-                //todo: log
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    expression,
+                    || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", path_key.get_value(), any_value.get_value_type()));
                 any_value
             }
         }
@@ -736,6 +789,8 @@ fn update_any_value_for_path<'a>(
             if let ValueOrRef::Array(ArrayValueOrRef::Owned(inner_array)) = any_value {
                 let mut inner_array = Rc::unwrap_or_clone(inner_array);
                 update_array_value_for_path(
+                    diagnostic_receiver,
+                    expression,
                     key_index,
                     inner_array.get_values_mut(),
                     index,
@@ -744,12 +799,18 @@ fn update_any_value_for_path<'a>(
                 );
                 ValueOrRef::Array(ArrayValueOrRef::Owned(inner_array.into()))
             } else {
-                //todo: log
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    expression,
+                    || format!("Could not search for array index '{index}' specified in accessor expression because current node is a '{}' value", any_value.get_value_type()));
                 any_value
             }
         }
         v => {
-            //todo: log?
+            diagnostic_receiver.add_diagnostic_if_enabled(
+                ColumnarEngineDiagnosticLevel::Warn,
+                expression,
+                || format!("Unexpected scalar expression with '{}' value type encountered in accessor expression", v.get_value_type()),);
             any_value
         }
     }
@@ -903,7 +964,7 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
 
                         match path.first().expect("has path") {
                             ColumnarEngineSelectionPath::Key {
-                                expression: attribute_key_expression,
+                                expression: _,
                                 value: attribute_key,
                             } => {
                                 let attributes = self
@@ -930,6 +991,7 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
 
                                 let attributes_values = if path.len() > 2 {
                                     update_dictionary_values_for_path(
+                                        diagnostic_receiver,
                                         attributes_values,
                                         key_filter,
                                         &path[1],
@@ -956,7 +1018,17 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
 
                                 return ColumnarRecordsWriteResult::Success;
                             }
-                            ColumnarEngineSelectionPath::Index { expression, value } => todo!(),
+                            ColumnarEngineSelectionPath::Index {
+                                expression,
+                                value: _,
+                            } => {
+                                diagnostic_receiver.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    *expression,
+                                    || "Attributes cannot be accessed by array index".into(),
+                                );
+                                return ColumnarRecordsWriteResult::NotFound;
+                            }
                             ColumnarEngineSelectionPath::Dictionary { expression, value } => {
                                 todo!()
                             }
@@ -1003,8 +1075,20 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
                     AHashMap::with_capacity(key_length);
 
                 match key_filter {
-                    Some(v) => build_plan(root_keys, &mut plan, v.iter().map(|v| v as usize)),
-                    None => build_plan(root_keys, &mut plan, 0..key_length),
+                    Some(v) => build_plan(
+                        diagnostic_receiver,
+                        *keys_expression,
+                        root_keys,
+                        &mut plan,
+                        v.iter().map(|v| v as usize),
+                    ),
+                    None => build_plan(
+                        diagnostic_receiver,
+                        *keys_expression,
+                        root_keys,
+                        &mut plan,
+                        0..key_length,
+                    ),
                 }
 
                 let mut written_data_count = 0;
@@ -1611,7 +1695,7 @@ fn build_logs_body_dictionary_from_struct(
                         continue;
                     }
                 }
-                d => todo!("Body type '{d}' is not supported"),
+                d => panic!("Body type '{d}' is not supported"),
             }
 
             unsafe { key_writer.set_null_unchecked(key_index) };
