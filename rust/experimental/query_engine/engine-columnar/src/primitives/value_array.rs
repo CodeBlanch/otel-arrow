@@ -110,7 +110,7 @@ impl PartialEq for ArrayValueOrRef<'_> {
     }
 }
 
-impl Eq for ArrayValueOrRef<'_> { }
+impl Eq for ArrayValueOrRef<'_> {}
 
 fn hash_array_value<H: Hasher>(state: &mut H, a: &dyn ArrayValue) {
     a.len().hash(state);

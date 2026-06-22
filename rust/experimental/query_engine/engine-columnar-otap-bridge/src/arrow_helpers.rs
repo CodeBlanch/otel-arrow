@@ -211,13 +211,13 @@ where
 
 enum ValueOrBuffer<'a> {
     Value(ValueOrRef<'a>),
-    Buffer(Buffer)
+    Buffer(Buffer),
 }
 
 #[derive(Hash, PartialEq, Eq)]
 enum VecOrBuffer {
     Vec(Vec<u8>),
-    Buffer(BufferWrapper<u8>)
+    Buffer(BufferWrapper<u8>),
 }
 
 pub(crate) fn attributes_writer<'a>(
@@ -296,7 +296,10 @@ pub(crate) fn attributes_writer<'a>(
                                 }
 
                                 (
-                                    ValueOrBuffer::Buffer(attributes_batch.get_attribute_value_buffer(attribute_type, i)),
+                                    ValueOrBuffer::Buffer(
+                                        attributes_batch
+                                            .get_attribute_value_buffer(attribute_type, i),
+                                    ),
                                     Some(i),
                                 )
                             }
@@ -342,14 +345,15 @@ pub(crate) fn attributes_writer<'a>(
                                 }
                                 ValueOrRef::Boolean(b) => Some(if b { 1 } else { 0 }),
                                 v => panic!("Value type '{}' is not supported", v.get_value_type()),
-                            }
+                            },
                             ValueOrBuffer::Buffer(b) => {
                                 if b.is_empty() {
                                     None
                                 } else {
                                     match attribute_type {
                                         STRING_ATTRIBUTE_VALUE_TYPE => {
-                                            let (value_index, _) = string_values.insert_full(StringValueOrRef::Buffer(b));
+                                            let (value_index, _) = string_values
+                                                .insert_full(StringValueOrRef::Buffer(b));
                                             Some(value_index)
                                         }
                                         MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
@@ -359,7 +363,9 @@ pub(crate) fn attributes_writer<'a>(
                                                     ahash::RandomState::new(),
                                                 )
                                             });
-                                            let (value_index, _) = sers.insert_full(VecOrBuffer::Buffer(BufferWrapper::<u8>::new(b)));
+                                            let (value_index, _) = sers.insert_full(
+                                                VecOrBuffer::Buffer(BufferWrapper::<u8>::new(b)),
+                                            );
                                             Some(value_index)
                                         }
                                         BYTES_ATTRIBUTE_VALUE_TYPE => {
@@ -369,7 +375,8 @@ pub(crate) fn attributes_writer<'a>(
                                                     ahash::RandomState::new(),
                                                 )
                                             });
-                                            let (value_index, _) = bytes.insert_full(BufferWrapper::<u8>::new(b));
+                                            let (value_index, _) =
+                                                bytes.insert_full(BufferWrapper::<u8>::new(b));
                                             Some(value_index)
                                         }
                                         t => panic!("Attribute type '{t}' is not supported"),
@@ -460,43 +467,48 @@ pub(crate) fn attributes_writer<'a>(
                             }
                             ValueOrRef::Boolean(b) => vacant
                                 .insert((BOOL_ATTRIBUTE_VALUE_TYPE, Some(if b { 1 } else { 0 }))),
-                            ValueOrRef::Array(a) => {
-                                match a {
-                                    ArrayValueOrRef::Buffer(BufferArray::U8(b)) => {
-                                        if b.is_empty() {
-                                            vacant.insert((BYTES_ATTRIBUTE_VALUE_TYPE, None))
-                                        } else {
-                                            let bytes = bytes_values.get_or_insert_with(|| {
-                                                IndexSet::with_capacity_and_hasher(
-                                                    u16::MAX as usize,
-                                                    ahash::RandomState::new(),
-                                                )
-                                            });
-                                            let (value_index, _) = bytes.insert_full(b);
-                                            vacant.insert((BYTES_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
-                                        }
+                            ValueOrRef::Array(a) => match a {
+                                ArrayValueOrRef::Buffer(BufferArray::U8(b)) => {
+                                    if b.is_empty() {
+                                        vacant.insert((BYTES_ATTRIBUTE_VALUE_TYPE, None))
+                                    } else {
+                                        let bytes = bytes_values.get_or_insert_with(|| {
+                                            IndexSet::with_capacity_and_hasher(
+                                                u16::MAX as usize,
+                                                ahash::RandomState::new(),
+                                            )
+                                        });
+                                        let (value_index, _) = bytes.insert_full(b);
+                                        vacant
+                                            .insert((BYTES_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
                                     }
-                                    a => {
-                                        if a.is_empty() {
-                                            vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, None))
-                                        } else {
-                                            match crate::serialization::to_slice(ValueOrRef::Array(a)) {
-                                                Ok(v) => {
-                                                    let sers = sers_values.get_or_insert_with(|| {
-                                                        IndexSet::with_capacity_and_hasher(
-                                                            u16::MAX as usize,
-                                                            ahash::RandomState::new(),
-                                                        )
-                                                    });
-                                                    let (value_index, _) = sers.insert_full(VecOrBuffer::Vec(v));
-                                                    vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
-                                                }
-                                                Err(_) => vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, None)),
+                                }
+                                a => {
+                                    if a.is_empty() {
+                                        vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, None))
+                                    } else {
+                                        match crate::serialization::to_slice(ValueOrRef::Array(a)) {
+                                            Ok(v) => {
+                                                let sers = sers_values.get_or_insert_with(|| {
+                                                    IndexSet::with_capacity_and_hasher(
+                                                        u16::MAX as usize,
+                                                        ahash::RandomState::new(),
+                                                    )
+                                                });
+                                                let (value_index, _) =
+                                                    sers.insert_full(VecOrBuffer::Vec(v));
+                                                vacant.insert((
+                                                    SLICE_ATTRIBUTE_VALUE_TYPE,
+                                                    Some(value_index),
+                                                ))
+                                            }
+                                            Err(_) => {
+                                                vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, None))
                                             }
                                         }
                                     }
                                 }
-                            }
+                            },
                             ValueOrRef::Map(m) => {
                                 if m.as_map_value().is_empty() {
                                     vacant.insert((MAP_ATTRIBUTE_VALUE_TYPE, None))
@@ -509,8 +521,12 @@ pub(crate) fn attributes_writer<'a>(
                                                     ahash::RandomState::new(),
                                                 )
                                             });
-                                            let (value_index, _) = sers.insert_full(VecOrBuffer::Vec(v));
-                                            vacant.insert((MAP_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                            let (value_index, _) =
+                                                sers.insert_full(VecOrBuffer::Vec(v));
+                                            vacant.insert((
+                                                MAP_ATTRIBUTE_VALUE_TYPE,
+                                                Some(value_index),
+                                            ))
                                         }
                                         Err(_) => vacant.insert((MAP_ATTRIBUTE_VALUE_TYPE, None)),
                                     }
@@ -519,12 +535,12 @@ pub(crate) fn attributes_writer<'a>(
                             v => {
                                 let s = v.to_value().convert_to_string();
                                 if !s.as_ref().is_empty() {
-                                    let (value_index, _) = string_values.insert_full(StringValueOrRef::Owned(Rc::new(s.into())));
+                                    let (value_index, _) = string_values
+                                        .insert_full(StringValueOrRef::Owned(Rc::new(s.into())));
                                     vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
                                 } else {
                                     vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, None))
                                 }
-
                             }
                         },
                     };
@@ -748,7 +764,10 @@ pub(crate) fn attributes_writer<'a>(
         let bytes = DictionaryArray::new(
             bytes_keys.finish(),
             Arc::new(BinaryArray::from(
-                bytes_values.iter().map(|v| v.as_ref()).collect::<Vec<&[u8]>>(),
+                bytes_values
+                    .iter()
+                    .map(|v| v.as_ref())
+                    .collect::<Vec<&[u8]>>(),
             )),
         );
 
@@ -764,10 +783,13 @@ pub(crate) fn attributes_writer<'a>(
         let sers = DictionaryArray::new(
             sers_keys.finish(),
             Arc::new(BinaryArray::from(
-                sers_values.iter().map(|v| match v {
-                    VecOrBuffer::Vec(v) => v,
-                    VecOrBuffer::Buffer(b) => b.as_ref(),
-                }).collect::<Vec<&[u8]>>(),
+                sers_values
+                    .iter()
+                    .map(|v| match v {
+                        VecOrBuffer::Vec(v) => v,
+                        VecOrBuffer::Buffer(b) => b.as_ref(),
+                    })
+                    .collect::<Vec<&[u8]>>(),
             )),
         );
 

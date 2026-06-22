@@ -88,9 +88,9 @@ where
             } else if value_type == ValueType::Null {
                 ResolvedValue::Computed(OwnedValue::String(StringValueStorage::new("".into())))
             } else {
-                ResolvedValue::Computed(OwnedValue::String(
-                    StringValueStorage::new(inner_value.convert_to_string().into())
-                ))
+                ResolvedValue::Computed(OwnedValue::String(StringValueStorage::new(
+                    inner_value.convert_to_string().into(),
+                )))
             }
         }
         ValueType::TimeSpan => {

@@ -182,9 +182,10 @@ impl ConvertScalarExpression {
                         )))
                     } else {
                         Ok(Some(ResolvedStaticScalarExpression::Computed(
-                            StaticScalarExpression::String(
-                                StringScalarExpression::new(c.query_location.clone(), v.convert_to_string().as_ref()),
-                            ),
+                            StaticScalarExpression::String(StringScalarExpression::new(
+                                c.query_location.clone(),
+                                v.convert_to_string().as_ref(),
+                            )),
                         )))
                     }
                 } else {

@@ -992,7 +992,7 @@ impl PartialEq for Value<'_> {
 
 pub enum ValueString<'a> {
     Ref(&'a str),
-    Owned(String)
+    Owned(String),
 }
 
 impl AsRef<str> for ValueString<'_> {
@@ -1122,8 +1122,7 @@ pub trait DateTimeValue: Debug {
 
     fn to_string(&self) -> ValueString<'_> {
         ValueString::Owned(
-            self
-                .get_value()
+            self.get_value()
                 .to_rfc3339_opts(SecondsFormat::AutoSi, true),
         )
     }

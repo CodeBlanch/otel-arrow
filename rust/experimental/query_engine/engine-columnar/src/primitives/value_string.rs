@@ -172,9 +172,7 @@ impl<'a> From<ValueOrRef<'a>> for StringValueOrRef<'a> {
         match value {
             ValueOrRef::Null => StringValueOrRef::Empty,
             ValueOrRef::String(s) => s,
-            v => {
-                StringValueOrRef::Owned(Rc::new(v.to_value().convert_to_string().into()))
-            }
+            v => StringValueOrRef::Owned(Rc::new(v.to_value().convert_to_string().into())),
         }
     }
 }
