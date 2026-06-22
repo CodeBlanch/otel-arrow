@@ -84,6 +84,34 @@ impl Hash for ArrayValueOrRef<'_> {
     }
 }
 
+impl PartialEq for ArrayValueOrRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        let left = self.as_array_value();
+        let right = other.as_array_value();
+
+        if left.len() == right.len() {
+            for index in 0..left.len() {
+                match (left.get(index), right.get(index)) {
+                    (None, None) => {}
+                    (Some(l), Some(r)) => {
+                        if Into::<ValueOrRef>::into(l.to_value())
+                            != Into::<ValueOrRef>::into(r.to_value())
+                        {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+}
+
+impl Eq for ArrayValueOrRef<'_> { }
+
 fn hash_array_value<H: Hasher>(state: &mut H, a: &dyn ArrayValue) {
     a.len().hash(state);
     a.get_items(&mut IndexValueClosureCallback::new(|_, v| {
@@ -145,6 +173,7 @@ impl<T: ArrowNativeType + AsStaticValue + Into<i64>> BufferWrapper<T> {
             marker: Default::default(),
         }
     }
+
     pub fn get_buffer(&self) -> &Buffer {
         &self.value
     }

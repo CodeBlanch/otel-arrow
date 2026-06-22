@@ -194,28 +194,11 @@ impl PartialEq for ValueOrRef<'_> {
                 }
             }
             ValueOrRef::Array(a) => {
-                let a = a.as_array_value();
                 if let ValueOrRef::Array(other) = other {
-                    let other = other.as_array_value();
-                    if a.len() == other.len() {
-                        for index in 0..a.len() {
-                            match (a.get(index), other.get(index)) {
-                                (None, None) => {}
-                                (Some(l), Some(r)) => {
-                                    if Into::<ValueOrRef>::into(l.to_value())
-                                        != Into::<ValueOrRef>::into(r.to_value())
-                                    {
-                                        return false;
-                                    }
-                                }
-                                _ => return false,
-                            }
-                        }
-                        return true;
-                    }
+                    a.eq(other)
+                } else {
+                    false
                 }
-
-                false
             }
             ValueOrRef::Map(m) => {
                 let m = m.as_map_value();

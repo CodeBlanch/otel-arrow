@@ -11,7 +11,7 @@ use std::{
 
 use crate::*;
 use ahash::AHashMap;
-use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
+use arrow::{array::*, buffer::{Buffer, MutableBuffer}, datatypes::*};
 use data_engine_columnar::*;
 use otap_df_pdata::{otlp::attributes::*, schema::consts};
 
@@ -448,21 +448,12 @@ impl<'record> OtapAttributesBatch<'record> {
     ) -> ValueOrRef<'static> {
         match attribute_type {
             STRING_ATTRIBUTE_VALUE_TYPE => ValueOrRef::String(StringValueOrRef::Buffer({
-                let strings = self.attribute_string_values;
-                let offsets = strings.value_offsets();
-                let start =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize) } as usize;
-                let end =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize + 1) } as usize;
-                strings
-                    .values()
-                    .slice_with_length(start, end - start)
-                    .clone()
+                get_generic_byte_array_buffer_value(self.attribute_string_values, attribute_value_index as usize)
             })),
             MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
                 let value = unsafe {
                     self.attribute_ser_values
-                        .unwrap()
+                        .expect("has ser values")
                         .value_unchecked(attribute_value_index as usize)
                 };
 
@@ -470,18 +461,39 @@ impl<'record> OtapAttributesBatch<'record> {
                 crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
             }
             BYTES_ATTRIBUTE_VALUE_TYPE => ValueOrRef::Array(ArrayValueOrRef::Buffer({
-                let bytes = self.attribute_bytes_values.unwrap();
-                let offsets = bytes.value_offsets();
-                let start =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize) } as usize;
-                let end =
-                    unsafe { *offsets.get_unchecked(attribute_value_index as usize + 1) } as usize;
-                let buffer = bytes.values().slice_with_length(start, end - start).clone();
-                BufferArray::new_u8(buffer)
+                BufferArray::new_u8(get_generic_byte_array_buffer_value(self.attribute_bytes_values.expect("has bytes values"), attribute_value_index as usize))
             })),
             d => todo!("Attribute type '{d}' is not supported"),
         }
     }
+
+    pub(crate) fn get_attribute_value_buffer(
+        &self,
+        attribute_type: u8,
+        attribute_value_index: u16,
+    ) -> Buffer {
+        match attribute_type {
+            STRING_ATTRIBUTE_VALUE_TYPE => {
+                get_generic_byte_array_buffer_value(self.attribute_string_values, attribute_value_index as usize)
+            },
+            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
+                get_generic_byte_array_buffer_value(self.attribute_ser_values.expect("has ser values"), attribute_value_index as usize)
+            }
+            BYTES_ATTRIBUTE_VALUE_TYPE => {
+                get_generic_byte_array_buffer_value(self.attribute_bytes_values.expect("has bytes values"), attribute_value_index as usize)
+            },
+            d => todo!("Attribute type '{d}' is not supported"),
+        }
+    }
+}
+
+fn get_generic_byte_array_buffer_value<T: ByteArrayType>(bytes: &GenericByteArray<T>, value_index: usize) -> Buffer {
+    let offsets = bytes.value_offsets();
+    let start =
+        T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index as usize) });
+    let end =
+        T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index as usize + 1) });
+    bytes.values().slice_with_length(start, end - start).clone()
 }
 
 #[derive(Debug)]

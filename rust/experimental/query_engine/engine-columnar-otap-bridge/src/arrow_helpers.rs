@@ -1,12 +1,12 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::hash_map::Entry, hash::Hash, marker::PhantomData, sync::Arc};
+use std::{collections::hash_map::Entry, hash::Hash, marker::PhantomData, rc::Rc, sync::Arc};
 
 use ahash::AHashMap;
 use arrow::{
     array::*,
-    buffer::{BooleanBuffer, MutableBuffer},
+    buffer::{BooleanBuffer, Buffer, MutableBuffer},
     datatypes::*,
     util::bit_util,
 };
@@ -209,6 +209,17 @@ where
     Some(Arc::new(builder.finish()))
 }
 
+enum ValueOrBuffer<'a> {
+    Value(ValueOrRef<'a>),
+    Buffer(Buffer)
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum VecOrBuffer {
+    Vec(Vec<u8>),
+    Buffer(BufferWrapper<u8>)
+}
+
 pub(crate) fn attributes_writer<'a>(
     record_count: usize,
     values: AHashMap<Box<str>, OtapValue<'a>>,
@@ -225,6 +236,8 @@ pub(crate) fn attributes_writer<'a>(
         IndexSet::with_capacity_and_hasher(u16::MAX as usize, ahash::RandomState::new());
     let mut int_values = None;
     let mut double_values = None;
+    let mut sers_values = None;
+    let mut bytes_values = None;
 
     let mut lookup: AHashMap<(u8, usize), (u8, Option<usize>)> = AHashMap::new();
 
@@ -283,51 +296,86 @@ pub(crate) fn attributes_writer<'a>(
                                 }
 
                                 (
-                                    attributes_batch.get_attribute_value(attribute_type, i),
+                                    ValueOrBuffer::Buffer(attributes_batch.get_attribute_value_buffer(attribute_type, i)),
                                     Some(i),
                                 )
                             }
-                            AttributeValueOrIndex::Value(v) => (v, None),
+                            AttributeValueOrIndex::Value(v) => (ValueOrBuffer::Value(v), None),
                         };
 
                         let new_value_index = match value {
-                            ValueOrRef::Null => continue,
-                            ValueOrRef::String(s) => {
-                                if s.is_empty() {
+                            ValueOrBuffer::Value(v) => match v {
+                                ValueOrRef::Null => continue,
+                                ValueOrRef::String(s) => {
+                                    if s.is_empty() {
+                                        None
+                                    } else {
+                                        let (value_index, _) = string_values.insert_full(s);
+                                        Some(value_index)
+                                    }
+                                }
+                                ValueOrRef::Integer(i) => {
+                                    if i == 0 {
+                                        None
+                                    } else {
+                                        let ints = int_values.get_or_insert_with(|| {
+                                            IndexSet::with_capacity_and_hasher(
+                                                u16::MAX as usize,
+                                                ahash::RandomState::new(),
+                                            )
+                                        });
+                                        let (value_index, _) = ints.insert_full(i);
+                                        Some(value_index)
+                                    }
+                                }
+                                ValueOrRef::Double(d) => {
+                                    if d == 0f64 {
+                                        None
+                                    } else {
+                                        let doubles = double_values.get_or_insert_with(|| {
+                                            Vec::with_capacity(u16::MAX as usize)
+                                        });
+                                        let value_index = doubles.len();
+                                        doubles.push(d);
+                                        Some(value_index)
+                                    }
+                                }
+                                ValueOrRef::Boolean(b) => Some(if b { 1 } else { 0 }),
+                                v => panic!("Value type '{}' is not supported", v.get_value_type()),
+                            }
+                            ValueOrBuffer::Buffer(b) => {
+                                if b.is_empty() {
                                     None
                                 } else {
-                                    let (value_index, _) = string_values.insert_full(s);
-                                    Some(value_index)
+                                    match attribute_type {
+                                        STRING_ATTRIBUTE_VALUE_TYPE => {
+                                            let (value_index, _) = string_values.insert_full(StringValueOrRef::Buffer(b));
+                                            Some(value_index)
+                                        }
+                                        MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
+                                            let sers = sers_values.get_or_insert_with(|| {
+                                                IndexSet::with_capacity_and_hasher(
+                                                    u16::MAX as usize,
+                                                    ahash::RandomState::new(),
+                                                )
+                                            });
+                                            let (value_index, _) = sers.insert_full(VecOrBuffer::Buffer(BufferWrapper::<u8>::new(b)));
+                                            Some(value_index)
+                                        }
+                                        BYTES_ATTRIBUTE_VALUE_TYPE => {
+                                            let bytes = bytes_values.get_or_insert_with(|| {
+                                                IndexSet::with_capacity_and_hasher(
+                                                    u16::MAX as usize,
+                                                    ahash::RandomState::new(),
+                                                )
+                                            });
+                                            let (value_index, _) = bytes.insert_full(BufferWrapper::<u8>::new(b));
+                                            Some(value_index)
+                                        }
+                                        t => panic!("Attribute type '{t}' is not supported"),
+                                    }
                                 }
                             }
-                            ValueOrRef::Integer(i) => {
-                                if i == 0 {
-                                    None
-                                } else {
-                                    let ints = int_values.get_or_insert_with(|| {
-                                        IndexSet::with_capacity_and_hasher(
-                                            u16::MAX as usize,
-                                            ahash::RandomState::new(),
-                                        )
-                                    });
-                                    let (value_index, _) = ints.insert_full(i);
-                                    Some(value_index)
-                                }
-                            }
-                            ValueOrRef::Double(d) => {
-                                if d == 0f64 {
-                                    None
-                                } else {
-                                    let doubles = double_values.get_or_insert_with(|| {
-                                        Vec::with_capacity(u16::MAX as usize)
-                                    });
-                                    let value_index = doubles.len();
-                                    doubles.push(d);
-                                    Some(value_index)
-                                }
-                            }
-                            ValueOrRef::Boolean(b) => Some(if b { 1 } else { 0 }),
-                            v => todo!(),
                         };
 
                         types.push(attribute_type);
@@ -412,7 +460,72 @@ pub(crate) fn attributes_writer<'a>(
                             }
                             ValueOrRef::Boolean(b) => vacant
                                 .insert((BOOL_ATTRIBUTE_VALUE_TYPE, Some(if b { 1 } else { 0 }))),
-                            v => todo!(),
+                            ValueOrRef::Array(a) => {
+                                match a {
+                                    ArrayValueOrRef::Buffer(BufferArray::U8(b)) => {
+                                        if b.is_empty() {
+                                            vacant.insert((BYTES_ATTRIBUTE_VALUE_TYPE, None))
+                                        } else {
+                                            let bytes = bytes_values.get_or_insert_with(|| {
+                                                IndexSet::with_capacity_and_hasher(
+                                                    u16::MAX as usize,
+                                                    ahash::RandomState::new(),
+                                                )
+                                            });
+                                            let (value_index, _) = bytes.insert_full(b);
+                                            vacant.insert((BYTES_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                        }
+                                    }
+                                    a => {
+                                        if a.is_empty() {
+                                            vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, None))
+                                        } else {
+                                            match crate::serialization::to_slice(ValueOrRef::Array(a)) {
+                                                Ok(v) => {
+                                                    let sers = sers_values.get_or_insert_with(|| {
+                                                        IndexSet::with_capacity_and_hasher(
+                                                            u16::MAX as usize,
+                                                            ahash::RandomState::new(),
+                                                        )
+                                                    });
+                                                    let (value_index, _) = sers.insert_full(VecOrBuffer::Vec(v));
+                                                    vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                                }
+                                                Err(_) => vacant.insert((SLICE_ATTRIBUTE_VALUE_TYPE, None)),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ValueOrRef::Map(m) => {
+                                if m.as_map_value().is_empty() {
+                                    vacant.insert((MAP_ATTRIBUTE_VALUE_TYPE, None))
+                                } else {
+                                    match crate::serialization::to_slice(ValueOrRef::Map(m)) {
+                                        Ok(v) => {
+                                            let sers = sers_values.get_or_insert_with(|| {
+                                                IndexSet::with_capacity_and_hasher(
+                                                    u16::MAX as usize,
+                                                    ahash::RandomState::new(),
+                                                )
+                                            });
+                                            let (value_index, _) = sers.insert_full(VecOrBuffer::Vec(v));
+                                            vacant.insert((MAP_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                        }
+                                        Err(_) => vacant.insert((MAP_ATTRIBUTE_VALUE_TYPE, None)),
+                                    }
+                                }
+                            }
+                            v => {
+                                let s = v.to_value().convert_to_string();
+                                if !s.as_ref().is_empty() {
+                                    let (value_index, _) = string_values.insert_full(StringValueOrRef::Owned(Rc::new(s.into())));
+                                    vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, Some(value_index)))
+                                } else {
+                                    vacant.insert((STRING_ATTRIBUTE_VALUE_TYPE, None))
+                                }
+
+                            }
                         },
                     };
 
@@ -449,6 +562,8 @@ pub(crate) fn attributes_writer<'a>(
     let mut ints = None;
     let mut doubles = None;
     let mut bools = None;
+    let mut sers = None;
+    let mut bytes = None;
 
     lookup.clear();
     let mut current_parent_id = 0;
@@ -508,6 +623,30 @@ pub(crate) fn attributes_writer<'a>(
                         .get_or_insert_with(|| AttributeBooleanArrayBuilder::new(attribute_count));
 
                     bools.set_bit(new_attribute_index, value_index > 0);
+                }
+                MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
+                    let sers = sers.get_or_insert_with(|| {
+                        AttributeArrayBuilder::<UInt16Type>::new(attribute_count)
+                    });
+
+                    unsafe {
+                        sers.get_writer().set_value_index_typed_unchecked(
+                            new_attribute_index,
+                            value_index as u16,
+                        )
+                    };
+                }
+                BYTES_ATTRIBUTE_VALUE_TYPE => {
+                    let bytes = bytes.get_or_insert_with(|| {
+                        AttributeArrayBuilder::<UInt16Type>::new(attribute_count)
+                    });
+
+                    unsafe {
+                        bytes.get_writer().set_value_index_typed_unchecked(
+                            new_attribute_index,
+                            value_index as u16,
+                        )
+                    };
                 }
                 t => panic!("Attribute type '{t}' is not supported"),
             }
@@ -603,6 +742,41 @@ pub(crate) fn attributes_writer<'a>(
             true,
         ));
         columns.push(Arc::new(bools));
+    }
+
+    if let (Some(bytes_keys), Some(bytes_values)) = (bytes, bytes_values) {
+        let bytes = DictionaryArray::new(
+            bytes_keys.finish(),
+            Arc::new(BinaryArray::from(
+                bytes_values.iter().map(|v| v.as_ref()).collect::<Vec<&[u8]>>(),
+            )),
+        );
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_BYTES,
+            bytes.data_type().clone(),
+            true,
+        ));
+        columns.push(Arc::new(bytes));
+    }
+
+    if let (Some(sers_keys), Some(sers_values)) = (sers, sers_values) {
+        let sers = DictionaryArray::new(
+            sers_keys.finish(),
+            Arc::new(BinaryArray::from(
+                sers_values.iter().map(|v| match v {
+                    VecOrBuffer::Vec(v) => v,
+                    VecOrBuffer::Buffer(b) => b.as_ref(),
+                }).collect::<Vec<&[u8]>>(),
+            )),
+        );
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_SER,
+            sers.data_type().clone(),
+            true,
+        ));
+        columns.push(Arc::new(sers));
     }
 
     Some((

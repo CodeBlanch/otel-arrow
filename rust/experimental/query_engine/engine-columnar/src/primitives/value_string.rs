@@ -173,11 +173,7 @@ impl<'a> From<ValueOrRef<'a>> for StringValueOrRef<'a> {
             ValueOrRef::Null => StringValueOrRef::Empty,
             ValueOrRef::String(s) => s,
             v => {
-                let mut r = None;
-                v.to_value().convert_to_string(&mut |s| {
-                    r = Some(StringValueOrRef::Owned(Rc::new(s.into())))
-                });
-                r.expect("string value")
+                StringValueOrRef::Owned(Rc::new(v.to_value().convert_to_string().into()))
             }
         }
     }

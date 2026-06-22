@@ -181,15 +181,9 @@ impl ConvertScalarExpression {
                             )),
                         )))
                     } else {
-                        let mut value = None;
-
-                        v.convert_to_string(&mut |s| {
-                            value = Some(StringScalarExpression::new(c.query_location.clone(), s));
-                        });
-
                         Ok(Some(ResolvedStaticScalarExpression::Computed(
                             StaticScalarExpression::String(
-                                value.expect("Inner value did not return a string"),
+                                StringScalarExpression::new(c.query_location.clone(), v.convert_to_string().as_ref()),
                             ),
                         )))
                     }
