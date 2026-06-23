@@ -34,3 +34,7 @@ otap-df-pdata = { path = "../../../otap-dataflow/crates/pdata", features = ["tes
 [[bench]]
 name = "filter"
 harness = false
+
+[[bench]]
+name = "extend"
+harness = false
