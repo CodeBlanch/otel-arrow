@@ -436,6 +436,153 @@ fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceive
     ColumnarRecordsWriteResult::Success
 }
 
+fn process_attributes_update<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
+    diagnostic_receiver: &T,
+    expression: &'a dyn Expression,
+    path: &[ColumnarEngineSelectionPath<'a>],
+    key_filter: Option<&RoaringBitmap>,
+    values: &Dictionary<'a>,
+    attributes: &mut OtapAttributes<'a, '_>,
+) -> ColumnarRecordsWriteResult {
+    if path.is_empty() {
+        // support replace all attributes with a map
+        todo!()
+    }
+
+    match unsafe { path.get_unchecked(0) } {
+        ColumnarEngineSelectionPath::Key {
+            expression: _,
+            value: attribute_key,
+        } => {
+            let (mut attributes_modified, mut attributes_values_borrow) =
+                attributes.get_values(attribute_key.get_value());
+
+            *attributes_modified = true;
+
+            let attributes_values =
+                match std::mem::replace(attributes_values_borrow.deref_mut(), OtapValue::Removed) {
+                    OtapValue::NotFound | OtapValue::Removed => {
+                        Dictionary::new_null_with_data_type(values.len(), DataType::UInt16)
+                    }
+                    OtapValue::Read(v) | OtapValue::Set(v) => v,
+                };
+
+            let attributes_values = if path.len() > 2 {
+                update_dictionary_values_for_path(
+                    diagnostic_receiver,
+                    attributes_values,
+                    key_filter,
+                    &path[1],
+                    &path[2..],
+                    values,
+                )
+            } else {
+                attributes_values.with_values(key_filter, values)
+            };
+
+            diagnostic_receiver.add_diagnostic_if_enabled(
+                ColumnarEngineDiagnosticLevel::Verbose,
+                expression,
+                || {
+                    format!(
+                        "Attribute '{}' set to: {attributes_values}",
+                        attribute_key.get_value()
+                    )
+                },
+            );
+
+            *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+        }
+        ColumnarEngineSelectionPath::Index {
+            expression,
+            value: _,
+        } => {
+            diagnostic_receiver.add_diagnostic_if_enabled(
+                ColumnarEngineDiagnosticLevel::Warn,
+                *expression,
+                || "Attributes cannot be accessed by array index".into(),
+            );
+            return ColumnarRecordsWriteResult::NotFound;
+        }
+        ColumnarEngineSelectionPath::Dictionary {
+            expression: keys_expression,
+            value: root_keys,
+        } => {
+            if path.is_empty() {
+                // support replace all attributes with a map
+                todo!()
+            }
+
+            let key_length = root_keys.len();
+
+            let mut plan: AHashMap<StringValueOrRef, RoaringBitmap> =
+                AHashMap::with_capacity(key_length);
+
+            match key_filter {
+                Some(v) => build_plan(
+                    diagnostic_receiver,
+                    *keys_expression,
+                    root_keys,
+                    &mut plan,
+                    v.iter().map(|v| v as usize),
+                ),
+                None => build_plan(
+                    diagnostic_receiver,
+                    *keys_expression,
+                    root_keys,
+                    &mut plan,
+                    0..key_length,
+                ),
+            }
+
+            for (key, key_filter) in plan.into_iter() {
+                let (mut attributes_modified, mut attributes_values_borrow) =
+                    attributes.get_values(key.get_value());
+
+                *attributes_modified = true;
+
+                let attributes_values = match std::mem::replace(
+                    attributes_values_borrow.deref_mut(),
+                    OtapValue::Removed,
+                ) {
+                    OtapValue::NotFound | OtapValue::Removed => {
+                        Dictionary::new_null_with_data_type(values.len(), DataType::UInt16)
+                    }
+                    OtapValue::Read(v) | OtapValue::Set(v) => v,
+                };
+
+                let attributes_values = if path.len() > 2 {
+                    update_dictionary_values_for_path(
+                        diagnostic_receiver,
+                        attributes_values,
+                        Some(&key_filter),
+                        &path[1],
+                        &path[2..],
+                        values,
+                    )
+                } else {
+                    attributes_values.with_values(Some(&key_filter), values)
+                };
+
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Verbose,
+                    expression,
+                    || {
+                        format!(
+                            "Attribute '{}' set to: {attributes_values}",
+                            key.get_value()
+                        )
+                    },
+                );
+
+                *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+            }
+        }
+    }
+
+    ColumnarRecordsWriteResult::Success
+}
+
 fn build_plan<
     'pipeline,
     TDiagnostic: ColumnarEngineDiagnosticReceiver<'pipeline>,
@@ -962,77 +1109,18 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
                             todo!()
                         }
 
-                        match path.first().expect("has path") {
-                            ColumnarEngineSelectionPath::Key {
-                                expression: _,
-                                value: attribute_key,
-                            } => {
-                                let attributes = self
-                                    .attributes
-                                    .get_or_insert_with(OtapAttributes::new_empty);
+                        let attributes = self
+                            .attributes
+                            .get_or_insert_with(OtapAttributes::new_empty);
 
-                                let (mut attributes_modified, mut attributes_values_borrow) =
-                                    attributes.get_values(attribute_key.get_value());
-
-                                *attributes_modified = true;
-
-                                let attributes_values = match std::mem::replace(
-                                    attributes_values_borrow.deref_mut(),
-                                    OtapValue::Removed,
-                                ) {
-                                    OtapValue::NotFound | OtapValue::Removed => {
-                                        Dictionary::new_null_with_data_type(
-                                            logs.num_rows(),
-                                            DataType::UInt16,
-                                        )
-                                    }
-                                    OtapValue::Read(v) | OtapValue::Set(v) => v,
-                                };
-
-                                let attributes_values = if path.len() > 2 {
-                                    update_dictionary_values_for_path(
-                                        diagnostic_receiver,
-                                        attributes_values,
-                                        key_filter,
-                                        &path[1],
-                                        &path[2..],
-                                        &values,
-                                    )
-                                } else {
-                                    attributes_values.with_values(key_filter, &values)
-                                };
-
-                                diagnostic_receiver.add_diagnostic_if_enabled(
-                                    ColumnarEngineDiagnosticLevel::Verbose,
-                                    expression,
-                                    || {
-                                        format!(
-                                            "Attribute '{}' set to: {attributes_values}",
-                                            attribute_key.get_value()
-                                        )
-                                    },
-                                );
-
-                                *attributes_values_borrow.deref_mut() =
-                                    OtapValue::Set(attributes_values);
-
-                                return ColumnarRecordsWriteResult::Success;
-                            }
-                            ColumnarEngineSelectionPath::Index {
-                                expression,
-                                value: _,
-                            } => {
-                                diagnostic_receiver.add_diagnostic_if_enabled(
-                                    ColumnarEngineDiagnosticLevel::Warn,
-                                    *expression,
-                                    || "Attributes cannot be accessed by array index".into(),
-                                );
-                                return ColumnarRecordsWriteResult::NotFound;
-                            }
-                            ColumnarEngineSelectionPath::Dictionary { expression, value } => {
-                                todo!()
-                            }
-                        }
+                        return process_attributes_update(
+                            diagnostic_receiver,
+                            expression,
+                            path,
+                            key_filter,
+                            &values,
+                            attributes,
+                        );
                     }
                     consts::BODY => OtapLogRecordField::Body,
                     consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
@@ -1096,6 +1184,33 @@ impl<'pipeline> ColumnarRecords<'pipeline> for OtapLogRecordBatch<'pipeline, '_>
 
                 for (key, key_filter) in plan.into_iter() {
                     let field = match get_log_record_schema().normalize_key(key.get_value()) {
+                        consts::ATTRIBUTES => {
+                            if path.is_empty() {
+                                // support replace all attributes with a map
+                                todo!()
+                            }
+
+                            let attributes = self
+                                .attributes
+                                .get_or_insert_with(OtapAttributes::new_empty);
+
+                            match process_attributes_update(
+                                diagnostic_receiver,
+                                expression,
+                                path,
+                                Some(&key_filter),
+                                &values,
+                                attributes,
+                            ) {
+                                ColumnarRecordsWriteResult::Success
+                                | ColumnarRecordsWriteResult::PartialSuccess => {
+                                    written_data_count += 1;
+                                }
+                                ColumnarRecordsWriteResult::NotFound => {}
+                            }
+
+                            continue;
+                        }
                         consts::BODY => OtapLogRecordField::Body,
                         consts::TIME_UNIX_NANO => OtapLogRecordField::TimeUnixNano,
                         consts::OBSERVED_TIME_UNIX_NANO => OtapLogRecordField::ObservedTimeUnixNano,
