@@ -25,7 +25,7 @@ pub enum DictionaryValueArray<'a> {
     Boolean,
 }
 
-impl<'a> DictionaryValueArray<'a> {
+impl DictionaryValueArray<'_> {
     pub fn len(&self) -> usize {
         match self {
             DictionaryValueArray::Array(a) => a.len(),
@@ -44,6 +44,115 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
+    pub fn is_null(&self) -> bool {
+        match self {
+            DictionaryValueArray::Array(a) => a.null_count() == a.len(),
+            DictionaryValueArray::Vec(a) => a.iter().all(|v| matches!(v, ValueOrRef::Null)),
+            DictionaryValueArray::Set(a) => a.iter().all(|v| matches!(v, ValueOrRef::Null)),
+            DictionaryValueArray::Boolean => false,
+        }
+    }
+
+    pub fn transform_into_string_array(
+        self,
+    ) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
+        self.transform_into_array(
+            ArrayRef::as_string_opt,
+            |v| Some(v.to_string()),
+            StringArray::from_iter_values,
+        )
+    }
+
+    pub fn transform_into_int_array<T: ArrowPrimitiveType>(
+        self,
+    ) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>)
+    where
+        T::Native: Hash + Eq + TryFrom<i64>,
+        PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
+    {
+        self.transform_into_array(
+            ArrayRef::as_primitive_opt::<T>,
+            |v| v.to_int::<T::Native>(),
+            PrimitiveArray::<T>::from,
+        )
+    }
+
+    pub fn transform_into_timestamp_nanoseconds_array(
+        self,
+    ) -> (
+        PrimitiveArray<TimestampNanosecondType>,
+        Option<AHashMap<usize, Option<usize>>>,
+    ) {
+        self.transform_into_array(
+            ArrayRef::as_primitive_opt::<TimestampNanosecondType>,
+            |v| {
+                v.to_value()
+                    .convert_to_datetime()
+                    .and_then(|v| v.timestamp_nanos_opt())
+            },
+            PrimitiveArray::<TimestampNanosecondType>::from,
+        )
+    }
+
+    pub fn transform_into_fixed_sized_binary_array<const SIZE: usize>(
+        self,
+    ) -> (FixedSizeBinaryArray, Option<AHashMap<usize, Option<usize>>>) {
+        self.transform_into_array(
+            |v| {
+                v.as_fixed_size_binary_opt().and_then(|v| {
+                    if v.value_length() as usize == SIZE {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+            },
+            |v| match v {
+                ValueOrRef::Array(ArrayValueOrRef::Buffer(BufferArray::U8(values))) => {
+                    if values.len() == SIZE {
+                        Some(values)
+                    } else {
+                        None
+                    }
+                }
+                ValueOrRef::Array(array) => {
+                    if array.len() == SIZE {
+                        let mut buffer = MutableBuffer::from_len_zeroed(SIZE);
+                        let builder = buffer.as_mut_ptr();
+                        if array
+                            .as_array_value()
+                            .get_items(&mut IndexValueClosureCallback::new(|index, value| {
+                                if let Some(v) = value.convert_to_integer()
+                                    && let Ok(v) = TryInto::<u8>::try_into(v)
+                                {
+                                    unsafe { *builder.add(index) = v };
+                                    return true;
+                                }
+                                false
+                            }))
+                        {
+                            Some(BufferWrapper::new(buffer.into()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            |v| {
+                if v.is_empty() {
+                    FixedSizeBinaryArray::new_null(SIZE as i32, 0)
+                } else {
+                    FixedSizeBinaryArray::try_from_iter(v.into_iter()).expect("valid array")
+                }
+            },
+        )
+    }
+}
+
+impl<'a> DictionaryValueArray<'a> {
     pub fn get_value_at(&self, index: usize) -> ValueOrRef<'a> {
         match self {
             DictionaryValueArray::Array(a) => get_value_from_array(a, index),
@@ -174,104 +283,6 @@ impl<'a> DictionaryValueArray<'a> {
                 None,
             ),
         }
-    }
-
-    pub fn transform_into_string_array(
-        self,
-    ) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
-        self.transform_into_array(
-            ArrayRef::as_string_opt,
-            |v| Some(v.to_string()),
-            StringArray::from_iter_values,
-        )
-    }
-
-    pub fn transform_into_int_array<T: ArrowPrimitiveType>(
-        self,
-    ) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>)
-    where
-        T::Native: Hash + Eq + TryFrom<i64>,
-        PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
-    {
-        self.transform_into_array(
-            ArrayRef::as_primitive_opt::<T>,
-            |v| v.to_int::<T::Native>(),
-            PrimitiveArray::<T>::from,
-        )
-    }
-
-    pub fn transform_into_timestamp_nanoseconds_array(
-        self,
-    ) -> (
-        PrimitiveArray<TimestampNanosecondType>,
-        Option<AHashMap<usize, Option<usize>>>,
-    ) {
-        self.transform_into_array(
-            ArrayRef::as_primitive_opt::<TimestampNanosecondType>,
-            |v| {
-                v.to_value()
-                    .convert_to_datetime()
-                    .and_then(|v| v.timestamp_nanos_opt())
-            },
-            PrimitiveArray::<TimestampNanosecondType>::from,
-        )
-    }
-
-    pub fn transform_into_fixed_sized_binary_array<const SIZE: usize>(
-        self,
-    ) -> (FixedSizeBinaryArray, Option<AHashMap<usize, Option<usize>>>) {
-        self.transform_into_array(
-            |v| {
-                v.as_fixed_size_binary_opt().and_then(|v| {
-                    if v.value_length() as usize == SIZE {
-                        Some(v)
-                    } else {
-                        None
-                    }
-                })
-            },
-            |v| match v {
-                ValueOrRef::Array(ArrayValueOrRef::Buffer(BufferArray::U8(values))) => {
-                    if values.len() == SIZE {
-                        Some(values)
-                    } else {
-                        None
-                    }
-                }
-                ValueOrRef::Array(array) => {
-                    if array.len() == SIZE {
-                        let mut buffer = MutableBuffer::from_len_zeroed(SIZE);
-                        let builder = buffer.as_mut_ptr();
-                        if array
-                            .as_array_value()
-                            .get_items(&mut IndexValueClosureCallback::new(|index, value| {
-                                if let Some(v) = value.convert_to_integer()
-                                    && let Ok(v) = TryInto::<u8>::try_into(v)
-                                {
-                                    unsafe { *builder.add(index) = v };
-                                    return true;
-                                }
-                                false
-                            }))
-                        {
-                            Some(BufferWrapper::new(buffer.into()))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            },
-            |v| {
-                if v.is_empty() {
-                    FixedSizeBinaryArray::new_null(SIZE as i32, 0)
-                } else {
-                    FixedSizeBinaryArray::try_from_iter(v.into_iter()).expect("valid array")
-                }
-            },
-        )
     }
 }
 

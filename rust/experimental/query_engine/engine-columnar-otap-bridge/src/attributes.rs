@@ -251,6 +251,10 @@ impl<'record> OtapAttributesBatch<'record> {
         )
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.attributes_batch.num_rows()
+    }
+
     pub(crate) fn get_keys(&self) -> &'_ AdaptiveDictionaryReader<'record, StringArray> {
         &self.attribute_keys
     }

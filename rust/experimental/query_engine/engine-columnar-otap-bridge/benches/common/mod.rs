@@ -10,7 +10,7 @@ use otap_df_pdata::proto::OtlpProtoMessage;
 use otap_df_pdata::testing::fixtures::logs_with_varying_attributes_and_properties;
 use otap_df_pdata::testing::round_trip::otlp_to_otap;
 
-pub fn generate_logs_batch(batch_size: usize) -> Logs {
+fn generate_logs_batch(batch_size: usize) -> Logs {
     let logs_data = logs_with_varying_attributes_and_properties(batch_size);
     let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
     match pdata {

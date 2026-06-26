@@ -425,13 +425,23 @@ fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceive
         value.clone()
     };
 
-    diagnostic_receiver.add_diagnostic_if_enabled(
-        ColumnarEngineDiagnosticLevel::Verbose,
-        expression,
-        || format!("Field '{field:?}' set to: {value}"),
-    );
+    if value.is_null() {
+        diagnostic_receiver.add_diagnostic_if_enabled(
+            ColumnarEngineDiagnosticLevel::Verbose,
+            expression,
+            || format!("Field '{field:?}' removed"),
+        );
 
-    fields.set(field, OtapValue::Set(value));
+        fields.set(field, OtapValue::Removed);
+    } else {
+        diagnostic_receiver.add_diagnostic_if_enabled(
+            ColumnarEngineDiagnosticLevel::Verbose,
+            expression,
+            || format!("Field '{field:?}' set to: {value}"),
+        );
+
+        fields.set(field, OtapValue::Set(value));
+    }
 
     ColumnarRecordsWriteResult::Success
 }
@@ -459,10 +469,10 @@ fn process_attributes_update<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
 
             *attributes_modified = true;
 
-            let attributes_values =
+            let mut attributes_values =
                 match std::mem::replace(attributes_values_borrow.deref_mut(), OtapValue::Removed) {
                     OtapValue::NotFound | OtapValue::Removed => {
-                        Dictionary::new_null_with_data_type(values.len(), DataType::UInt16)
+                        Dictionary::new_null::<UInt16Type>(values.len())
                     }
                     OtapValue::Read(v) | OtapValue::Set(v) => v,
                 };
@@ -476,22 +486,34 @@ fn process_attributes_update<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
                     &path[2..],
                     values,
                 )
+            } else if key_filter.is_none() && values.is_null() {
+                attributes_values = Dictionary::new_null::<UInt16Type>(values.len());
+                attributes_values
             } else {
                 attributes_values.with_values(key_filter, values)
             };
 
-            diagnostic_receiver.add_diagnostic_if_enabled(
-                ColumnarEngineDiagnosticLevel::Verbose,
-                expression,
-                || {
-                    format!(
-                        "Attribute '{}' set to: {attributes_values}",
-                        attribute_key.get_value()
-                    )
-                },
-            );
+            if attributes_values.is_null() {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Verbose,
+                    expression,
+                    || format!("Attribute '{}' removed", attribute_key.get_value()),
+                );
+                *attributes_values_borrow.deref_mut() = OtapValue::Removed;
+            } else {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Verbose,
+                    expression,
+                    || {
+                        format!(
+                            "Attribute '{}' set to: {attributes_values}",
+                            attribute_key.get_value()
+                        )
+                    },
+                );
 
-            *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+                *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+            }
         }
         ColumnarEngineSelectionPath::Index {
             expression,
@@ -535,9 +557,9 @@ fn process_attributes_update<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
                 ),
             }
 
-            for (key, key_filter) in plan.into_iter() {
+            for (attribute_key, key_filter) in plan.into_iter() {
                 let (mut attributes_modified, mut attributes_values_borrow) =
-                    attributes.get_values(key.get_value());
+                    attributes.get_values(attribute_key.get_value());
 
                 *attributes_modified = true;
 
@@ -546,7 +568,7 @@ fn process_attributes_update<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
                     OtapValue::Removed,
                 ) {
                     OtapValue::NotFound | OtapValue::Removed => {
-                        Dictionary::new_null_with_data_type(values.len(), DataType::UInt16)
+                        Dictionary::new_null::<UInt16Type>(values.len())
                     }
                     OtapValue::Read(v) | OtapValue::Set(v) => v,
                 };
@@ -564,18 +586,27 @@ fn process_attributes_update<'a, T: ColumnarEngineDiagnosticReceiver<'a>>(
                     attributes_values.with_values(Some(&key_filter), values)
                 };
 
-                diagnostic_receiver.add_diagnostic_if_enabled(
-                    ColumnarEngineDiagnosticLevel::Verbose,
-                    expression,
-                    || {
-                        format!(
-                            "Attribute '{}' set to: {attributes_values}",
-                            key.get_value()
-                        )
-                    },
-                );
+                if attributes_values.is_null() {
+                    diagnostic_receiver.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Verbose,
+                        expression,
+                        || format!("Attribute '{}' removed", attribute_key.get_value()),
+                    );
+                    *attributes_values_borrow.deref_mut() = OtapValue::Removed;
+                } else {
+                    diagnostic_receiver.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Verbose,
+                        expression,
+                        || {
+                            format!(
+                                "Attribute '{}' set to: {attributes_values}",
+                                attribute_key.get_value()
+                            )
+                        },
+                    );
 
-                *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+                    *attributes_values_borrow.deref_mut() = OtapValue::Set(attributes_values);
+                }
             }
         }
     }

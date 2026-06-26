@@ -19,6 +19,28 @@ pub struct Dictionary<'a> {
     values: DictionaryValueArray<'a>,
 }
 
+impl Dictionary<'_> {
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.keys.is_null() || self.values.is_null()
+    }
+
+    pub fn keys(&self) -> &DictionaryKeyArray {
+        &self.keys
+    }
+
+    pub fn get_value_index(&self, key_index: usize) -> Option<usize> {
+        self.keys.get_value_index_for_key_index(key_index)
+    }
+}
+
 impl<'a> Dictionary<'a> {
     pub fn new(keys: DictionaryKeyArray, values: DictionaryValueArray<'a>) -> Dictionary<'a> {
         Self { keys, values }
@@ -97,28 +119,12 @@ impl<'a> Dictionary<'a> {
         )
     }
 
-    pub fn len(&self) -> usize {
-        self.keys.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
-
-    pub fn keys(&self) -> &DictionaryKeyArray {
-        &self.keys
-    }
-
     pub fn values(&self) -> &DictionaryValueArray<'a> {
         &self.values
     }
 
     pub fn into_parts(self) -> (DictionaryKeyArray, DictionaryValueArray<'a>) {
         (self.keys, self.values)
-    }
-
-    pub fn get_value_index(&self, key_index: usize) -> Option<usize> {
-        self.keys.get_value_index_for_key_index(key_index)
     }
 
     pub fn get_value(&self, key_index: usize) -> ValueOrRef<'a> {
@@ -210,10 +216,32 @@ fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
     values: &Dictionary<'a>,
 ) -> Dictionary<'a> {
     let (mut source_values, lookup) = source_values.into_set();
+
+    if key_filter.is_none()
+        && let DictionaryKeyArray::SingleValue {
+            data_type,
+            length,
+            value_index,
+        } = values.keys()
+    {
+        return match value_index {
+            Some(value_index) => {
+                let v = values.values().get_value_at(*value_index);
+                if matches!(v, ValueOrRef::Null) {
+                    Dictionary::new_null_with_data_type(*length, data_type.clone())
+                } else {
+                    Dictionary::new_scalar_with_data_type(data_type.clone(), *length, v)
+                }
+            }
+            None => Dictionary::new_null_with_data_type(*length, data_type.clone()),
+        };
+    }
+
     let mut source_key_builder = source_keys.transform_into_key_builder::<K>(lookup);
 
     let key_length = source_key_builder.get_key_length();
     let mut source_key_writer = source_key_builder.get_writer();
+
     let mut visited_values = AHashMap::with_capacity(source_values.len());
 
     match key_filter {
