@@ -352,7 +352,11 @@ where
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    let (mut transformed_values, value_index_lookup) = values.into_set();
+    let (mut transformed_values, value_index_lookup) =
+        values.transform_into_set(&mut |v| match transform(v) {
+            ValueOrRef::Null => None,
+            v => Some(v),
+        });
 
     let mut null_index = None;
 
@@ -414,7 +418,11 @@ where
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    let (mut transformed_values, value_index_lookup) = values.into_set();
+    let (mut transformed_values, value_index_lookup) =
+        values.transform_into_set(&mut |v| match transform(v) {
+            ValueOrRef::Null => None,
+            v => Some(v),
+        });
 
     let mut null_index = None;
 
