@@ -7,7 +7,11 @@ use std::{
 };
 
 use ahash::AHashMap;
-use arrow::{array::*, datatypes::*};
+use arrow::{
+    array::*,
+    buffer::{MutableBuffer, NullBuffer},
+    datatypes::*,
+};
 use data_engine_expressions::*;
 use roaring::RoaringBitmap;
 
@@ -30,6 +34,47 @@ impl Dictionary<'_> {
 
     pub fn is_null(&self) -> bool {
         self.keys.is_null() || self.values.is_null()
+    }
+
+    pub fn nulls(&self) -> Option<NullBuffer> {
+        let key_nulls = self.keys.nulls();
+
+        if let Some(v) = key_nulls.as_ref()
+            && v.null_count() == self.keys.len()
+        {
+            return key_nulls;
+        }
+
+        if let Some(value_nulls) = self.values.nulls()
+            && value_nulls.null_count() > 0
+        {
+            let key_length = self.keys.len();
+
+            let mut builder: BooleanBufferBuilder = key_nulls.map_or_else(
+                || {
+                    let mut buffer = MutableBuffer::new_null(key_length);
+                    buffer.fill(0xFF);
+                    BooleanBufferBuilder::new_from_buffer(buffer, key_length)
+                },
+                |v| {
+                    let mut b = MutableBuffer::with_capacity(v.len());
+                    b.extend_from_slice(v.validity());
+                    BooleanBufferBuilder::new_from_buffer(b, v.len())
+                },
+            );
+
+            for key_index in 0..key_length {
+                if let Some(value_index) = self.keys.get_value_index_for_key_index(key_index)
+                    && value_nulls.is_null(value_index)
+                {
+                    builder.set_bit(key_index, false);
+                }
+            }
+
+            return Some(NullBuffer::new(builder.into()));
+        }
+
+        key_nulls
     }
 
     pub fn keys(&self) -> &DictionaryKeyArray {

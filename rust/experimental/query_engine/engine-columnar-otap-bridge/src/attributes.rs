@@ -144,21 +144,250 @@ impl Display for OtapAttributes<'_, '_> {
 
 #[derive(Debug)]
 pub struct OtapAttributesBatch<'record> {
-    ids: OtapIds<'record>,
-    parent_ids: OtapParentIds<'record>,
-    id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
-    attributes_batch: &'record RecordBatch,
-    attribute_keys: AdaptiveDictionaryReader<'record, GenericByteArray<GenericStringType<i32>>>,
-    attribute_types: &'record PrimitiveArray<UInt8Type>,
-    attribute_string_keys: &'record PrimitiveArray<UInt16Type>,
-    attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
-    attribute_ints: Option<TypedDictionaryArray<'record, UInt16Type, PrimitiveArray<Int64Type>>>,
-    attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
-    attribute_bools: Option<&'record BooleanArray>,
-    attribute_bytes_keys: Option<&'record PrimitiveArray<UInt16Type>>,
-    attribute_bytes_values: Option<&'record GenericBinaryArray<i32>>,
-    attribute_ser_keys: Option<&'record PrimitiveArray<UInt16Type>>,
-    attribute_ser_values: Option<&'record GenericBinaryArray<i32>>,
+    pub(crate) ids: OtapIds<'record>,
+    pub(crate) parent_ids: OtapParentIds<'record>,
+    pub(crate) id_to_record_index_map: OnceCell<PrimitiveArray<UInt16Type>>,
+    pub(crate) attributes_batch: &'record RecordBatch,
+    pub(crate) attribute_keys:
+        AdaptiveDictionaryReader<'record, GenericByteArray<GenericStringType<i32>>>,
+    pub(crate) attribute_types: &'record PrimitiveArray<UInt8Type>,
+    pub(crate) attribute_string_keys: &'record PrimitiveArray<UInt16Type>,
+    pub(crate) attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
+    pub(crate) attribute_ints:
+        Option<TypedDictionaryArray<'record, UInt16Type, PrimitiveArray<Int64Type>>>,
+    pub(crate) attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
+    pub(crate) attribute_bools: Option<&'record BooleanArray>,
+    pub(crate) attribute_bytes:
+        Option<TypedDictionaryArray<'record, UInt16Type, GenericBinaryArray<i32>>>,
+    pub(crate) attribute_sers:
+        Option<TypedDictionaryArray<'record, UInt16Type, GenericBinaryArray<i32>>>,
+}
+
+impl OtapAttributesBatch<'_> {
+    pub fn get_values(&self, key: &str) -> Option<Dictionary<'static>> {
+        let record_count = self.ids.len();
+
+        if let Some(value_index) = self
+            .attribute_keys
+            .values()
+            .iter()
+            .flatten()
+            .position(|v| v == key)
+        {
+            let mut key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
+            let keys = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
+
+            let mut null_buffer =
+                MutableBuffer::from_len_zeroed(arrow::util::bit_util::ceil(record_count, 8));
+            let nulls = null_buffer.typed_data_mut::<u8>().as_mut_ptr();
+            let mut null_count = record_count;
+
+            let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
+            let mut values = Vec::with_capacity(record_count);
+
+            let attribute_types = self.attribute_types.values().as_ptr();
+            let attribute_parent_ids = self.parent_ids.get_ids().values().as_ptr();
+            let id_to_record_index_map = self.get_id_to_record_index_map().values().as_ptr();
+
+            for (attribute_index, key_value_index) in self.attribute_keys.key_iter().enumerate() {
+                if key_value_index == value_index {
+                    let attribute_type = unsafe { *attribute_types.add(attribute_index) };
+                    if let Some(attribute_value) =
+                        self.get_attribute_value_or_index(attribute_index, attribute_type)
+                    {
+                        let index = match attribute_value {
+                            AttributeValueOrIndex::ValueIndex(attribute_value_index) => {
+                                let lookup_key =
+                                    ((attribute_type as usize) << 16) | attribute_value_index;
+                                match value_lookup.entry(lookup_key) {
+                                    Entry::Occupied(occupied) => *occupied.get(),
+                                    Entry::Vacant(vacant) => {
+                                        let index = values.len();
+                                        values.push(unsafe {
+                                            self.get_attribute_value_unchecked(
+                                                attribute_type,
+                                                attribute_value_index,
+                                            )
+                                        });
+                                        *vacant.insert(index as u16)
+                                    }
+                                }
+                            }
+                            AttributeValueOrIndex::Value(attribute_value) => {
+                                let index = values.len() as u16;
+                                values.push(attribute_value);
+                                index
+                            }
+                        };
+
+                        let parent_id = unsafe { *attribute_parent_ids.add(attribute_index) };
+                        let record_index =
+                            unsafe { *id_to_record_index_map.add(parent_id as usize) };
+
+                        unsafe { *keys.add(record_index as usize) = index };
+                        unsafe { arrow::util::bit_util::set_bit_raw(nulls, record_index as usize) };
+                        null_count -= 1;
+                    }
+                }
+            }
+
+            let keys = if null_count > 0 {
+                PrimitiveArray::<UInt16Type>::new(
+                    key_buffer.into(),
+                    NullBufferBuilder::new_from_buffer(null_buffer, record_count).build(),
+                )
+                .into()
+            } else {
+                PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
+            };
+
+            Some(Dictionary::new(
+                keys,
+                DictionaryValueArray::Vec(values.into()),
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.attributes_batch.num_rows()
+    }
+
+    pub(crate) fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
+        // Note: id_map is an array of parent_ids (record identifier in the
+        // attribute table) to the actual index of the record in the root table.
+        self.id_to_record_index_map.get_or_init(|| {
+            let ids = self.ids.get_ids();
+            let mut id_map_length = ids.len();
+            let mut id_map_buffer = MutableBuffer::from_len_zeroed(id_map_length * 2);
+            let mut id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
+            for (record_index, id) in ids.iter().enumerate() {
+                if let Some(id) = id {
+                    let id = id as usize;
+                    if id >= id_map_length {
+                        // If the data is malformed or a filter was run there
+                        // could be parent ids greater than the number of
+                        // records. In this case we need additional capacity to
+                        // make the lookup array the correct size.
+                        let additional_capacity = id - id_map_length + 1;
+                        id_map_buffer.extend_zeros(additional_capacity * 2);
+                        id_map_length += additional_capacity;
+                        id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
+                    }
+                    unsafe { *id_map.add(id) = record_index as u16 };
+                }
+            }
+            PrimitiveArray::<UInt16Type>::new(id_map_buffer.into(), None)
+        })
+    }
+
+    pub(crate) fn get_attribute_value_or_index(
+        &self,
+        attribute_index: usize,
+        attribute_type: u8,
+    ) -> Option<AttributeValueOrIndex> {
+        match attribute_type {
+            EMPTY_ATTRIBUTE_VALUE_TYPE => {}
+            STRING_ATTRIBUTE_VALUE_TYPE => {
+                let keys = self.attribute_string_keys;
+                return Some(if keys.is_valid(attribute_index) {
+                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
+                    AttributeValueOrIndex::ValueIndex(value_index as usize)
+                } else {
+                    AttributeValueOrIndex::Value(ValueOrRef::String(StringValueOrRef::Empty))
+                });
+            }
+            INT_ATTRIBUTE_VALUE_TYPE => {
+                return Some(
+                    if let Some(ints) = self.attribute_ints
+                        && ints.is_valid(attribute_index)
+                    {
+                        let value = unsafe { ints.value_unchecked(attribute_index) };
+                        AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
+                    } else {
+                        AttributeValueOrIndex::Value(ValueOrRef::Integer(0))
+                    },
+                );
+            }
+            DOUBLE_ATTRIBUTE_VALUE_TYPE => {
+                return Some(
+                    if let Some(doubles) = self.attribute_doubles
+                        && doubles.is_valid(attribute_index)
+                    {
+                        let value = unsafe { doubles.value_unchecked(attribute_index) };
+                        AttributeValueOrIndex::Value(ValueOrRef::Double(value))
+                    } else {
+                        AttributeValueOrIndex::Value(ValueOrRef::Double(0f64))
+                    },
+                );
+            }
+            BOOL_ATTRIBUTE_VALUE_TYPE => {
+                if let Some(bools) = self.attribute_bools
+                    && bools.is_valid(attribute_index)
+                {
+                    let value = unsafe { bools.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
+                }
+            }
+            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
+                if let Some(keys) = self.attribute_sers.map(|v| v.keys())
+                    && keys.is_valid(attribute_index)
+                {
+                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index as usize));
+                }
+            }
+            BYTES_ATTRIBUTE_VALUE_TYPE => {
+                if let Some(keys) = self.attribute_bytes.map(|v| v.keys())
+                    && keys.is_valid(attribute_index)
+                {
+                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index as usize));
+                }
+            }
+            d => panic!("Attribute type '{d}' is not supported"),
+        }
+
+        None
+    }
+
+    pub(crate) unsafe fn get_attribute_value_unchecked(
+        &self,
+        attribute_type: u8,
+        attribute_value_index: usize,
+    ) -> ValueOrRef<'static> {
+        match attribute_type {
+            STRING_ATTRIBUTE_VALUE_TYPE => ValueOrRef::String(StringValueOrRef::Buffer({
+                unsafe {
+                    get_generic_byte_array_buffer_value_unchecked(
+                        self.attribute_string_values,
+                        attribute_value_index,
+                    )
+                }
+            })),
+            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
+                let value = unsafe {
+                    self.attribute_sers
+                        .expect("has ser values")
+                        .values()
+                        .value_unchecked(attribute_value_index)
+                };
+
+                // todo: Should we log deserialization failure somewhere?
+                crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
+            }
+            BYTES_ATTRIBUTE_VALUE_TYPE => ValueOrRef::Array(ArrayValueOrRef::Buffer({
+                BufferArray::new_u8(unsafe {
+                    get_generic_byte_array_buffer_value_unchecked(
+                        self.attribute_bytes.expect("has bytes values").values(),
+                        attribute_value_index,
+                    )
+                })
+            })),
+            d => panic!("Attribute type '{d}' is not supported"),
+        }
+    }
 }
 
 impl<'record> OtapAttributesBatch<'record> {
@@ -228,10 +457,8 @@ impl<'record> OtapAttributesBatch<'record> {
             attribute_bools: attributes_batch
                 .column_by_name(consts::ATTRIBUTE_BOOL)
                 .map(|c| c.as_boolean()),
-            attribute_bytes_keys: bytes.map(|v| v.keys()),
-            attribute_bytes_values: bytes.map(|v| v.values()),
-            attribute_ser_keys: ser.map(|v| v.keys()),
-            attribute_ser_values: ser.map(|v| v.values()),
+            attribute_bytes: bytes,
+            attribute_sers: ser,
         }
     }
 
@@ -250,263 +477,9 @@ impl<'record> OtapAttributesBatch<'record> {
             attributes_batch,
         )
     }
-
-    pub(crate) fn len(&self) -> usize {
-        self.attributes_batch.num_rows()
-    }
-
-    pub(crate) fn get_keys(&self) -> &'_ AdaptiveDictionaryReader<'record, StringArray> {
-        &self.attribute_keys
-    }
-
-    pub(crate) fn get_attribute_types(&self) -> &'record PrimitiveArray<UInt8Type> {
-        self.attribute_types
-    }
-
-    pub(crate) fn get_attribute_parent_ids(&self) -> &'_ PrimitiveArray<UInt16Type> {
-        self.parent_ids.get_ids()
-    }
-
-    pub fn get_values(&self, key: &str) -> Option<Dictionary<'static>> {
-        let record_count = self.ids.len();
-
-        if let Some(value_index) = self
-            .attribute_keys
-            .values()
-            .iter()
-            .flatten()
-            .position(|v| v == key)
-        {
-            let mut key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
-            let keys = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
-
-            let mut null_buffer =
-                MutableBuffer::from_len_zeroed(arrow::util::bit_util::ceil(record_count, 8));
-            let nulls = null_buffer.typed_data_mut::<u8>().as_mut_ptr();
-            let mut null_count = record_count;
-
-            let mut value_lookup: AHashMap<usize, u16> = AHashMap::with_capacity(record_count);
-            let mut values = Vec::with_capacity(record_count);
-
-            let attribute_types = self.attribute_types.values().as_ptr();
-            let attribute_parent_ids = self.parent_ids.get_ids().values().as_ptr();
-            let id_to_record_index_map = self.get_id_to_record_index_map().values().as_ptr();
-
-            for (attribute_index, key_value_index) in self.attribute_keys.key_iter().enumerate() {
-                if key_value_index == value_index {
-                    let attribute_type = unsafe { *attribute_types.add(attribute_index) };
-                    if let Some(attribute_value) =
-                        self.get_attribute_value_or_index(attribute_index, attribute_type)
-                    {
-                        let index = match attribute_value {
-                            AttributeValueOrIndex::ValueIndex(attribute_value_index) => {
-                                let lookup_key = ((attribute_type as usize) << 16)
-                                    | attribute_value_index as usize;
-                                match value_lookup.entry(lookup_key) {
-                                    Entry::Occupied(occupied) => *occupied.get(),
-                                    Entry::Vacant(vacant) => {
-                                        let index = values.len();
-                                        values.push(self.get_attribute_value(
-                                            attribute_type,
-                                            attribute_value_index,
-                                        ));
-                                        *vacant.insert(index as u16)
-                                    }
-                                }
-                            }
-                            AttributeValueOrIndex::Value(attribute_value) => {
-                                let index = values.len() as u16;
-                                values.push(attribute_value);
-                                index
-                            }
-                        };
-
-                        let parent_id = unsafe { *attribute_parent_ids.add(attribute_index) };
-                        let record_index =
-                            unsafe { *id_to_record_index_map.add(parent_id as usize) };
-
-                        unsafe { *keys.add(record_index as usize) = index };
-                        unsafe { arrow::util::bit_util::set_bit_raw(nulls, record_index as usize) };
-                        null_count -= 1;
-                    }
-                }
-            }
-
-            let keys = if null_count > 0 {
-                PrimitiveArray::<UInt16Type>::new(
-                    key_buffer.into(),
-                    NullBufferBuilder::new_from_buffer(null_buffer, record_count).build(),
-                )
-                .into()
-            } else {
-                PrimitiveArray::<UInt16Type>::new(key_buffer.into(), None).into()
-            };
-
-            Some(Dictionary::new(
-                keys,
-                DictionaryValueArray::Vec(values.into()),
-            ))
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn get_id_to_record_index_map(&self) -> &PrimitiveArray<UInt16Type> {
-        // Note: id_map is an array of parent_ids (record identifier in the
-        // attribute table) to the actual index of the record in the root table.
-        self.id_to_record_index_map.get_or_init(|| {
-            let ids = self.ids.get_ids();
-            let mut id_map_length = ids.len();
-            let mut id_map_buffer = MutableBuffer::from_len_zeroed(id_map_length * 2);
-            let mut id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
-            for (record_index, id) in ids.iter().enumerate() {
-                if let Some(id) = id {
-                    let id = id as usize;
-                    if id >= id_map_length {
-                        // If the data is malformed or a filter was run there
-                        // could be parent ids greater than the number of
-                        // records. In this case we need additional capacity to
-                        // make the lookup array the correct size.
-                        let additional_capacity = id - id_map_length + 1;
-                        id_map_buffer.extend_zeros(additional_capacity * 2);
-                        id_map_length += additional_capacity;
-                        id_map = id_map_buffer.typed_data_mut::<u16>().as_mut_ptr();
-                    }
-                    unsafe { *id_map.add(id) = record_index as u16 };
-                }
-            }
-            PrimitiveArray::<UInt16Type>::new(id_map_buffer.into(), None)
-        })
-    }
-
-    pub(crate) fn get_attribute_value_or_index(
-        &self,
-        attribute_index: usize,
-        attribute_type: u8,
-    ) -> Option<AttributeValueOrIndex> {
-        match attribute_type {
-            EMPTY_ATTRIBUTE_VALUE_TYPE => {}
-            STRING_ATTRIBUTE_VALUE_TYPE => {
-                let keys = self.attribute_string_keys;
-                return Some(if keys.is_valid(attribute_index) {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    AttributeValueOrIndex::ValueIndex(value_index)
-                } else {
-                    AttributeValueOrIndex::Value(ValueOrRef::String(StringValueOrRef::Empty))
-                });
-            }
-            INT_ATTRIBUTE_VALUE_TYPE => {
-                return Some(
-                    if let Some(ints) = self.attribute_ints
-                        && ints.is_valid(attribute_index)
-                    {
-                        let value = unsafe { ints.value_unchecked(attribute_index) };
-                        AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::Integer(0))
-                    },
-                );
-            }
-            DOUBLE_ATTRIBUTE_VALUE_TYPE => {
-                return Some(
-                    if let Some(doubles) = self.attribute_doubles
-                        && doubles.is_valid(attribute_index)
-                    {
-                        let value = unsafe { doubles.value_unchecked(attribute_index) };
-                        AttributeValueOrIndex::Value(ValueOrRef::Double(value))
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::Double(0f64))
-                    },
-                );
-            }
-            BOOL_ATTRIBUTE_VALUE_TYPE => {
-                if let Some(bools) = self.attribute_bools
-                    && bools.is_valid(attribute_index)
-                {
-                    let value = unsafe { bools.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
-                }
-            }
-            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
-                if let Some(keys) = self.attribute_ser_keys
-                    && keys.is_valid(attribute_index)
-                {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
-            }
-            BYTES_ATTRIBUTE_VALUE_TYPE => {
-                if let Some(keys) = self.attribute_bytes_keys
-                    && keys.is_valid(attribute_index)
-                {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
-                }
-            }
-            d => panic!("Attribute type '{d}' is not supported"),
-        }
-
-        None
-    }
-
-    pub(crate) fn get_attribute_value(
-        &self,
-        attribute_type: u8,
-        attribute_value_index: u16,
-    ) -> ValueOrRef<'static> {
-        match attribute_type {
-            STRING_ATTRIBUTE_VALUE_TYPE => ValueOrRef::String(StringValueOrRef::Buffer({
-                get_generic_byte_array_buffer_value(
-                    self.attribute_string_values,
-                    attribute_value_index as usize,
-                )
-            })),
-            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
-                let value = unsafe {
-                    self.attribute_ser_values
-                        .expect("has ser values")
-                        .value_unchecked(attribute_value_index as usize)
-                };
-
-                // todo: Should we log deserialization failure somewhere?
-                crate::serialization::from_slice(value).unwrap_or(ValueOrRef::Null)
-            }
-            BYTES_ATTRIBUTE_VALUE_TYPE => ValueOrRef::Array(ArrayValueOrRef::Buffer({
-                BufferArray::new_u8(get_generic_byte_array_buffer_value(
-                    self.attribute_bytes_values.expect("has bytes values"),
-                    attribute_value_index as usize,
-                ))
-            })),
-            d => panic!("Attribute type '{d}' is not supported"),
-        }
-    }
-
-    pub(crate) fn get_attribute_value_buffer(
-        &self,
-        attribute_type: u8,
-        attribute_value_index: u16,
-    ) -> Buffer {
-        match attribute_type {
-            STRING_ATTRIBUTE_VALUE_TYPE => get_generic_byte_array_buffer_value(
-                self.attribute_string_values,
-                attribute_value_index as usize,
-            ),
-            MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
-                get_generic_byte_array_buffer_value(
-                    self.attribute_ser_values.expect("has ser values"),
-                    attribute_value_index as usize,
-                )
-            }
-            BYTES_ATTRIBUTE_VALUE_TYPE => get_generic_byte_array_buffer_value(
-                self.attribute_bytes_values.expect("has bytes values"),
-                attribute_value_index as usize,
-            ),
-            d => panic!("Attribute type '{d}' is not supported"),
-        }
-    }
 }
 
-fn get_generic_byte_array_buffer_value<T: ByteArrayType>(
+pub(crate) unsafe fn get_generic_byte_array_buffer_value_unchecked<T: ByteArrayType>(
     bytes: &GenericByteArray<T>,
     value_index: usize,
 ) -> Buffer {
@@ -545,6 +518,17 @@ impl<'a, V: 'static> AdaptiveDictionaryReader<'a, V> {
         }
     }
 
+    pub fn keys_u16(&self) -> bool {
+        matches!(self, AdaptiveDictionaryReader::UInt16(_))
+    }
+
+    pub fn keys_slice(&self) -> &[u8] {
+        match self {
+            AdaptiveDictionaryReader::UInt8(d) => d.keys().values(),
+            AdaptiveDictionaryReader::UInt16(d) => d.keys().values().to_byte_slice(),
+        }
+    }
+
     pub fn key_iter(&self) -> AdaptiveDictionaryReaderKeyIterator<'a> {
         match self {
             AdaptiveDictionaryReader::UInt8(d) => {
@@ -560,6 +544,27 @@ impl<'a, V: 'static> AdaptiveDictionaryReader<'a, V> {
         match self {
             AdaptiveDictionaryReader::UInt8(d) => d.values(),
             AdaptiveDictionaryReader::UInt16(d) => d.values(),
+        }
+    }
+
+    pub fn get_value_index_for_key_index(&self, index: usize) -> Option<usize> {
+        match self {
+            AdaptiveDictionaryReader::UInt8(d) => {
+                let keys = d.keys();
+                if keys.is_valid(index) {
+                    Some(unsafe { d.keys().value_unchecked(index) } as usize)
+                } else {
+                    None
+                }
+            }
+            AdaptiveDictionaryReader::UInt16(d) => {
+                let keys = d.keys();
+                if keys.is_valid(index) {
+                    Some(unsafe { keys.value_unchecked(index) } as usize)
+                } else {
+                    None
+                }
+            }
         }
     }
 }
@@ -581,7 +586,7 @@ impl<'a> Iterator for AdaptiveDictionaryReaderKeyIterator<'a> {
 }
 
 pub(crate) enum AttributeValueOrIndex {
-    ValueIndex(u16),
+    ValueIndex(usize),
     Value(ValueOrRef<'static>),
 }
 

@@ -3,10 +3,13 @@
 
 use std::{marker::PhantomData, sync::Arc};
 
-use ahash::AHashMap;
-use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
+use arrow::{
+    array::*,
+    buffer::{MutableBuffer, NullBuffer},
+    datatypes::*,
+};
 
-use crate::dictionary_transform::push_null;
+use crate::{dictionary_transform::push_null, *};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DictionaryKeyArray {
@@ -84,6 +87,31 @@ impl DictionaryKeyArray {
         }
     }
 
+    pub fn nulls(&self) -> Option<NullBuffer> {
+        match self {
+            DictionaryKeyArray::KeyArray(array) => array.nulls().cloned(),
+            DictionaryKeyArray::BooleanArray {
+                data_type: _,
+                values,
+            } => values.nulls().cloned(),
+            DictionaryKeyArray::UniqueValues {
+                data_type: _,
+                length: _,
+            } => None,
+            DictionaryKeyArray::SingleValue {
+                data_type: _,
+                length,
+                value_index,
+            } => {
+                if value_index.is_none() {
+                    Some(NullBuffer::new_null(*length))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     pub fn data_type(&self) -> DataType {
         match self {
             DictionaryKeyArray::KeyArray(a) => a.data_type().clone(),
@@ -136,14 +164,14 @@ impl DictionaryKeyArray {
 
     pub fn transform_into_key_array<KOutput: ArrowDictionaryKeyType>(
         self,
-        value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
+        value_index_lookup: IndexLookup,
     ) -> PrimitiveArray<KOutput> {
         self.transform_into_key_builder(value_index_lookup).finish()
     }
 
     pub(crate) fn transform_into_key_builder<KOutput: ArrowDictionaryKeyType>(
         self,
-        value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
+        value_index_lookup: IndexLookup,
     ) -> DictionaryKeyArrayBuilder<KOutput> {
         match self {
             DictionaryKeyArray::KeyArray(array) => match array.data_type() {
@@ -306,7 +334,7 @@ fn transform_key_array_into_key_builder<
     KOutput: ArrowDictionaryKeyType,
 >(
     keys: &PrimitiveArray<KInput>,
-    value_index_lookup: Option<AHashMap<usize, Option<usize>>>,
+    value_index_lookup: IndexLookup,
 ) -> DictionaryKeyArrayBuilder<KOutput> {
     let mut builder = DictionaryKeyArrayBuilder::<KOutput>::new(keys.len());
     let mut writer = builder.get_writer();

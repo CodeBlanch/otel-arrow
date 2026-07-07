@@ -1,9 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::hash_map::Entry, hash::Hash, marker::PhantomData, rc::Rc, sync::Arc};
+use std::{hash::Hash, rc::Rc, sync::Arc};
 
-use ahash::AHashMap;
+use ahash::{AHashMap, RandomState};
 use arrow::{
     array::*,
     buffer::{BooleanBuffer, MutableBuffer},
@@ -151,7 +151,7 @@ pub(crate) fn adaptive_dictionary_writer<'a, T: Array + 'static, FTransform>(
     transform: FTransform,
 ) -> Option<Arc<dyn Array>>
 where
-    FTransform: Fn(DictionaryValueArray<'a>) -> (T, Option<AHashMap<usize, Option<usize>>>),
+    FTransform: Fn(DictionaryValueArray<'a>) -> (T, IndexLookup),
 {
     let (transformed_values, lookup) = transform(values);
 
@@ -175,8 +175,7 @@ pub(crate) fn primitive_array_writer<'a, T: ArrowPrimitiveType, FTransform>(
 where
     T::Native: Hash + Eq + TryFrom<i64>,
     PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
-    FTransform:
-        Fn(DictionaryValueArray<'a>) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>),
+    FTransform: Fn(DictionaryValueArray<'a>) -> (PrimitiveArray<T>, IndexLookup),
 {
     let (transformed_values, lookup) = transform(values);
 
@@ -209,851 +208,2030 @@ where
     Some(Arc::new(builder.finish()))
 }
 
-#[derive(Hash, PartialEq, Eq)]
-enum VecOrBuffer {
-    Vec(Vec<u8>),
-    Buffer(BufferWrapper<u8>),
-}
-
 pub(crate) fn attributes_writer<'a>(
     record_count: usize,
     values: AHashMap<Box<str>, OtapValue<'a>>,
     attributes_batch: Option<OtapAttributesBatch<'_>>,
 ) -> Option<(Arc<dyn Array>, RecordBatch)> {
-    debug_assert!(!values.is_empty());
+    let upsert_nulls = AHashMap::from_iter(values.iter().filter_map(|(k, v)| {
+        if let OtapValue::Set(dictionary) = v {
+            debug_assert!(!dictionary.is_empty() && !dictionary.is_null());
+            Some((k, (dictionary.len(), dictionary.nulls())))
+        } else {
+            None
+        }
+    }));
 
-    let attribute_capacity =
-        attributes_batch.as_ref().map_or(0, |v| v.len()) + (values.len() * record_count); // todo: could possibly improve this by checking nulls inside values
+    let upsert_attribute_count = upsert_nulls
+        .iter()
+        .map(|(_, (len, nulls))| len - nulls.as_ref().map_or(0, |v| v.null_count()))
+        .sum();
 
-    let mut mapping = Vec::with_capacity(attribute_capacity);
-    let mut key_dict_values_builder = StringBuilder::new();
-    let mut types_array_builder = Vec::with_capacity(attribute_capacity);
-    let mut strings_dict_values_builder =
-        AttributeStringValueArrayBuilder::with_capacity(attribute_capacity);
-
-    let mut int_values = None;
-    let mut double_values = None;
-    let mut sers_values = None;
-    let mut bytes_values = None;
-
-    let mut lookup: AHashMap<(u8, usize), (u8, Option<usize>)> =
-        AHashMap::with_capacity(attribute_capacity);
-
-    if let Some(attributes_batch) = attributes_batch {
+    let attributes_builder = if let Some(attributes_batch) = attributes_batch {
         process_attributes_batch(
-            &values,
-            &mut mapping,
-            &mut key_dict_values_builder,
-            &mut types_array_builder,
-            &mut strings_dict_values_builder,
-            &mut int_values,
-            &mut double_values,
-            &mut sers_values,
-            &mut bytes_values,
-            &mut lookup,
+            record_count,
             attributes_batch,
-        );
+            upsert_nulls.len(),
+            upsert_nulls.keys().map(|v| v.len()).sum(),
+            upsert_attribute_count,
+            &values,
+        )
+    } else {
+        None
+    };
+
+    if upsert_attribute_count > 0 {
+        let mut attributes_builder = attributes_builder.unwrap_or_else(|| {
+            AttributesBuilder::new(
+                record_count,
+                upsert_nulls.len(),
+                upsert_nulls.keys().map(|v| v.len()).sum(),
+                upsert_attribute_count,
+            )
+        });
+
+        for (key, value) in values {
+            if let OtapValue::Set(value) = value {
+                debug_assert!(!value.is_empty() && !value.is_null());
+
+                let (keys, values) = value.into_parts();
+                if let DictionaryKeyArray::SingleValue {
+                    data_type: _,
+                    length: _,
+                    value_index,
+                } = keys
+                {
+                    if let Some(value_index) = value_index {
+                        attributes_builder.push_key_value_for_all_records(
+                            key.as_ref(),
+                            values.get_value_at(value_index),
+                        );
+                    }
+                    continue;
+                } else {
+                    let key_index = attributes_builder.push_key(&key);
+
+                    for record_index in 0..keys.len() {
+                        let value = match keys.get_value_index_for_key_index(record_index) {
+                            None => continue,
+                            Some(v) => values.get_value_at(v),
+                        };
+
+                        attributes_builder.push_value_for_key(record_index, key_index, value);
+                    }
+                }
+            }
+        }
+
+        Some(attributes_builder.finish())
+    } else {
+        attributes_builder.map(|v| v.finish())
     }
+}
 
-    process_values(
-        values,
-        &mut mapping,
-        &mut key_dict_values_builder,
-        &mut types_array_builder,
-        &mut strings_dict_values_builder,
-        &mut int_values,
-        &mut double_values,
-        &mut sers_values,
-        &mut bytes_values,
-        &mut lookup,
-    );
+fn process_attributes_batch<'a>(
+    record_count: usize,
+    attributes_batch: OtapAttributesBatch<'_>,
+    upsert_key_count: usize,
+    upsert_key_capacity: usize,
+    upsert_attribute_count: usize,
+    values: &AHashMap<Box<str>, OtapValue<'a>>,
+) -> Option<AttributesBuilder<'a>> {
+    let attribute_keys = &attributes_batch.attribute_keys;
+    let attribute_key_values = attribute_keys.values();
 
-    let mut ids_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
-    let mut ids_null_buffer = MutableBuffer::new_null(record_count);
-    let ids = ids_buffer.typed_data_mut::<u16>().as_mut_ptr();
-    let ids_null = &mut ids_null_buffer;
+    let attribute_key_count = attribute_key_values.len();
+    let mut keys_to_skip = None;
+    let mut key_capacity = 0;
 
-    let attribute_count = mapping.len();
-
-    let mut parent_ids_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
-    let parent_ids = parent_ids_buffer.typed_data_mut::<u16>().as_mut_ptr();
-
-    let mut keys_dict_key_builder =
-        AdaptiveKeyAttributeArrayBuilder::new(attribute_count, key_dict_values_builder.len());
-    let mut keys_dict_key_writer = keys_dict_key_builder.get_writer();
-
-    let mut strings_dict_keys_builder =
-        AttributeKeyArrayBuilder::<UInt16Type>::new(attribute_count);
-    let mut strings_dict_keys_writer = strings_dict_keys_builder.get_writer();
-
-    let mut ints = None;
-    let mut doubles = None;
-    let mut bools = None;
-    let mut sers = None;
-    let mut bytes = None;
-
-    let mut parent_id_lookup: Vec<Option<usize>> = vec![None; record_count];
-
-    let mut current_parent_id = 0;
-
-    for (new_attribute_index, (record_index, new_key_index, attribute_type, new_value_index)) in
-        mapping.into_iter().enumerate()
-    {
-        let parent_id = unsafe { parent_id_lookup.get_unchecked_mut(record_index) }
-            .get_or_insert_with(|| {
-                unsafe { *ids.add(record_index) = current_parent_id as u16 };
-                bit_util::set_bit(ids_null, record_index);
-                let r = current_parent_id;
-                current_parent_id += 1;
-                r
-            });
-
-        unsafe { *parent_ids.add(new_attribute_index) = *parent_id as u16 };
-        unsafe {
-            keys_dict_key_writer.set_value_index_unchecked(new_attribute_index, new_key_index)
-        };
-
-        if let Some(value_index) = new_value_index {
-            match attribute_type {
-                STRING_ATTRIBUTE_VALUE_TYPE => {
-                    unsafe {
-                        strings_dict_keys_writer.set_value_index_typed_unchecked(
-                            new_attribute_index,
-                            value_index as u16,
-                        )
-                    };
+    for (key_index, key) in attribute_key_values.iter().enumerate() {
+        if let Some(key) = key {
+            match values.get(key) {
+                None | Some(OtapValue::Read(_)) => key_capacity += key.len(),
+                _ => {
+                    let keys_to_skip = keys_to_skip
+                        .get_or_insert_with(|| MutableBuffer::new_null(attribute_key_count));
+                    bit_util::set_bit(keys_to_skip, key_index);
                 }
-                INT_ATTRIBUTE_VALUE_TYPE => {
-                    let ints = ints.get_or_insert_with(|| {
-                        AttributeKeyArrayBuilder::<UInt16Type>::new(attribute_count)
-                    });
-
-                    unsafe {
-                        ints.get_writer().set_value_index_typed_unchecked(
-                            new_attribute_index,
-                            value_index as u16,
-                        )
-                    };
-                }
-                DOUBLE_ATTRIBUTE_VALUE_TYPE => {
-                    let doubles = doubles.get_or_insert_with(|| {
-                        AttributeKeyArrayBuilder::<Float64Type>::new(attribute_count)
-                    });
-
-                    unsafe {
-                        doubles.get_writer().set_value_index_typed_unchecked(
-                            new_attribute_index,
-                            *double_values
-                                .as_ref()
-                                .expect("has doubles")
-                                .get_unchecked(value_index),
-                        )
-                    };
-                }
-                BOOL_ATTRIBUTE_VALUE_TYPE => {
-                    let bools = bools
-                        .get_or_insert_with(|| AttributeBooleanArrayBuilder::new(attribute_count));
-
-                    bools.set_bit(new_attribute_index, value_index > 0);
-                }
-                MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
-                    let sers = sers.get_or_insert_with(|| {
-                        AttributeKeyArrayBuilder::<UInt16Type>::new(attribute_count)
-                    });
-
-                    unsafe {
-                        sers.get_writer().set_value_index_typed_unchecked(
-                            new_attribute_index,
-                            value_index as u16,
-                        )
-                    };
-                }
-                BYTES_ATTRIBUTE_VALUE_TYPE => {
-                    let bytes = bytes.get_or_insert_with(|| {
-                        AttributeKeyArrayBuilder::<UInt16Type>::new(attribute_count)
-                    });
-
-                    unsafe {
-                        bytes.get_writer().set_value_index_typed_unchecked(
-                            new_attribute_index,
-                            value_index as u16,
-                        )
-                    };
-                }
-                t => panic!("Attribute type '{t}' is not supported"),
             }
         }
     }
 
-    let ids = PrimitiveArray::<UInt16Type>::new(
-        ids_buffer.into(),
-        NullBufferBuilder::new_from_buffer(ids_null_buffer, record_count).build(),
-    );
-
-    let parent_ids = PrimitiveArray::<UInt16Type>::new(parent_ids_buffer.into(), None);
-
-    let keys = keys_dict_key_builder.finish(Arc::new(key_dict_values_builder.finish()));
-
-    let types = PrimitiveArray::<UInt8Type>::new(types_array_builder.into(), None);
-
-    let strings = DictionaryArray::new(
-        strings_dict_keys_builder.finish(),
-        Arc::new(strings_dict_values_builder.finish()),
-    );
-
-    let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(9);
-    let mut fields = Vec::with_capacity(9);
-
-    fields.push(
-        Field::new(consts::PARENT_ID, parent_ids.data_type().clone(), false).with_plain_encoding(),
-    );
-    columns.push(Arc::new(parent_ids));
-
-    fields.push(Field::new(
-        consts::ATTRIBUTE_KEY,
-        keys.data_type().clone(),
-        false,
-    ));
-    columns.push(Arc::new(keys));
-
-    fields.push(Field::new(
-        consts::ATTRIBUTE_TYPE,
-        types.data_type().clone(),
-        false,
-    ));
-    columns.push(Arc::new(types));
-
-    fields.push(Field::new(
-        consts::ATTRIBUTE_STR,
-        strings.data_type().clone(),
-        true,
-    ));
-    columns.push(Arc::new(strings));
-
-    if let (Some(int_keys), Some(int_values)) = (ints, int_values) {
-        let ints = DictionaryArray::new(int_keys.finish(), Arc::new(int_values.finish()));
-
-        fields.push(Field::new(
-            consts::ATTRIBUTE_INT,
-            ints.data_type().clone(),
-            true,
-        ));
-        columns.push(Arc::new(ints));
+    if key_capacity == 0 {
+        // Nothing to keep from attributes batch
+        return None;
     }
 
-    if let Some(doubles) = doubles {
-        let doubles = doubles.finish();
+    if let Some(keys_to_skip) = keys_to_skip {
+        // Slow path where we need to remove attributes
 
-        fields.push(Field::new(
-            consts::ATTRIBUTE_DOUBLE,
-            doubles.data_type().clone(),
-            true,
-        ));
-        columns.push(Arc::new(doubles));
-    }
+        let keys_to_skip = BooleanBuffer::new(keys_to_skip.into(), 0, attribute_key_count);
 
-    if let Some(bools) = bools {
-        let bools = bools.finish();
+        let attribute_count = attributes_batch.len();
 
-        fields.push(Field::new(
-            consts::ATTRIBUTE_BOOL,
-            bools.data_type().clone(),
-            true,
-        ));
-        columns.push(Arc::new(bools));
-    }
+        let mut attributes_to_keep = BooleanBufferBuilder::new(attribute_count);
 
-    if let (Some(bytes_keys), Some(bytes_values)) = (bytes, bytes_values) {
-        let bytes = DictionaryArray::new(
-            bytes_keys.finish(),
-            Arc::new(BinaryArray::from(
-                bytes_values
-                    .iter()
-                    .map(|v| v.as_ref())
-                    .collect::<Vec<&[u8]>>(),
-            )),
+        let mut segment_val = false;
+        let mut segment_len = 0usize;
+
+        for key_value_index in attributes_batch.attribute_keys.key_iter() {
+            let skip = keys_to_skip.value(key_value_index);
+
+            if segment_val != skip {
+                if segment_len > 0 {
+                    attributes_to_keep.append_n(segment_len, !segment_val);
+                }
+                segment_val = skip;
+                segment_len = 0;
+            }
+
+            segment_len += 1;
+        }
+
+        if segment_len > 0 {
+            attributes_to_keep.append_n(segment_len, !segment_val);
+        }
+
+        let attributes_to_keep = attributes_to_keep.build();
+
+        let mut attributes_builder = AttributesBuilder::new(
+            record_count,
+            upsert_key_count + attributes_batch.attribute_keys.values().len()
+                - keys_to_skip.count_set_bits(),
+            key_capacity + upsert_key_capacity,
+            attributes_to_keep.count_set_bits() + upsert_attribute_count,
         );
 
-        fields.push(Field::new(
-            consts::ATTRIBUTE_BYTES,
-            bytes.data_type().clone(),
-            true,
-        ));
-        columns.push(Arc::new(bytes));
-    }
+        let key_mapping = attributes_builder.push_keys(&attributes_batch, &keys_to_skip);
 
-    if let (Some(sers_keys), Some(sers_values)) = (sers, sers_values) {
-        let sers = DictionaryArray::new(
-            sers_keys.finish(),
-            Arc::new(BinaryArray::from(
-                sers_values
-                    .iter()
-                    .map(|v| match v {
-                        VecOrBuffer::Vec(v) => v,
-                        VecOrBuffer::Buffer(b) => b.as_ref(),
-                    })
-                    .collect::<Vec<&[u8]>>(),
-            )),
+        attributes_builder.push_existing_attributes(
+            &attributes_batch,
+            &attributes_to_keep,
+            &key_mapping,
         );
 
-        fields.push(Field::new(
-            consts::ATTRIBUTE_SER,
-            sers.data_type().clone(),
-            true,
-        ));
-        columns.push(Arc::new(sers));
+        return Some(attributes_builder);
     }
 
-    Some((
-        Arc::new(ids),
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch"),
-    ))
+    // Fast path where we are keeping everything
+
+    debug_assert!(upsert_key_count > 0);
+    debug_assert!(upsert_attribute_count > 0);
+
+    let attribute_count = attributes_batch.len();
+
+    let attributes_builder = AttributesBuilder::new_from_existing(
+        record_count,
+        upsert_key_count + attributes_batch.attribute_keys.values().len(),
+        key_capacity + upsert_key_capacity,
+        attribute_count + upsert_attribute_count,
+        attributes_batch,
+    );
+
+    Some(attributes_builder)
 }
 
-fn process_attributes_batch<'a>(
-    values: &AHashMap<Box<str>, OtapValue<'a>>,
-    mapping: &mut Vec<(usize, usize, u8, Option<usize>)>,
-    key_dict_values_builder: &mut GenericByteBuilder<GenericStringType<i32>>,
-    types_array_builder: &mut Vec<u8>,
-    strings_dict_values_builder: &mut AttributeStringValueArrayBuilder,
-    int_values: &mut Option<AttributePrimitiveValueArrayBuilder<Int64Type>>,
-    double_values: &mut Option<Vec<f64>>,
-    sers_values: &mut Option<IndexSet<VecOrBuffer, ahash::RandomState>>,
-    bytes_values: &mut Option<IndexSet<BufferWrapper<u8>, ahash::RandomState>>,
-    lookup: &mut AHashMap<(u8, usize), (u8, Option<usize>)>,
-    attributes_batch: OtapAttributesBatch<'_>,
-) {
-    let attribute_capacity = mapping.capacity();
-    let attribute_keys = attributes_batch.get_keys();
-    let attribute_key_values = attribute_keys.values();
+#[derive(Debug)]
+struct AttributesBuilder<'a> {
+    pub ids_array: (MutableBuffer, Option<MutableBuffer>),
+    pub types_array_buffer: MutableBuffer,
+    pub parent_ids_array_buffer: MutableBuffer,
+    pub keys_array_u16: bool,
+    pub keys_array_buffer: MutableBuffer,
+    pub keys_value_builder: StringBuilder,
+    pub strings_dict: Option<(
+        MutableBuffer,
+        Option<MutableBuffer>,
+        GenericSet<StringValueOrRef<'a>>,
+    )>,
+    pub ints_dict: Option<(MutableBuffer, Option<MutableBuffer>, GenericSet<i64>)>,
+    pub doubles_array: Option<(MutableBuffer, Option<MutableBuffer>)>,
+    pub bools_array: Option<(MutableBuffer, Option<MutableBuffer>)>,
+    pub sers_dict: Option<(
+        MutableBuffer,
+        Option<MutableBuffer>,
+        GenericSet<VecOrBuffer>,
+    )>,
+    pub bytes_dict: Option<(
+        MutableBuffer,
+        Option<MutableBuffer>,
+        GenericSet<BufferWrapper<u8>>,
+    )>,
+    pub attribute_position: usize,
+    pub next_parent_id: u16,
+}
 
-    let mut keys_to_process = Vec::with_capacity(attribute_key_values.len());
-
-    for key in attribute_key_values.iter() {
-        if let Some(key) = key
-            && !values.contains_key(key)
-        {
-            let new_key_index = key_dict_values_builder.len();
-            key_dict_values_builder.append_value(key);
-
-            keys_to_process.push(Some(new_key_index));
+impl<'a> AttributesBuilder<'a> {
+    pub fn new(
+        record_count: usize,
+        attribute_key_count: usize,
+        attribute_key_capacity: usize,
+        attribute_count: usize,
+    ) -> AttributesBuilder<'a> {
+        let (keys_array_buffer, keys_array_u16) = if attribute_key_count <= u8::MAX as usize {
+            (MutableBuffer::from_len_zeroed(attribute_count), false)
         } else {
-            keys_to_process.push(None);
+            (MutableBuffer::from_len_zeroed(attribute_count * 2), true)
+        };
+
+        Self {
+            ids_array: (
+                MutableBuffer::from_len_zeroed(record_count * 2),
+                Some(MutableBuffer::new_null(record_count)),
+            ),
+            types_array_buffer: MutableBuffer::from_len_zeroed(attribute_count),
+            parent_ids_array_buffer: MutableBuffer::from_len_zeroed(attribute_count * 2),
+            keys_array_u16,
+            keys_array_buffer,
+            keys_value_builder: StringBuilder::with_capacity(
+                attribute_key_count,
+                attribute_key_capacity,
+            ),
+            strings_dict: None,
+            ints_dict: None,
+            doubles_array: None,
+            bools_array: None,
+            sers_dict: None,
+            bytes_dict: None,
+            attribute_position: 0,
+            next_parent_id: 0,
         }
     }
 
-    if !key_dict_values_builder.is_empty() {
-        let attributes_types = attributes_batch.get_attribute_types().values().as_ptr();
-        let attribute_parent_ids = attributes_batch
-            .get_attribute_parent_ids()
-            .values()
-            .as_ptr();
+    pub fn new_from_existing(
+        record_count: usize,
+        attribute_key_count: usize,
+        attribute_key_capacity: usize,
+        attribute_count: usize,
+        attributes_batch: OtapAttributesBatch,
+    ) -> AttributesBuilder<'a> {
+        let existing_attributes_count = attributes_batch.len();
+
+        let existing_ids = attributes_batch.ids.get_ids();
+        let mut ids_keys = MutableBuffer::from_len_zeroed(record_count * 2);
+        let mut ids_nulls = None;
+        unsafe {
+            AttributesBuilder::fill_from_slice_unchecked(
+                existing_ids.values().to_byte_slice(),
+                ids_keys.as_slice_mut(),
+                0,
+                record_count * 2,
+            );
+            if let Some(nulls) = existing_ids.nulls() {
+                let mut null_buffer = MutableBuffer::new_null(record_count);
+                AttributesBuilder::fill_from_slice_unchecked(
+                    nulls.validity(),
+                    null_buffer.as_slice_mut(),
+                    0,
+                    bit_util::ceil(record_count, 8),
+                );
+                ids_nulls = Some(null_buffer);
+            }
+        }
+
+        let mut types_array_buffer = MutableBuffer::from_len_zeroed(attribute_count);
+        unsafe {
+            AttributesBuilder::fill_from_slice_unchecked(
+                attributes_batch.attribute_types.values(),
+                types_array_buffer.as_slice_mut(),
+                0,
+                existing_attributes_count,
+            );
+        };
+
+        let (mut keys_array_buffer, keys_array_u16) = if attribute_key_count <= u8::MAX as usize {
+            (MutableBuffer::from_len_zeroed(attribute_count), false)
+        } else {
+            (MutableBuffer::from_len_zeroed(attribute_count * 2), true)
+        };
+
+        let existing_attributes_keys = attributes_batch.attribute_keys;
+
+        if existing_attributes_keys.keys_u16() == keys_array_u16 {
+            unsafe {
+                AttributesBuilder::fill_from_slice_unchecked(
+                    existing_attributes_keys.keys_slice(),
+                    keys_array_buffer.as_slice_mut(),
+                    0,
+                    if keys_array_u16 {
+                        existing_attributes_count * 2
+                    } else {
+                        existing_attributes_count
+                    },
+                )
+            };
+        } else if keys_array_u16 {
+            let keys = keys_array_buffer.typed_data_mut::<u16>().as_mut_ptr();
+
+            for (key_index, value_index) in existing_attributes_keys.key_iter().enumerate() {
+                unsafe { *keys.add(key_index) = value_index as u16 };
+            }
+        } else {
+            let keys = keys_array_buffer.as_mut_ptr();
+
+            for (key_index, value_index) in existing_attributes_keys.key_iter().enumerate() {
+                unsafe { *keys.add(key_index) = value_index as u8 };
+            }
+        }
+
+        let mut keys_value_builder =
+            StringBuilder::with_capacity(attribute_key_count, attribute_key_capacity);
+        keys_value_builder
+            .append_array(existing_attributes_keys.values())
+            .expect("success");
+
+        let mut parent_ids_array_buffer = MutableBuffer::from_len_zeroed(attribute_count * 2);
+        unsafe {
+            AttributesBuilder::fill_from_slice_unchecked(
+                attributes_batch
+                    .parent_ids
+                    .get_ids()
+                    .values()
+                    .to_byte_slice(),
+                parent_ids_array_buffer.as_slice_mut(),
+                0,
+                existing_attributes_count * 2,
+            )
+        };
+        let next_parent_id = parent_ids_array_buffer.typed_data::<u16>()
+            [0..existing_attributes_count]
+            .iter()
+            .max()
+            .map_or(0, |v| v + 1);
+
+        let (strings_values, strings_values_lookup) =
+            DictionaryValueArray::Array(Arc::new(attributes_batch.attribute_string_values.clone()))
+                .transform_into_set(&mut |v| {
+                    if let ValueOrRef::String(s) = v {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                });
+        let mut strings_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+        let mut strings_nulls = None;
+        match strings_values_lookup {
+            None => unsafe {
+                AttributesBuilder::fill_from_slice_unchecked(
+                    attributes_batch
+                        .attribute_string_keys
+                        .values()
+                        .to_byte_slice(),
+                    strings_keys.as_slice_mut(),
+                    0,
+                    existing_attributes_count * 2,
+                );
+                if let Some(nulls) = attributes_batch.attribute_string_keys.nulls() {
+                    let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                    AttributesBuilder::fill_from_slice_unchecked(
+                        nulls.validity(),
+                        null_buffer.as_slice_mut(),
+                        0,
+                        bit_util::ceil(existing_attributes_count, 8),
+                    );
+                    strings_nulls = Some(null_buffer);
+                }
+            },
+            Some(lookup) => {
+                let keys = strings_keys.typed_data_mut::<u16>();
+                for (key_index, value_index) in
+                    attributes_batch.attribute_string_keys.iter().enumerate()
+                {
+                    if let Some(value_index) = value_index
+                        && let Some(Some(transformed_value_index)) =
+                            lookup.get(&(value_index as usize))
+                    {
+                        keys[key_index] = *transformed_value_index as u16;
+                        continue;
+                    }
+
+                    let nulls = strings_nulls
+                        .get_or_insert_with(|| MutableBuffer::new_null(attribute_count));
+                    bit_util::set_bit(nulls, key_index);
+                }
+                strings_nulls = strings_nulls.map(|mut v| {
+                    for v in v.as_slice_mut() {
+                        *v = !*v;
+                    }
+                    v
+                })
+            }
+        }
+
+        let ints_dict = if let Some(ints) = attributes_batch.attribute_ints {
+            let (ints_values, ints_values_lookup) = DictionaryValueArray::Array(Arc::new(
+                ints.values().clone(),
+            ))
+            .transform_into_set(&mut |v| {
+                if let ValueOrRef::Integer(i) = v {
+                    Some(i)
+                } else {
+                    None
+                }
+            });
+            let mut ints_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+            let mut ints_nulls = None;
+            match ints_values_lookup {
+                None => unsafe {
+                    AttributesBuilder::fill_from_slice_unchecked(
+                        ints.keys().values().to_byte_slice(),
+                        ints_keys.as_slice_mut(),
+                        0,
+                        existing_attributes_count * 2,
+                    );
+                    if let Some(nulls) = ints.keys().nulls() {
+                        let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                        AttributesBuilder::fill_from_slice_unchecked(
+                            nulls.validity(),
+                            null_buffer.as_slice_mut(),
+                            0,
+                            bit_util::ceil(existing_attributes_count, 8),
+                        );
+                        ints_nulls = Some(null_buffer);
+                    }
+                },
+                Some(lookup) => {
+                    let keys = ints_keys.typed_data_mut::<u16>();
+                    for (key_index, value_index) in ints.keys().iter().enumerate() {
+                        if let Some(value_index) = value_index
+                            && let Some(Some(transformed_value_index)) =
+                                lookup.get(&(value_index as usize))
+                        {
+                            keys[key_index] = *transformed_value_index as u16;
+                            continue;
+                        }
+
+                        let nulls = ints_nulls
+                            .get_or_insert_with(|| MutableBuffer::new_null(attribute_count));
+                        bit_util::set_bit(nulls, key_index);
+                    }
+                    ints_nulls = ints_nulls.map(|mut v| {
+                        for v in v.as_slice_mut() {
+                            *v = !*v;
+                        }
+                        v
+                    })
+                }
+            }
+            Some((ints_keys, ints_nulls, ints_values))
+        } else {
+            None
+        };
+
+        let doubles_array = if let Some(doubles) = attributes_batch.attribute_doubles {
+            let mut keys_buffer = MutableBuffer::from_len_zeroed(attribute_count * 8);
+            let mut nulls_buffer = None;
+            unsafe {
+                AttributesBuilder::fill_from_slice_unchecked(
+                    doubles.values().to_byte_slice(),
+                    keys_buffer.as_slice_mut(),
+                    0,
+                    existing_attributes_count * 8,
+                );
+                if let Some(nulls) = doubles.nulls() {
+                    let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                    AttributesBuilder::fill_from_slice_unchecked(
+                        nulls.validity(),
+                        null_buffer.as_slice_mut(),
+                        0,
+                        bit_util::ceil(existing_attributes_count, 8),
+                    );
+                    nulls_buffer = Some(null_buffer);
+                }
+            }
+            Some((keys_buffer, nulls_buffer))
+        } else {
+            None
+        };
+
+        let bools_array = if let Some(bools) = attributes_batch.attribute_bools {
+            let mut keys_buffer =
+                MutableBuffer::from_len_zeroed(bit_util::ceil(attribute_count, 8));
+            let mut nulls_buffer = None;
+            unsafe {
+                AttributesBuilder::fill_from_slice_unchecked(
+                    bools.values().values(),
+                    keys_buffer.as_slice_mut(),
+                    0,
+                    bit_util::ceil(existing_attributes_count, 8),
+                );
+                if let Some(nulls) = bools.nulls() {
+                    let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                    AttributesBuilder::fill_from_slice_unchecked(
+                        nulls.validity(),
+                        null_buffer.as_slice_mut(),
+                        0,
+                        bit_util::ceil(existing_attributes_count, 8),
+                    );
+                    nulls_buffer = Some(null_buffer);
+                }
+            }
+            Some((keys_buffer, nulls_buffer))
+        } else {
+            None
+        };
+
+        let sers_dict = if let Some(sers) = attributes_batch.attribute_sers {
+            let (sers_values, sers_values_lookup) = sers
+                .values()
+                .into_set(|v| v.map(|v| VecOrBuffer::Buffer(BufferWrapper::<u8>::new(v))));
+            let mut sers_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+            let mut sers_nulls = None;
+            match sers_values_lookup {
+                None => unsafe {
+                    AttributesBuilder::fill_from_slice_unchecked(
+                        sers.keys().values().to_byte_slice(),
+                        sers_keys.as_slice_mut(),
+                        0,
+                        existing_attributes_count * 2,
+                    );
+                    if let Some(nulls) = sers.keys().nulls() {
+                        let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                        AttributesBuilder::fill_from_slice_unchecked(
+                            nulls.validity(),
+                            null_buffer.as_slice_mut(),
+                            0,
+                            bit_util::ceil(existing_attributes_count, 8),
+                        );
+                        sers_nulls = Some(null_buffer);
+                    }
+                },
+                Some(lookup) => {
+                    let keys = sers_keys.typed_data_mut::<u16>();
+                    for (key_index, value_index) in sers.keys().iter().enumerate() {
+                        if let Some(value_index) = value_index
+                            && let Some(Some(transformed_value_index)) =
+                                lookup.get(&(value_index as usize))
+                        {
+                            keys[key_index] = *transformed_value_index as u16;
+                            continue;
+                        }
+
+                        let nulls = sers_nulls
+                            .get_or_insert_with(|| MutableBuffer::new_null(attribute_count));
+                        bit_util::set_bit(nulls, key_index);
+                    }
+                    sers_nulls = sers_nulls.map(|mut v| {
+                        for v in v.as_slice_mut() {
+                            *v = !*v;
+                        }
+                        v
+                    })
+                }
+            }
+            Some((sers_keys, sers_nulls, sers_values))
+        } else {
+            None
+        };
+
+        let bytes_dict = if let Some(bytes) = attributes_batch.attribute_bytes {
+            let (bytes_values, bytes_values_lookup) =
+                bytes.values().into_set(|v| v.map(BufferWrapper::<u8>::new));
+            let mut bytes_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+            let mut bytes_nulls = None;
+            match bytes_values_lookup {
+                None => unsafe {
+                    AttributesBuilder::fill_from_slice_unchecked(
+                        bytes.keys().values().to_byte_slice(),
+                        bytes_keys.as_slice_mut(),
+                        0,
+                        existing_attributes_count * 2,
+                    );
+                    if let Some(nulls) = bytes.keys().nulls() {
+                        let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                        AttributesBuilder::fill_from_slice_unchecked(
+                            nulls.validity(),
+                            null_buffer.as_slice_mut(),
+                            0,
+                            bit_util::ceil(existing_attributes_count, 8),
+                        );
+                        bytes_nulls = Some(null_buffer);
+                    }
+                },
+                Some(lookup) => {
+                    let keys = bytes_keys.typed_data_mut::<u16>();
+                    for (key_index, value_index) in bytes.keys().iter().enumerate() {
+                        if let Some(value_index) = value_index
+                            && let Some(Some(transformed_value_index)) =
+                                lookup.get(&(value_index as usize))
+                        {
+                            keys[key_index] = *transformed_value_index as u16;
+                            continue;
+                        }
+
+                        let nulls = bytes_nulls
+                            .get_or_insert_with(|| MutableBuffer::new_null(attribute_count));
+                        bit_util::set_bit(nulls, key_index);
+                    }
+                    bytes_nulls = bytes_nulls.map(|mut v| {
+                        for v in v.as_slice_mut() {
+                            *v = !*v;
+                        }
+                        v
+                    })
+                }
+            }
+            Some((bytes_keys, bytes_nulls, bytes_values))
+        } else {
+            None
+        };
+
+        Self {
+            ids_array: (ids_keys, ids_nulls),
+            types_array_buffer,
+            parent_ids_array_buffer,
+            keys_array_u16,
+            keys_array_buffer,
+            keys_value_builder,
+            strings_dict: Some((strings_keys, strings_nulls, strings_values)),
+            ints_dict,
+            doubles_array,
+            bools_array,
+            sers_dict,
+            bytes_dict,
+            attribute_position: existing_attributes_count,
+            next_parent_id,
+        }
+    }
+
+    pub fn push_value_for_key(
+        &mut self,
+        record_index: usize,
+        key_index: usize,
+        value: ValueOrRef<'a>,
+    ) {
+        let attribute_count = self.types_array_buffer.len();
+        let attribute_index = self.attribute_position;
+        self.attribute_position = attribute_index + 1;
+
+        if self.keys_array_u16 {
+            self.keys_array_buffer.typed_data_mut::<u16>()[attribute_index] = key_index as u16;
+        } else {
+            self.keys_array_buffer[attribute_index] = key_index as u8;
+        }
+
+        let processed_value = self.process_value(value);
+
+        self.types_array_buffer[attribute_index] = processed_value.get_attribute_type();
+
+        let ids = self.ids_array.0.typed_data_mut::<u16>().as_mut_ptr();
+        let ids_nulls = self.ids_array.1.as_mut();
+        let parent_ids = &mut self
+            .parent_ids_array_buffer
+            .typed_data_mut::<u16>()
+            .as_mut_ptr();
+
+        if let Some(ids_nulls) = ids_nulls {
+            let parent_id = if !bit_util::get_bit(ids_nulls, record_index) {
+                let parent_id = self.next_parent_id;
+                self.next_parent_id = parent_id + 1;
+                unsafe { *ids.add(record_index) = parent_id };
+                bit_util::set_bit(ids_nulls, record_index);
+                parent_id
+            } else {
+                unsafe { *ids.add(record_index) }
+            };
+
+            unsafe { *parent_ids.add(attribute_index) = parent_id };
+        } else {
+            let parent_id = unsafe { *ids.add(record_index) };
+
+            unsafe { *parent_ids.add(attribute_index) = parent_id };
+        }
+
+        match processed_value {
+            ProcessedValue::String(value_index) => {
+                let strings = self.strings_dict.as_mut().expect("has strings");
+
+                unsafe {
+                    if let Some(value_index) = value_index {
+                        if let Some(nulls) = strings.1.as_mut() {
+                            bit_util::set_bit(nulls, attribute_index);
+                        }
+
+                        *strings
+                            .0
+                            .typed_data_mut::<u16>()
+                            .get_unchecked_mut(attribute_index) = value_index as u16;
+                    } else {
+                        Self::ensure_nulls_unchecked(
+                            &mut strings.1,
+                            attribute_count,
+                            attribute_index,
+                        );
+                    }
+
+                    self.update_nulls_unchecked(
+                        STRING_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        attribute_index,
+                    );
+                }
+            }
+            ProcessedValue::Integer(value_index) => {
+                let ints = self.ints_dict.as_mut().expect("has ints");
+
+                unsafe {
+                    if let Some(value_index) = value_index {
+                        if let Some(nulls) = ints.1.as_mut() {
+                            bit_util::set_bit(nulls, attribute_index);
+                        }
+
+                        *ints
+                            .0
+                            .typed_data_mut::<u16>()
+                            .get_unchecked_mut(attribute_index) = value_index as u16;
+                    } else {
+                        Self::ensure_nulls_unchecked(&mut ints.1, attribute_count, attribute_index);
+                    }
+
+                    self.update_nulls_unchecked(
+                        INT_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        attribute_index,
+                    );
+                }
+            }
+            ProcessedValue::Double(value) => {
+                let doubles = self.doubles_array.as_mut().expect("has doubles");
+
+                if let Some(value) = value {
+                    if let Some(nulls) = doubles.1.as_mut() {
+                        bit_util::set_bit(nulls, attribute_index);
+                    }
+
+                    *unsafe {
+                        doubles
+                            .0
+                            .typed_data_mut::<f64>()
+                            .get_unchecked_mut(attribute_index)
+                    } = value;
+                } else {
+                    unsafe {
+                        Self::ensure_nulls_unchecked(
+                            &mut doubles.1,
+                            attribute_count,
+                            attribute_index,
+                        )
+                    };
+                }
+
+                unsafe {
+                    self.update_nulls_unchecked(
+                        DOUBLE_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        attribute_index,
+                    );
+                }
+            }
+            ProcessedValue::Boolean(value) => {
+                let bools = self.bools_array.as_mut().expect("has bools");
+
+                if value {
+                    bit_util::set_bit(bools.0.as_mut(), attribute_index)
+                }
+
+                if let Some(nulls) = bools.1.as_mut() {
+                    bit_util::set_bit(nulls, attribute_index);
+                }
+
+                unsafe {
+                    self.update_nulls_unchecked(
+                        BOOL_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        attribute_index,
+                    );
+                }
+            }
+            ProcessedValue::Bytes(value_index) => {
+                let bytes = self.bytes_dict.as_mut().expect("has bytes");
+
+                unsafe {
+                    if let Some(value_index) = value_index {
+                        if let Some(nulls) = bytes.1.as_mut() {
+                            bit_util::set_bit(nulls, attribute_index);
+                        }
+
+                        *bytes
+                            .0
+                            .typed_data_mut::<u16>()
+                            .get_unchecked_mut(attribute_index) = value_index as u16;
+                    } else {
+                        Self::ensure_nulls_unchecked(
+                            &mut bytes.1,
+                            attribute_count,
+                            attribute_index,
+                        );
+                    }
+
+                    self.update_nulls_unchecked(
+                        BYTES_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        attribute_index,
+                    );
+                }
+            }
+            ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => {
+                let sers = self.sers_dict.as_mut().expect("has sers");
+
+                unsafe {
+                    if let Some(value_index) = value_index {
+                        if let Some(nulls) = sers.1.as_mut() {
+                            bit_util::set_bit(nulls, attribute_index);
+                        }
+
+                        *sers
+                            .0
+                            .typed_data_mut::<u16>()
+                            .get_unchecked_mut(attribute_index) = value_index as u16;
+                    } else {
+                        Self::ensure_nulls_unchecked(&mut sers.1, attribute_count, attribute_index);
+                    }
+
+                    self.update_nulls_unchecked(
+                        SLICE_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        attribute_index,
+                    );
+                }
+            }
+            ProcessedValue::Empty => unsafe {
+                self.update_nulls_unchecked(
+                    EMPTY_ATTRIBUTE_VALUE_TYPE,
+                    attribute_count,
+                    attribute_index,
+                )
+            },
+        }
+    }
+
+    pub fn push_key_value_for_all_records(&mut self, key: &str, value: ValueOrRef<'a>) {
+        let record_count = self.ids_array.0.len() / 2;
+        let attribute_count = self.types_array_buffer.len();
+
+        debug_assert!(self.attribute_position + record_count <= attribute_count);
+
+        let attribute_range = self.attribute_position..(self.attribute_position + record_count);
+
+        let key_index = self.push_key(key);
+
+        if self.keys_array_u16 {
+            let keys = &mut self.keys_array_buffer.typed_data_mut::<u16>()[attribute_range.clone()];
+            keys.fill(key_index as u16);
+        } else {
+            let keys = &mut self.keys_array_buffer[attribute_range.clone()];
+            keys.fill(key_index as u8);
+        }
+
+        let processed_value = self.process_value(value);
+
+        self.types_array_buffer[attribute_range.clone()].fill(processed_value.get_attribute_type());
+
+        let ids = self.ids_array.0.typed_data_mut::<u16>().as_mut_ptr();
+        let ids_nulls = self.ids_array.1.as_mut();
+
+        let parent_ids = &mut self.parent_ids_array_buffer.typed_data_mut::<u16>()
+            [self.attribute_position..]
+            .as_mut_ptr();
+
+        if let Some(ids_nulls) = ids_nulls {
+            for record_index in 0..record_count {
+                let parent_id = if !bit_util::get_bit(ids_nulls, record_index) {
+                    let parent_id = self.next_parent_id;
+                    self.next_parent_id = parent_id + 1;
+                    unsafe { *ids.add(record_index) = parent_id };
+                    bit_util::set_bit(ids_nulls, record_index);
+                    parent_id
+                } else {
+                    unsafe { *ids.add(record_index) }
+                };
+
+                unsafe { *parent_ids.add(record_index) = parent_id };
+            }
+        } else {
+            for record_index in 0..record_count {
+                let parent_id = unsafe { *ids.add(record_index) };
+
+                unsafe { *parent_ids.add(record_index) = parent_id };
+            }
+        }
+
+        match processed_value {
+            ProcessedValue::String(value_index) => {
+                let strings = self.strings_dict.as_mut().expect("has strings");
+
+                unsafe {
+                    Self::fill_dictionay_range_unchecked(
+                        attribute_count,
+                        &attribute_range,
+                        value_index,
+                        strings,
+                    );
+
+                    self.update_nulls_unchecked(
+                        STRING_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        self.attribute_position,
+                    );
+                }
+            }
+            ProcessedValue::Integer(value_index) => {
+                let ints = self.ints_dict.as_mut().expect("has ints");
+
+                unsafe {
+                    Self::fill_dictionay_range_unchecked(
+                        attribute_count,
+                        &attribute_range,
+                        value_index,
+                        ints,
+                    );
+
+                    self.update_nulls_unchecked(
+                        INT_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        self.attribute_position,
+                    );
+                }
+            }
+            ProcessedValue::Double(value) => {
+                let doubles = self.doubles_array.as_mut().expect("has doubles");
+                if let Some(value) = value {
+                    let keys = doubles.0.typed_data_mut::<f64>();
+                    keys[attribute_range.clone()].fill(value);
+                    if let Some(nulls) = &mut doubles.1 {
+                        unsafe {
+                            Self::fill_bit_range_unchecked(
+                                nulls,
+                                attribute_range.start,
+                                attribute_range.end,
+                            )
+                        };
+                    }
+                } else {
+                    unsafe {
+                        Self::ensure_nulls_unchecked(
+                            &mut doubles.1,
+                            attribute_count,
+                            self.attribute_position,
+                        )
+                    };
+                }
+
+                unsafe {
+                    self.update_nulls_unchecked(
+                        DOUBLE_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        self.attribute_position,
+                    );
+                }
+            }
+            ProcessedValue::Boolean(value) => {
+                let bools = self.bools_array.as_mut().expect("has bools");
+
+                if value {
+                    unsafe {
+                        Self::fill_bit_range_unchecked(
+                            &mut bools.0,
+                            attribute_range.start,
+                            attribute_range.end,
+                        )
+                    };
+                }
+
+                if let Some(nulls) = &mut bools.1 {
+                    unsafe {
+                        Self::fill_bit_range_unchecked(
+                            nulls,
+                            attribute_range.start,
+                            attribute_range.end,
+                        )
+                    };
+                }
+
+                unsafe {
+                    self.update_nulls_unchecked(
+                        BOOL_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        self.attribute_position,
+                    );
+                }
+            }
+            ProcessedValue::Bytes(value_index) => {
+                let bytes = self.bytes_dict.as_mut().expect("has bytes");
+
+                unsafe {
+                    Self::fill_dictionay_range_unchecked(
+                        attribute_count,
+                        &attribute_range,
+                        value_index,
+                        bytes,
+                    );
+
+                    self.update_nulls_unchecked(
+                        BYTES_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        self.attribute_position,
+                    );
+                }
+            }
+            ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => {
+                let sers = self.sers_dict.as_mut().expect("has sers");
+
+                unsafe {
+                    Self::fill_dictionay_range_unchecked(
+                        attribute_count,
+                        &attribute_range,
+                        value_index,
+                        sers,
+                    );
+
+                    self.update_nulls_unchecked(
+                        SLICE_ATTRIBUTE_VALUE_TYPE,
+                        attribute_count,
+                        self.attribute_position,
+                    );
+                }
+            }
+            ProcessedValue::Empty => unsafe {
+                self.update_nulls_unchecked(
+                    EMPTY_ATTRIBUTE_VALUE_TYPE,
+                    attribute_count,
+                    self.attribute_position,
+                );
+            },
+        }
+
+        self.attribute_position += record_count;
+    }
+
+    fn process_value(&mut self, value: ValueOrRef<'a>) -> ProcessedValue {
+        let attribute_count = self.types_array_buffer.len();
+
+        match value {
+            ValueOrRef::Null => ProcessedValue::Empty,
+            ValueOrRef::String(s) => {
+                if s.is_empty() {
+                    ProcessedValue::String(None)
+                } else {
+                    let value_index = self
+                        .strings_dict
+                        .get_or_insert_with(|| {
+                            let keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+                            (keys, None, IndexSet::with_hasher(RandomState::new()))
+                        })
+                        .2
+                        .insert_full(s)
+                        .0;
+                    ProcessedValue::String(Some(value_index))
+                }
+            }
+            ValueOrRef::Integer(i) => {
+                if i == 0 {
+                    ProcessedValue::Integer(None)
+                } else {
+                    let value_index = self
+                        .ints_dict
+                        .get_or_insert_with(|| {
+                            let keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+                            (keys, None, IndexSet::with_hasher(RandomState::new()))
+                        })
+                        .2
+                        .insert_full(i)
+                        .0;
+                    ProcessedValue::Integer(Some(value_index))
+                }
+            }
+            ValueOrRef::Double(d) => {
+                if d == 0f64 {
+                    ProcessedValue::Double(None)
+                } else {
+                    self.doubles_array.get_or_insert_with(|| {
+                        let keys = MutableBuffer::from_len_zeroed(attribute_count * 8);
+                        (keys, None)
+                    });
+                    ProcessedValue::Double(Some(d))
+                }
+            }
+            ValueOrRef::Boolean(b) => {
+                self.bools_array.get_or_insert_with(|| {
+                    let keys = MutableBuffer::new_null(attribute_count);
+                    (keys, None)
+                });
+                ProcessedValue::Boolean(b)
+            }
+            ValueOrRef::Array(a) => match a {
+                ArrayValueOrRef::Buffer(BufferArray::U8(b)) => {
+                    if b.is_empty() {
+                        ProcessedValue::Bytes(None)
+                    } else {
+                        let value_index = self
+                            .bytes_dict
+                            .get_or_insert_with(|| {
+                                let keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+                                (keys, None, IndexSet::with_hasher(RandomState::new()))
+                            })
+                            .2
+                            .insert_full(b)
+                            .0;
+                        ProcessedValue::Bytes(Some(value_index))
+                    }
+                }
+                a => {
+                    if a.is_empty() {
+                        ProcessedValue::Slice(None)
+                    } else {
+                        match crate::serialization::to_slice(ValueOrRef::Array(a)) {
+                            Ok(v) => self.process_slice_value(VecOrBuffer::Vec(v), attribute_count),
+                            Err(_) => ProcessedValue::Slice(None),
+                        }
+                    }
+                }
+            },
+            ValueOrRef::Map(m) => {
+                if m.as_map_value().is_empty() {
+                    ProcessedValue::Map(None)
+                } else {
+                    match crate::serialization::to_slice(ValueOrRef::Map(m)) {
+                        Ok(v) => self.process_map_value(VecOrBuffer::Vec(v), attribute_count),
+                        Err(_) => ProcessedValue::Map(None),
+                    }
+                }
+            }
+            v => {
+                let s = v.to_value().convert_to_string();
+                if s.as_ref().is_empty() {
+                    ProcessedValue::String(None)
+                } else {
+                    let value_index = self
+                        .strings_dict
+                        .get_or_insert_with(|| {
+                            let keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+                            (keys, None, IndexSet::with_hasher(RandomState::new()))
+                        })
+                        .2
+                        .insert_full(StringValueOrRef::Owned(Rc::new(s.into())))
+                        .0;
+                    ProcessedValue::String(Some(value_index))
+                }
+            }
+        }
+    }
+}
+
+impl AttributesBuilder<'_> {
+    pub fn push_keys(
+        &mut self,
+        attributes_batch: &OtapAttributesBatch,
+        keys_to_skip: &BooleanBuffer,
+    ) -> Vec<Option<usize>> {
+        let mut key_mappings = vec![None; keys_to_skip.len()];
+
+        let keys = attributes_batch.attribute_keys.values();
+
+        for (key_index, skip) in keys_to_skip.iter().enumerate() {
+            if skip {
+                continue;
+            }
+
+            let new_key_index = self.keys_value_builder.len();
+            self.keys_value_builder
+                .append_value(unsafe { keys.value_unchecked(key_index) });
+            *unsafe { key_mappings.get_unchecked_mut(key_index) } = Some(new_key_index);
+        }
+
+        key_mappings
+    }
+
+    pub fn push_existing_attributes(
+        &mut self,
+        attributes_batch: &OtapAttributesBatch,
+        attributes_to_keep: &BooleanBuffer,
+        key_mapping: &[Option<usize>],
+    ) {
+        let attributes_to_add_count = attributes_to_keep.count_set_bits();
+        let attribute_count = self.types_array_buffer.len();
+
+        let attribute_types: &[u8] = attributes_batch.attribute_types.values();
+        let attribute_keys = &attributes_batch.attribute_keys;
+        let attribute_parent_ids = attributes_batch.parent_ids.get_ids().values().as_ptr();
         let id_to_record_index_map = attributes_batch
             .get_id_to_record_index_map()
             .values()
             .as_ptr();
 
-        for (key_index, key_value_index) in attribute_keys.key_iter().enumerate() {
-            if let Some(new_key_index) = unsafe { keys_to_process.get_unchecked(key_value_index) } {
-                let attribute_type = unsafe { *attributes_types.add(key_index) };
+        debug_assert!(self.attribute_position + attributes_to_add_count <= attribute_types.len());
 
-                if let Some(value) =
-                    attributes_batch.get_attribute_value_or_index(key_index, attribute_type)
-                {
-                    let parent_id = unsafe { *attribute_parent_ids.add(key_index) };
-                    let record_index =
-                        unsafe { *id_to_record_index_map.add(parent_id as usize) } as usize;
+        for (start, end) in attributes_to_keep.set_slices() {
+            unsafe {
+                Self::fill_from_slice_unchecked(
+                    &attribute_types[start..end],
+                    self.types_array_buffer.as_mut(),
+                    self.attribute_position,
+                    end - start,
+                );
+            }
 
-                    let new_value_index = match value {
-                        AttributeValueOrIndex::ValueIndex(value_index) => {
-                            match lookup.entry((attribute_type, value_index as usize)) {
-                                Entry::Occupied(occupied) => occupied.get().1,
-                                Entry::Vacant(vacant) => {
-                                    let buffer = attributes_batch
-                                        .get_attribute_value_buffer(attribute_type, value_index);
+            for existing_attribute_index in start..end {
+                let attribute_index = self.attribute_position;
+                self.attribute_position = attribute_index + 1;
 
-                                    if buffer.is_empty() {
-                                        vacant.insert((attribute_type, None)).1
-                                    } else {
-                                        let new_value_index = match attribute_type {
-                                            STRING_ATTRIBUTE_VALUE_TYPE => {
-                                                let value_index = strings_dict_values_builder
-                                                    .get_or_insert(StringValueOrRef::Buffer(
-                                                        buffer,
-                                                    ));
-                                                value_index
-                                            }
-                                            MAP_ATTRIBUTE_VALUE_TYPE
-                                            | SLICE_ATTRIBUTE_VALUE_TYPE => {
-                                                let sers = sers_values.get_or_insert_with(|| {
-                                                    IndexSet::with_capacity_and_hasher(
-                                                        attribute_capacity,
-                                                        ahash::RandomState::new(),
-                                                    )
-                                                });
-                                                let (value_index, _) =
-                                                    sers.insert_full(VecOrBuffer::Buffer(
-                                                        BufferWrapper::<u8>::new(buffer),
-                                                    ));
-                                                value_index
-                                            }
-                                            BYTES_ATTRIBUTE_VALUE_TYPE => {
-                                                let bytes = bytes_values.get_or_insert_with(|| {
-                                                    IndexSet::with_capacity_and_hasher(
-                                                        attribute_capacity,
-                                                        ahash::RandomState::new(),
-                                                    )
-                                                });
-                                                let (value_index, _) = bytes
-                                                    .insert_full(BufferWrapper::<u8>::new(buffer));
-                                                value_index
-                                            }
-                                            t => panic!("Attribute type '{t}' is not supported"),
-                                        };
+                let ids_array = self.ids_array.0.typed_data_mut::<u16>();
+                let parent_ids_array = self.parent_ids_array_buffer.typed_data_mut::<u16>();
 
-                                        vacant.insert((attribute_type, Some(new_value_index))).1
-                                    }
-                                }
-                            }
-                        }
-                        AttributeValueOrIndex::Value(v) => process_value(
-                            v,
-                            attribute_capacity,
-                            strings_dict_values_builder,
-                            int_values,
-                            double_values,
-                            sers_values,
-                            bytes_values,
+                let key_index = unsafe {
+                    key_mapping
+                        .get_unchecked(
+                            attribute_keys
+                                .get_value_index_for_key_index(existing_attribute_index)
+                                .expect("has key"),
                         )
-                        .and_then(|v| v.1),
-                    };
+                        .expect("has key mapping")
+                };
 
-                    types_array_builder.push(attribute_type);
-                    mapping.push((
-                        record_index,
-                        *new_key_index,
-                        attribute_type,
-                        new_value_index,
-                    ));
+                if self.keys_array_u16 {
+                    let keys = self.keys_array_buffer.typed_data_mut::<u16>();
+                    *unsafe { keys.get_unchecked_mut(attribute_index) } = key_index as u16;
+                } else {
+                    let keys = &mut self.keys_array_buffer;
+                    *unsafe { keys.get_unchecked_mut(attribute_index) } = key_index as u8;
                 }
-            }
-        }
-    }
-}
 
-fn process_values<'a>(
-    values: AHashMap<Box<str>, OtapValue<'a>>,
-    mapping: &mut Vec<(usize, usize, u8, Option<usize>)>,
-    key_dict_values_builder: &mut GenericByteBuilder<GenericStringType<i32>>,
-    types_array_builder: &mut Vec<u8>,
-    strings_dict_values_builder: &mut AttributeStringValueArrayBuilder<'a>,
-    int_values: &mut Option<AttributePrimitiveValueArrayBuilder<Int64Type>>,
-    double_values: &mut Option<Vec<f64>>,
-    sers_values: &mut Option<IndexSet<VecOrBuffer, ahash::RandomState>>,
-    bytes_values: &mut Option<IndexSet<BufferWrapper<u8>, ahash::RandomState>>,
-    lookup: &mut AHashMap<(u8, usize), (u8, Option<usize>)>,
-) {
-    let attribute_capacity = mapping.capacity();
-    for (key, value) in values {
-        match value {
-            OtapValue::NotFound | OtapValue::Removed => continue,
-            OtapValue::Read(value) | OtapValue::Set(value) => {
-                debug_assert!(!value.is_empty() && !value.is_null());
+                let existing_parent_id =
+                    unsafe { *attribute_parent_ids.add(existing_attribute_index) };
+                let record_index =
+                    unsafe { *id_to_record_index_map.add(existing_parent_id as usize) } as usize;
 
-                let new_key_index = key_dict_values_builder.len();
-                key_dict_values_builder.append_value(key);
-
-                let (keys, values) = value.into_parts();
-                if let DictionaryKeyArray::SingleValue {
-                    data_type: _,
-                    length,
-                    value_index,
-                } = keys
+                let new_parent_id = if let Some(ids_nulls) = self.ids_array.1.as_mut()
+                    && !bit_util::get_bit(ids_nulls.as_slice(), record_index)
                 {
-                    if let Some(value_index) = value_index {
-                        let (attribute_type, new_value_index) = match process_value(
-                            values.get_value_at(value_index),
-                            attribute_capacity,
-                            strings_dict_values_builder,
-                            int_values,
-                            double_values,
-                            sers_values,
-                            bytes_values,
-                        ) {
-                            None => continue,
-                            Some(v) => v,
-                        };
-
-                        types_array_builder
-                            .resize(types_array_builder.len() + length, attribute_type);
-
-                        mapping.extend((0..length).map(|record_index| {
-                            (record_index, new_key_index, attribute_type, new_value_index)
-                        }));
-                    }
-                    continue;
-                }
-
-                lookup.clear();
-
-                for record_index in 0..keys.len() {
-                    let value_index = match keys.get_value_index_for_key_index(record_index) {
-                        None => continue,
-                        Some(v) => v,
-                    };
-
-                    let (attribute_type, new_value_index) =
-                        match lookup.entry((u8::MAX, value_index)) {
-                            Entry::Occupied(occupied) => occupied.into_mut(),
-                            Entry::Vacant(vacant) => match process_value(
-                                values.get_value_at(value_index),
-                                attribute_capacity,
-                                strings_dict_values_builder,
-                                int_values,
-                                double_values,
-                                sers_values,
-                                bytes_values,
-                            ) {
-                                None => continue,
-                                Some(v) => vacant.insert(v),
-                            },
-                        };
-
-                    types_array_builder.push(*attribute_type);
-                    mapping.push((
-                        record_index,
-                        new_key_index,
-                        *attribute_type,
-                        *new_value_index,
-                    ));
-                }
-            }
-        }
-    }
-}
-
-fn process_value<'a>(
-    value: ValueOrRef<'a>,
-    attribute_capacity: usize,
-    strings_dict_values_builder: &mut AttributeStringValueArrayBuilder<'a>,
-    int_values: &mut Option<AttributePrimitiveValueArrayBuilder<Int64Type>>,
-    double_values: &mut Option<Vec<f64>>,
-    sers_values: &mut Option<IndexSet<VecOrBuffer, ahash::RandomState>>,
-    bytes_values: &mut Option<IndexSet<BufferWrapper<u8>, ahash::RandomState>>,
-) -> Option<(u8, Option<usize>)> {
-    Some(match value {
-        ValueOrRef::Null => return None,
-        ValueOrRef::String(s) => {
-            if s.is_empty() {
-                (STRING_ATTRIBUTE_VALUE_TYPE, None)
-            } else {
-                let value_index = strings_dict_values_builder.get_or_insert(s);
-                (STRING_ATTRIBUTE_VALUE_TYPE, Some(value_index))
-            }
-        }
-        ValueOrRef::Integer(i) => {
-            if i == 0 {
-                (INT_ATTRIBUTE_VALUE_TYPE, None)
-            } else {
-                let ints = int_values.get_or_insert_with(|| {
-                    AttributePrimitiveValueArrayBuilder::<Int64Type>::with_capacity(
-                        attribute_capacity,
-                    )
-                });
-                let value_index = ints.get_or_insert(i);
-                (INT_ATTRIBUTE_VALUE_TYPE, Some(value_index))
-            }
-        }
-        ValueOrRef::Double(d) => {
-            if d == 0f64 {
-                (DOUBLE_ATTRIBUTE_VALUE_TYPE, None)
-            } else {
-                let doubles =
-                    double_values.get_or_insert_with(|| Vec::with_capacity(attribute_capacity));
-                let value_index = doubles.len();
-                doubles.push(d);
-                (DOUBLE_ATTRIBUTE_VALUE_TYPE, Some(value_index))
-            }
-        }
-        ValueOrRef::Boolean(b) => (BOOL_ATTRIBUTE_VALUE_TYPE, Some(if b { 1 } else { 0 })),
-        ValueOrRef::Array(a) => match a {
-            ArrayValueOrRef::Buffer(BufferArray::U8(b)) => {
-                if b.is_empty() {
-                    (BYTES_ATTRIBUTE_VALUE_TYPE, None)
+                    let new_parent_id = self.next_parent_id;
+                    *unsafe { ids_array.get_unchecked_mut(record_index) } = new_parent_id;
+                    self.next_parent_id = new_parent_id + 1;
+                    bit_util::set_bit(ids_nulls, record_index);
+                    new_parent_id
                 } else {
-                    let bytes = bytes_values.get_or_insert_with(|| {
-                        IndexSet::with_capacity_and_hasher(
-                            attribute_capacity,
-                            ahash::RandomState::new(),
-                        )
-                    });
-                    let (value_index, _) = bytes.insert_full(b);
-                    (BYTES_ATTRIBUTE_VALUE_TYPE, Some(value_index))
-                }
-            }
-            a => {
-                if a.is_empty() {
-                    (SLICE_ATTRIBUTE_VALUE_TYPE, None)
-                } else {
-                    match crate::serialization::to_slice(ValueOrRef::Array(a)) {
-                        Ok(v) => {
-                            let sers = sers_values.get_or_insert_with(|| {
-                                IndexSet::with_capacity_and_hasher(
-                                    attribute_capacity,
-                                    ahash::RandomState::new(),
+                    *unsafe { ids_array.get_unchecked(record_index) }
+                };
+
+                *unsafe { parent_ids_array.get_unchecked_mut(attribute_index) } = new_parent_id;
+
+                let processed_value = match *unsafe {
+                    attribute_types.get_unchecked(existing_attribute_index)
+                } {
+                    EMPTY_ATTRIBUTE_VALUE_TYPE => ProcessedValue::Empty,
+                    STRING_ATTRIBUTE_VALUE_TYPE => {
+                        if attributes_batch
+                            .attribute_string_keys
+                            .is_valid(existing_attribute_index)
+                        {
+                            let buffer = unsafe {
+                                get_generic_byte_array_buffer_value_unchecked(
+                                    attributes_batch.attribute_string_values,
+                                    attributes_batch
+                                        .attribute_string_keys
+                                        .value_unchecked(existing_attribute_index)
+                                        as usize,
                                 )
-                            });
-                            let (value_index, _) = sers.insert_full(VecOrBuffer::Vec(v));
-                            (SLICE_ATTRIBUTE_VALUE_TYPE, Some(value_index))
+                            };
+
+                            self.process_value(ValueOrRef::String(StringValueOrRef::Buffer(buffer)))
+                        } else {
+                            ProcessedValue::Empty
                         }
-                        Err(_) => (SLICE_ATTRIBUTE_VALUE_TYPE, None),
                     }
-                }
-            }
-        },
-        ValueOrRef::Map(m) => {
-            if m.as_map_value().is_empty() {
-                (MAP_ATTRIBUTE_VALUE_TYPE, None)
-            } else {
-                match crate::serialization::to_slice(ValueOrRef::Map(m)) {
-                    Ok(v) => {
-                        let sers = sers_values.get_or_insert_with(|| {
-                            IndexSet::with_capacity_and_hasher(
-                                attribute_capacity,
-                                ahash::RandomState::new(),
+                    INT_ATTRIBUTE_VALUE_TYPE => {
+                        if let Some(ints) = attributes_batch.attribute_ints
+                            && ints.keys().is_valid(existing_attribute_index)
+                        {
+                            self.process_value(ValueOrRef::Integer(unsafe {
+                                ints.values().value_unchecked(existing_attribute_index)
+                            }))
+                        } else {
+                            ProcessedValue::Empty
+                        }
+                    }
+                    DOUBLE_ATTRIBUTE_VALUE_TYPE => {
+                        if let Some(doubles) = attributes_batch.attribute_doubles
+                            && doubles.is_valid(existing_attribute_index)
+                        {
+                            self.process_value(ValueOrRef::Double(unsafe {
+                                doubles.value_unchecked(existing_attribute_index)
+                            }))
+                        } else {
+                            ProcessedValue::Empty
+                        }
+                    }
+                    BOOL_ATTRIBUTE_VALUE_TYPE => {
+                        if let Some(bools) = attributes_batch.attribute_bools
+                            && bools.is_valid(existing_attribute_index)
+                        {
+                            self.process_value(ValueOrRef::Boolean(unsafe {
+                                bools.value_unchecked(existing_attribute_index)
+                            }))
+                        } else {
+                            ProcessedValue::Empty
+                        }
+                    }
+                    SLICE_ATTRIBUTE_VALUE_TYPE => {
+                        if let Some(sers) = attributes_batch.attribute_sers
+                            && sers.keys().is_valid(existing_attribute_index)
+                        {
+                            let buffer = unsafe {
+                                get_generic_byte_array_buffer_value_unchecked(
+                                    sers.values(),
+                                    sers.keys().value_unchecked(existing_attribute_index) as usize,
+                                )
+                            };
+
+                            self.process_slice_value(
+                                VecOrBuffer::Buffer(BufferWrapper::new(buffer)),
+                                attribute_count,
                             )
-                        });
-                        let (value_index, _) = sers.insert_full(VecOrBuffer::Vec(v));
-                        (MAP_ATTRIBUTE_VALUE_TYPE, Some(value_index))
+                        } else {
+                            ProcessedValue::Empty
+                        }
                     }
-                    Err(_) => (MAP_ATTRIBUTE_VALUE_TYPE, None),
+                    MAP_ATTRIBUTE_VALUE_TYPE => {
+                        if let Some(sers) = attributes_batch.attribute_sers
+                            && sers.keys().is_valid(existing_attribute_index)
+                        {
+                            let buffer = unsafe {
+                                get_generic_byte_array_buffer_value_unchecked(
+                                    sers.values(),
+                                    sers.keys().value_unchecked(existing_attribute_index) as usize,
+                                )
+                            };
+
+                            self.process_map_value(
+                                VecOrBuffer::Buffer(BufferWrapper::new(buffer)),
+                                attribute_count,
+                            )
+                        } else {
+                            ProcessedValue::Empty
+                        }
+                    }
+                    BYTES_ATTRIBUTE_VALUE_TYPE => {
+                        if let Some(bytes) = attributes_batch.attribute_bytes
+                            && bytes.keys().is_valid(existing_attribute_index)
+                        {
+                            let buffer = unsafe {
+                                get_generic_byte_array_buffer_value_unchecked(
+                                    bytes.values(),
+                                    bytes.keys().value_unchecked(existing_attribute_index) as usize,
+                                )
+                            };
+
+                            self.process_value(ValueOrRef::Array(ArrayValueOrRef::Buffer(
+                                BufferArray::new_u8(buffer),
+                            )))
+                        } else {
+                            ProcessedValue::Empty
+                        }
+                    }
+                    t => panic!("Attribute type '{t}' is not supported"),
+                };
+
+                match processed_value {
+                    ProcessedValue::String(value_index) => {
+                        let strings = self.strings_dict.as_mut().expect("has strings");
+
+                        unsafe {
+                            if let Some(value_index) = value_index {
+                                if let Some(nulls) = strings.1.as_mut() {
+                                    bit_util::set_bit(nulls, attribute_index);
+                                }
+
+                                *strings
+                                    .0
+                                    .typed_data_mut::<u16>()
+                                    .get_unchecked_mut(attribute_index) = value_index as u16;
+                            } else {
+                                Self::ensure_nulls_unchecked(
+                                    &mut strings.1,
+                                    attribute_count,
+                                    attribute_index,
+                                );
+                            }
+
+                            self.update_nulls_unchecked(
+                                STRING_ATTRIBUTE_VALUE_TYPE,
+                                attribute_count,
+                                attribute_index,
+                            );
+                        }
+                    }
+                    ProcessedValue::Integer(value_index) => {
+                        let ints = self.ints_dict.as_mut().expect("has ints");
+
+                        unsafe {
+                            if let Some(value_index) = value_index {
+                                if let Some(nulls) = ints.1.as_mut() {
+                                    bit_util::set_bit(nulls, attribute_index);
+                                }
+
+                                *ints
+                                    .0
+                                    .typed_data_mut::<u16>()
+                                    .get_unchecked_mut(attribute_index) = value_index as u16;
+                            } else {
+                                Self::ensure_nulls_unchecked(
+                                    &mut ints.1,
+                                    attribute_count,
+                                    attribute_index,
+                                );
+                            }
+
+                            self.update_nulls_unchecked(
+                                INT_ATTRIBUTE_VALUE_TYPE,
+                                attribute_count,
+                                attribute_index,
+                            );
+                        }
+                    }
+                    ProcessedValue::Double(value) => {
+                        let doubles = self.doubles_array.as_mut().expect("has doubles");
+
+                        if let Some(value) = value {
+                            if let Some(nulls) = doubles.1.as_mut() {
+                                bit_util::set_bit(nulls, attribute_index);
+                            }
+
+                            *unsafe {
+                                doubles
+                                    .0
+                                    .typed_data_mut::<f64>()
+                                    .get_unchecked_mut(attribute_index)
+                            } = value;
+                        } else {
+                            unsafe {
+                                Self::ensure_nulls_unchecked(
+                                    &mut doubles.1,
+                                    attribute_count,
+                                    attribute_index,
+                                )
+                            };
+                        }
+
+                        unsafe {
+                            self.update_nulls_unchecked(
+                                DOUBLE_ATTRIBUTE_VALUE_TYPE,
+                                attribute_count,
+                                attribute_index,
+                            );
+                        }
+                    }
+                    ProcessedValue::Boolean(value) => {
+                        let bools = self.bools_array.as_mut().expect("has bools");
+
+                        if value {
+                            bit_util::set_bit(bools.0.as_mut(), attribute_index)
+                        }
+
+                        if let Some(nulls) = bools.1.as_mut() {
+                            bit_util::set_bit(nulls, attribute_index);
+                        }
+
+                        unsafe {
+                            self.update_nulls_unchecked(
+                                BOOL_ATTRIBUTE_VALUE_TYPE,
+                                attribute_count,
+                                attribute_index,
+                            );
+                        }
+                    }
+                    ProcessedValue::Bytes(value_index) => {
+                        let bytes = self.bytes_dict.as_mut().expect("has bytes");
+
+                        unsafe {
+                            if let Some(value_index) = value_index {
+                                if let Some(nulls) = bytes.1.as_mut() {
+                                    bit_util::set_bit(nulls, attribute_index);
+                                }
+
+                                *bytes
+                                    .0
+                                    .typed_data_mut::<u16>()
+                                    .get_unchecked_mut(attribute_index) = value_index as u16;
+                            } else {
+                                Self::ensure_nulls_unchecked(
+                                    &mut bytes.1,
+                                    attribute_count,
+                                    attribute_index,
+                                );
+                            }
+
+                            self.update_nulls_unchecked(
+                                BYTES_ATTRIBUTE_VALUE_TYPE,
+                                attribute_count,
+                                attribute_index,
+                            );
+                        }
+                    }
+                    ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => {
+                        let sers = self.sers_dict.as_mut().expect("has sers");
+
+                        unsafe {
+                            if let Some(value_index) = value_index {
+                                if let Some(nulls) = sers.1.as_mut() {
+                                    bit_util::set_bit(nulls, attribute_index);
+                                }
+
+                                *sers
+                                    .0
+                                    .typed_data_mut::<u16>()
+                                    .get_unchecked_mut(attribute_index) = value_index as u16;
+                            } else {
+                                Self::ensure_nulls_unchecked(
+                                    &mut sers.1,
+                                    attribute_count,
+                                    attribute_index,
+                                );
+                            }
+
+                            self.update_nulls_unchecked(
+                                SLICE_ATTRIBUTE_VALUE_TYPE,
+                                attribute_count,
+                                attribute_index,
+                            );
+                        }
+                    }
+                    ProcessedValue::Empty => unsafe {
+                        self.update_nulls_unchecked(
+                            EMPTY_ATTRIBUTE_VALUE_TYPE,
+                            attribute_count,
+                            attribute_index,
+                        )
+                    },
                 }
             }
         }
-        v => {
-            let s = v.to_value().convert_to_string();
-            if !s.as_ref().is_empty() {
-                let value_index = strings_dict_values_builder
-                    .get_or_insert(StringValueOrRef::Owned(Rc::new(s.into())));
-                (STRING_ATTRIBUTE_VALUE_TYPE, Some(value_index))
-            } else {
-                (STRING_ATTRIBUTE_VALUE_TYPE, None)
-            }
-        }
-    })
-}
-
-enum AdaptiveKeyAttributeArrayBuilder {
-    UInt8(MutableBuffer),
-    UInt16(MutableBuffer),
-}
-
-impl AdaptiveKeyAttributeArrayBuilder {
-    pub fn new(record_count: usize, value_count: usize) -> AdaptiveKeyAttributeArrayBuilder {
-        if value_count <= u8::MAX as usize {
-            AdaptiveKeyAttributeArrayBuilder::UInt8(MutableBuffer::from_len_zeroed(record_count))
-        } else {
-            AdaptiveKeyAttributeArrayBuilder::UInt16(MutableBuffer::from_len_zeroed(
-                record_count * 2,
-            ))
-        }
     }
 
-    pub fn get_writer(&'_ mut self) -> AdaptiveAttributeKeyArrayWriter<'_> {
-        match self {
-            AdaptiveKeyAttributeArrayBuilder::UInt8(b) => AdaptiveAttributeKeyArrayWriter::UInt8(
-                b.typed_data_mut::<u8>().as_mut_ptr(),
-                Default::default(),
-            ),
-            AdaptiveKeyAttributeArrayBuilder::UInt16(b) => AdaptiveAttributeKeyArrayWriter::UInt16(
-                b.typed_data_mut::<u16>().as_mut_ptr(),
-                Default::default(),
-            ),
-        }
+    pub fn push_key(&mut self, key: &str) -> usize {
+        let key_index = self.keys_value_builder.len();
+        self.keys_value_builder.append_value(key);
+        key_index
     }
 
-    pub fn finish(self, values: Arc<dyn Array>) -> Arc<dyn Array> {
-        match self {
-            AdaptiveKeyAttributeArrayBuilder::UInt8(b) => Arc::new(DictionaryArray::new(
-                PrimitiveArray::<UInt8Type>::new(b.into(), None),
-                values,
-            )),
-            AdaptiveKeyAttributeArrayBuilder::UInt16(b) => Arc::new(DictionaryArray::new(
-                PrimitiveArray::<UInt16Type>::new(b.into(), None),
-                values,
-            )),
-        }
-    }
-}
-
-enum AdaptiveAttributeKeyArrayWriter<'a> {
-    UInt8(*mut u8, PhantomData<&'a usize>),
-    UInt16(*mut u16, PhantomData<&'a usize>),
-}
-
-impl<'a> AdaptiveAttributeKeyArrayWriter<'a> {
-    pub unsafe fn set_value_index_unchecked(&mut self, key_index: usize, value_index: usize) {
-        unsafe {
-            match self {
-                AdaptiveAttributeKeyArrayWriter::UInt8(b, _) => {
-                    *b.add(key_index) = value_index as u8
-                }
-                AdaptiveAttributeKeyArrayWriter::UInt16(b, _) => {
-                    *b.add(key_index) = value_index as u16
-                }
-            }
-        }
-    }
-}
-
-struct AttributeKeyArrayBuilder<K: ArrowPrimitiveType> {
-    key_length: usize,
-    key_buffer: MutableBuffer,
-    null_buffer: MutableBuffer,
-    marker: PhantomData<K>,
-}
-
-impl<K: ArrowPrimitiveType> AttributeKeyArrayBuilder<K> {
-    pub fn new(key_length: usize) -> AttributeKeyArrayBuilder<K> {
-        Self {
-            key_length,
-            key_buffer: MutableBuffer::from_len_zeroed(size_of::<K::Native>() * key_length),
-            null_buffer: MutableBuffer::new_null(key_length),
-            marker: Default::default(),
-        }
-    }
-
-    pub fn get_writer(&mut self) -> AttributeKeyArrayWriter<'_, K> {
-        AttributeKeyArrayWriter {
-            key_builder: self.key_buffer.typed_data_mut::<K::Native>().as_mut_ptr(),
-            null_buffer: self.null_buffer.typed_data_mut::<u8>().as_mut_ptr(),
-            marker: Default::default(),
-        }
-    }
-
-    pub fn finish(self) -> PrimitiveArray<K> {
-        PrimitiveArray::<K>::new(
-            self.key_buffer.into(),
-            NullBufferBuilder::new_from_buffer(self.null_buffer, self.key_length).build(),
-        )
-    }
-}
-
-struct AttributeKeyArrayWriter<'a, K: ArrowPrimitiveType> {
-    key_builder: *mut K::Native,
-    null_buffer: *mut u8,
-    marker: PhantomData<&'a usize>,
-}
-
-impl<'a, K: ArrowPrimitiveType> AttributeKeyArrayWriter<'a, K> {
-    /// # Safety
-    ///
-    /// Calling this method with an out-of-bounds index is *[undefined behavior]*.
-    pub unsafe fn set_value_index_typed_unchecked(
+    fn process_slice_value(
         &mut self,
-        key_index: usize,
-        value_index: K::Native,
+        value: VecOrBuffer,
+        attribute_count: usize,
+    ) -> ProcessedValue {
+        if value.is_empty() {
+            ProcessedValue::Slice(None)
+        } else {
+            let value_index = self
+                .sers_dict
+                .get_or_insert_with(|| {
+                    let keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+                    (keys, None, IndexSet::with_hasher(RandomState::new()))
+                })
+                .2
+                .insert_full(value)
+                .0;
+            ProcessedValue::Slice(Some(value_index))
+        }
+    }
+
+    fn process_map_value(&mut self, value: VecOrBuffer, attribute_count: usize) -> ProcessedValue {
+        if value.is_empty() {
+            ProcessedValue::Map(None)
+        } else {
+            let value_index = self
+                .sers_dict
+                .get_or_insert_with(|| {
+                    let keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+                    (keys, None, IndexSet::with_hasher(RandomState::new()))
+                })
+                .2
+                .insert_full(value)
+                .0;
+            ProcessedValue::Map(Some(value_index))
+        }
+    }
+
+    unsafe fn update_nulls_unchecked(
+        &mut self,
+        except_attribute_type: u8,
+        attribute_count: usize,
+        attribute_position: usize,
     ) {
-        unsafe { *self.key_builder.add(key_index) = value_index }
-
-        let i = key_index / 8;
-        let b = 1 << (key_index % 8);
-
-        unsafe { *self.null_buffer.add(i) |= b };
-    }
-}
-
-struct AttributeBooleanArrayBuilder {
-    key_length: usize,
-    key_buffer: MutableBuffer,
-    null_buffer: MutableBuffer,
-}
-
-impl AttributeBooleanArrayBuilder {
-    pub fn new(key_length: usize) -> AttributeBooleanArrayBuilder {
-        Self {
-            key_length,
-            key_buffer: MutableBuffer::from_len_zeroed(bit_util::ceil(key_length, 8)),
-            null_buffer: MutableBuffer::new_null(key_length),
+        unsafe {
+            if except_attribute_type != STRING_ATTRIBUTE_VALUE_TYPE
+                && let Some(strings) = self.strings_dict.as_mut()
+            {
+                Self::ensure_nulls_unchecked(&mut strings.1, attribute_count, attribute_position)
+            }
+            if except_attribute_type != INT_ATTRIBUTE_VALUE_TYPE
+                && let Some(ints) = self.ints_dict.as_mut()
+            {
+                Self::ensure_nulls_unchecked(&mut ints.1, attribute_count, attribute_position)
+            }
+            if except_attribute_type != DOUBLE_ATTRIBUTE_VALUE_TYPE
+                && let Some(doubles) = self.doubles_array.as_mut()
+            {
+                Self::ensure_nulls_unchecked(&mut doubles.1, attribute_count, attribute_position)
+            }
+            if except_attribute_type != BOOL_ATTRIBUTE_VALUE_TYPE
+                && let Some(bools) = self.bools_array.as_mut()
+            {
+                Self::ensure_nulls_unchecked(&mut bools.1, attribute_count, attribute_position)
+            }
+            if except_attribute_type != BYTES_ATTRIBUTE_VALUE_TYPE
+                && let Some(bytes) = self.bytes_dict.as_mut()
+            {
+                Self::ensure_nulls_unchecked(&mut bytes.1, attribute_count, attribute_position)
+            }
+            if except_attribute_type != MAP_ATTRIBUTE_VALUE_TYPE
+                && except_attribute_type != SLICE_ATTRIBUTE_VALUE_TYPE
+                && let Some(sers) = self.sers_dict.as_mut()
+            {
+                Self::ensure_nulls_unchecked(&mut sers.1, attribute_count, attribute_position)
+            }
         }
     }
 
-    pub fn set_bit(&mut self, key_index: usize, value: bool) {
-        let i = key_index / 8;
-        let b = 1 << (key_index % 8);
+    unsafe fn fill_dictionay_range_unchecked<T>(
+        attribute_count: usize,
+        attribute_range: &std::ops::Range<usize>,
+        value_index: Option<usize>,
+        dictionary: &mut (MutableBuffer, Option<MutableBuffer>, T),
+    ) {
+        let nulls = &mut dictionary.1;
+        if let Some(value_index) = value_index {
+            let keys = dictionary.0.typed_data_mut::<u16>();
+            keys[attribute_range.clone()].fill(value_index as u16);
+            if let Some(nulls) = nulls {
+                unsafe {
+                    Self::fill_bit_range_unchecked(
+                        nulls,
+                        attribute_range.start,
+                        attribute_range.end,
+                    )
+                };
+            }
+        } else if nulls.is_none() {
+            let mut buffer = MutableBuffer::new_null(attribute_count);
 
-        if value {
-            self.key_buffer[i] |= b
+            unsafe { Self::fill_bits_from_start_unchecked(&mut buffer, attribute_range.start) };
+
+            *nulls = Some(buffer);
         }
-
-        self.null_buffer[i] |= b;
     }
 
-    pub fn finish(self) -> BooleanArray {
-        BooleanArray::new(
-            BooleanBuffer::new(self.key_buffer.into(), 0, self.key_length),
-            NullBufferBuilder::new_from_buffer(self.null_buffer, self.key_length).build(),
+    unsafe fn ensure_nulls_unchecked(
+        nulls: &mut Option<MutableBuffer>,
+        attribute_count: usize,
+        fill_count: usize,
+    ) {
+        if nulls.is_none() {
+            let mut buffer = MutableBuffer::new_null(attribute_count);
+            unsafe { Self::fill_bits_from_start_unchecked(&mut buffer, fill_count) };
+            *nulls = Some(buffer);
+        }
+    }
+
+    unsafe fn fill_bits_from_start_unchecked(buffer: &mut MutableBuffer, count: usize) {
+        debug_assert!(count <= buffer.len() * 8);
+
+        if count == 0 {
+            return;
+        }
+
+        let full_bytes = count / 8;
+        let remainder_bits = count % 8;
+
+        // 1. Fill all completely filled bytes with 1s
+        if full_bytes > 0 {
+            buffer[0..full_bytes].fill(0xFF);
+        }
+
+        // 2. Set only the targeted lower bits (LSB) in the final partial byte
+        if remainder_bits > 0 {
+            let mask = (1 << remainder_bits) - 1;
+            buffer[full_bytes] |= mask;
+        }
+    }
+
+    unsafe fn fill_bit_range_unchecked(
+        buffer: &mut [u8],
+        start_bit_inclusive: usize,
+        end_bit_exclusive: usize,
+    ) {
+        debug_assert!(start_bit_inclusive <= end_bit_exclusive);
+        debug_assert!(end_bit_exclusive <= buffer.len() * 8);
+
+        let start_byte = start_bit_inclusive / 8;
+        let end_byte = (end_bit_exclusive - 1) / 8;
+
+        let start_bit = start_bit_inclusive % 8;
+        let end_bit = (end_bit_exclusive - 1) % 8;
+
+        if start_byte == end_byte {
+            let mask = (((1u16 << (end_bit - start_bit + 1)) - 1) << start_bit) as u8;
+            buffer[start_byte] |= mask;
+            return;
+        }
+
+        // First partial byte (LSB)
+        buffer[start_byte] |= !0u8 << start_bit;
+
+        // Full bytes in the middle
+        buffer[start_byte + 1..end_byte].fill(0xff);
+
+        // Last partial byte (LSB)
+        buffer[end_byte] |= (1u8 << (end_bit + 1)) - 1;
+    }
+
+    unsafe fn fill_from_slice_unchecked(
+        source: &[u8],
+        destination: &mut [u8],
+        destination_offset: usize,
+        count: usize,
+    ) {
+        unsafe {
+            let src = source.as_ptr();
+            let dst = destination.as_mut_ptr().add(destination_offset);
+            std::ptr::copy_nonoverlapping(src, dst, count)
+        }
+    }
+
+    pub fn finish(mut self) -> (Arc<dyn Array>, RecordBatch) {
+        let ids_array = self.ids_array;
+
+        let record_count = ids_array.0.len() / 2;
+        let attribute_count = self.types_array_buffer.len();
+
+        let ids = PrimitiveArray::<UInt16Type>::new(
+            ids_array.0.into(),
+            ids_array
+                .1
+                .and_then(|b| NullBufferBuilder::new_from_buffer(b, record_count).build()),
+        );
+
+        let parent_ids =
+            PrimitiveArray::<UInt16Type>::new(self.parent_ids_array_buffer.into(), None);
+
+        let keys: Arc<dyn Array> = if self.keys_array_u16 {
+            Arc::new(DictionaryArray::<UInt16Type>::new(
+                PrimitiveArray::new(self.keys_array_buffer.into(), None),
+                Arc::new(self.keys_value_builder.finish()),
+            ))
+        } else {
+            Arc::new(DictionaryArray::<UInt8Type>::new(
+                PrimitiveArray::new(self.keys_array_buffer.into(), None),
+                Arc::new(self.keys_value_builder.finish()),
+            ))
+        };
+
+        let types = PrimitiveArray::<UInt8Type>::new(self.types_array_buffer.into(), None);
+
+        let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(9);
+        let mut fields = Vec::with_capacity(9);
+
+        fields.push(
+            Field::new(consts::PARENT_ID, parent_ids.data_type().clone(), false)
+                .with_plain_encoding(),
+        );
+        columns.push(Arc::new(parent_ids));
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_KEY,
+            keys.data_type().clone(),
+            false,
+        ));
+        columns.push(keys);
+
+        fields.push(Field::new(
+            consts::ATTRIBUTE_TYPE,
+            types.data_type().clone(),
+            false,
+        ));
+        columns.push(Arc::new(types));
+
+        if let Some((strings_keys, strings_nulls, strings_values)) = self.strings_dict {
+            let mut values = StringBuilder::with_capacity(
+                strings_values.len(),
+                strings_values.iter().map(|v| v.get_value().len()).sum(),
+            );
+
+            for value in strings_values.into_iter() {
+                values.append_value(value);
+            }
+
+            let strings = DictionaryArray::new(
+                PrimitiveArray::<UInt16Type>::new(
+                    strings_keys.into(),
+                    strings_nulls.and_then(|b| {
+                        NullBufferBuilder::new_from_buffer(b, attribute_count).build()
+                    }),
+                ),
+                Arc::new(values.finish()),
+            );
+
+            fields.push(Field::new(
+                consts::ATTRIBUTE_STR,
+                strings.data_type().clone(),
+                true,
+            ));
+            columns.push(Arc::new(strings));
+        }
+
+        if let Some((ints_keys, ints_nulls, ints_values)) = self.ints_dict {
+            let values = PrimitiveArray::<Int64Type>::from_iter(ints_values);
+
+            let ints = DictionaryArray::new(
+                PrimitiveArray::<UInt16Type>::new(
+                    ints_keys.into(),
+                    ints_nulls.and_then(|b| {
+                        NullBufferBuilder::new_from_buffer(b, attribute_count).build()
+                    }),
+                ),
+                Arc::new(values),
+            );
+
+            fields.push(Field::new(
+                consts::ATTRIBUTE_INT,
+                ints.data_type().clone(),
+                true,
+            ));
+            columns.push(Arc::new(ints));
+        }
+
+        if let Some((doubles_keys, doubles_nulls)) = self.doubles_array {
+            let doubles = PrimitiveArray::<Float64Type>::new(
+                doubles_keys.into(),
+                doubles_nulls
+                    .and_then(|b| NullBufferBuilder::new_from_buffer(b, attribute_count).build()),
+            );
+
+            fields.push(Field::new(
+                consts::ATTRIBUTE_DOUBLE,
+                doubles.data_type().clone(),
+                true,
+            ));
+            columns.push(Arc::new(doubles));
+        }
+
+        if let Some((bool_keys, bool_nulls)) = self.bools_array {
+            let bools = BooleanArray::new(
+                BooleanBuffer::new(bool_keys.into(), 0, attribute_count),
+                bool_nulls
+                    .and_then(|b| NullBufferBuilder::new_from_buffer(b, attribute_count).build()),
+            );
+
+            fields.push(Field::new(
+                consts::ATTRIBUTE_BOOL,
+                bools.data_type().clone(),
+                true,
+            ));
+            columns.push(Arc::new(bools));
+        }
+
+        if let Some((bytes_keys, bytes_nulls, bytes_values)) = self.bytes_dict {
+            let bytes = DictionaryArray::new(
+                PrimitiveArray::<UInt16Type>::new(
+                    bytes_keys.into(),
+                    bytes_nulls.and_then(|b| {
+                        NullBufferBuilder::new_from_buffer(b, attribute_count).build()
+                    }),
+                ),
+                Arc::new(BinaryArray::from(
+                    bytes_values
+                        .iter()
+                        .map(|v| v.as_ref())
+                        .collect::<Vec<&[u8]>>(),
+                )),
+            );
+
+            fields.push(Field::new(
+                consts::ATTRIBUTE_BYTES,
+                bytes.data_type().clone(),
+                true,
+            ));
+            columns.push(Arc::new(bytes));
+        }
+
+        if let Some((sers_keys, sers_nulls, sers_values)) = self.sers_dict {
+            let sers = DictionaryArray::new(
+                PrimitiveArray::<UInt16Type>::new(
+                    sers_keys.into(),
+                    sers_nulls.and_then(|b| {
+                        NullBufferBuilder::new_from_buffer(b, attribute_count).build()
+                    }),
+                ),
+                Arc::new(BinaryArray::from(
+                    sers_values
+                        .iter()
+                        .map(|v| match v {
+                            VecOrBuffer::Vec(v) => v,
+                            VecOrBuffer::Buffer(b) => b.as_ref(),
+                        })
+                        .collect::<Vec<&[u8]>>(),
+                )),
+            );
+
+            fields.push(Field::new(
+                consts::ATTRIBUTE_SER,
+                sers.data_type().clone(),
+                true,
+            ));
+            columns.push(Arc::new(sers));
+        }
+
+        (
+            Arc::new(ids),
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch"),
         )
     }
 }
 
-pub struct AttributeStringValueArrayBuilder<'a> {
-    lookup: AHashMap<StringValueOrRef<'a>, usize>,
-    builder: StringBuilder,
+#[derive(Clone)]
+enum ProcessedValue {
+    Empty,
+    String(Option<usize>),
+    Integer(Option<usize>),
+    Double(Option<f64>),
+    Boolean(bool),
+    Slice(Option<usize>),
+    Map(Option<usize>),
+    Bytes(Option<usize>),
 }
 
-impl<'a> AttributeStringValueArrayBuilder<'a> {
-    pub fn with_capacity(capacity: usize) -> AttributeStringValueArrayBuilder<'a> {
-        Self {
-            lookup: AHashMap::with_capacity(capacity),
-            builder: StringBuilder::new(),
+impl ProcessedValue {
+    pub fn get_attribute_type(&self) -> u8 {
+        match self {
+            ProcessedValue::Empty => EMPTY_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::String(_) => STRING_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::Integer(_) => INT_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::Double(_) => DOUBLE_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::Boolean(_) => BOOL_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::Slice(_) => SLICE_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::Map(_) => MAP_ATTRIBUTE_VALUE_TYPE,
+            ProcessedValue::Bytes(_) => BYTES_ATTRIBUTE_VALUE_TYPE,
         }
-    }
-
-    pub fn get_or_insert(&mut self, value: StringValueOrRef<'a>) -> usize {
-        match self.lookup.entry(value) {
-            Entry::Occupied(occupied) => *occupied.get(),
-            Entry::Vacant(vacant) => {
-                let index = self.builder.len();
-                self.builder.append_value(vacant.key().get_value());
-                *vacant.insert(index)
-            }
-        }
-    }
-
-    pub fn finish(mut self) -> StringArray {
-        self.builder.finish()
     }
 }
 
-pub struct AttributePrimitiveValueArrayBuilder<T: ArrowPrimitiveType> {
-    lookup: AHashMap<T::Native, usize>,
-    builder: PrimitiveBuilder<T>,
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum VecOrBuffer {
+    Vec(Vec<u8>),
+    Buffer(BufferWrapper<u8>),
 }
 
-impl<T: ArrowPrimitiveType> AttributePrimitiveValueArrayBuilder<T>
-where
-    T::Native: Hash + Eq,
-{
-    pub fn with_capacity(capacity: usize) -> AttributePrimitiveValueArrayBuilder<T> {
-        Self {
-            lookup: AHashMap::with_capacity(capacity),
-            builder: PrimitiveBuilder::new(),
+impl VecOrBuffer {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            VecOrBuffer::Vec(items) => items.is_empty(),
+            VecOrBuffer::Buffer(buffer_wrapper) => buffer_wrapper.is_empty(),
         }
     }
+}
 
-    pub fn get_or_insert(&mut self, value: T::Native) -> usize {
-        match self.lookup.entry(value) {
-            Entry::Occupied(occupied) => *occupied.get(),
-            Entry::Vacant(vacant) => {
-                let index = self.builder.len();
-                self.builder.append_value(value);
-                *vacant.insert(index)
-            }
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    pub fn finish(mut self) -> PrimitiveArray<T> {
-        self.builder.finish()
+    #[test]
+    fn test_fill_bit_range_unchecked() {
+        let mut buffer = MutableBuffer::from_len_zeroed(8);
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 0, 1) };
+
+        assert_eq!(&[0x01, 0, 0, 0, 0, 0, 0, 0], buffer.to_byte_slice());
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 0, 2) };
+
+        assert_eq!(&[0x03, 0, 0, 0, 0, 0, 0, 0], buffer.to_byte_slice());
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 7, 8) };
+
+        assert_eq!(&[0x83, 0, 0, 0, 0, 0, 0, 0], buffer.to_byte_slice());
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 8, 17) };
+
+        assert_eq!(&[0x83, 0xFF, 0x01, 0, 0, 0, 0, 0], buffer.to_byte_slice());
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 25, 26) };
+
+        assert_eq!(
+            &[0x83, 0xFF, 0x01, 0x02, 0, 0, 0, 0],
+            buffer.to_byte_slice()
+        );
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 33, 35) };
+
+        assert_eq!(
+            &[0x83, 0xFF, 0x01, 0x02, 0x06, 0, 0, 0],
+            buffer.to_byte_slice()
+        );
+
+        unsafe { AttributesBuilder::fill_bit_range_unchecked(&mut buffer, 41, 63) };
+
+        assert_eq!(
+            &[0x83, 0xFF, 0x01, 0x02, 0x06, 0xFE, 0xFF, 0x7F],
+            buffer.to_byte_slice()
+        );
     }
 }

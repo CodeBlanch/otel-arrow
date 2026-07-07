@@ -352,20 +352,23 @@ where
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(&mut |v| match transform(v) {
-            ValueOrRef::Null => None,
-            v => Some(v),
-        });
+    let (mut transformed_values, value_index_lookup) = values.into_set();
 
     let mut null_index = None;
 
     for (key_index, value_index) in keys.into_iter().enumerate() {
-        if let Some(value_index) = value_index.map(<K as ArrowPrimitiveType>::Native::as_usize)
-            && let Some(Some(transformed_value_index)) = value_index_lookup.get(&value_index)
-        {
-            unsafe { key_writer.set_value_index_unchecked(key_index, *transformed_value_index) };
-            continue;
+        if let Some(value_index) = value_index.map(<K as ArrowPrimitiveType>::Native::as_usize) {
+            if let Some(value_index_lookup) = value_index_lookup.as_ref() {
+                if let Some(Some(transformed_value_index)) = value_index_lookup.get(&value_index) {
+                    unsafe {
+                        key_writer.set_value_index_unchecked(key_index, *transformed_value_index)
+                    };
+                    continue;
+                }
+            } else {
+                unsafe { key_writer.set_value_index_unchecked(key_index, value_index) };
+                continue;
+            }
         }
 
         let (has_value_index, value_index) = match null_index {
@@ -411,17 +414,20 @@ where
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(&mut |v| match transform(v) {
-            ValueOrRef::Null => None,
-            v => Some(v),
-        });
+    let (mut transformed_values, value_index_lookup) = values.into_set();
 
     let mut null_index = None;
 
     for key_index in 0..key_length {
-        if let Some(Some(transformed_value_index)) = value_index_lookup.get(&key_index) {
-            unsafe { key_writer.set_value_index_unchecked(key_index, *transformed_value_index) };
+        if let Some(value_index_lookup) = value_index_lookup.as_ref() {
+            if let Some(Some(transformed_value_index)) = value_index_lookup.get(&key_index) {
+                unsafe {
+                    key_writer.set_value_index_unchecked(key_index, *transformed_value_index)
+                };
+                continue;
+            }
+        } else {
+            unsafe { key_writer.set_value_index_unchecked(key_index, key_index) };
             continue;
         }
 

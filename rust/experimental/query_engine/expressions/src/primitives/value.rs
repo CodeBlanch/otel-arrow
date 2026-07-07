@@ -1010,9 +1010,9 @@ impl From<String> for ValueString<'_> {
     }
 }
 
-impl Into<String> for ValueString<'_> {
-    fn into(self) -> String {
-        match self {
+impl From<ValueString<'_>> for String {
+    fn from(val: ValueString<'_>) -> Self {
+        match val {
             ValueString::Ref(r) => r.into(),
             ValueString::Owned(o) => o,
         }

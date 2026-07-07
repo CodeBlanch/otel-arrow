@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{hash::Hash, marker::PhantomData, rc::Rc, sync::Arc};
+use std::{cell::OnceCell, hash::Hash, marker::PhantomData, rc::Rc, sync::Arc};
 
 use ahash::{AHashMap, RandomState};
 use arrow::{
@@ -15,7 +15,10 @@ use indexmap::IndexSet;
 
 use crate::*;
 
-pub type ValueOrRefSet<'a> = IndexSet<ValueOrRef<'a>, RandomState>;
+pub(crate) type ValueOrRefSet<'a> = GenericSet<ValueOrRef<'a>>;
+pub type GenericSet<T> = IndexSet<T, RandomState>;
+pub type IndexLookup = Option<AHashMap<usize, Option<usize>>>;
+pub(crate) type SetWithLookup<T> = (GenericSet<T>, IndexLookup);
 
 #[derive(Debug, Clone)]
 pub enum DictionaryValueArray<'a> {
@@ -53,9 +56,64 @@ impl DictionaryValueArray<'_> {
         }
     }
 
-    pub fn transform_into_string_array(
-        self,
-    ) -> (StringArray, Option<AHashMap<usize, Option<usize>>>) {
+    pub fn nulls(&self) -> Option<NullBuffer> {
+        match self {
+            DictionaryValueArray::Array(a) => a.nulls().cloned(),
+            DictionaryValueArray::Vec(a) => {
+                let mut buffer = OnceCell::new();
+
+                for (index, value) in a.iter().enumerate() {
+                    if matches!(value, ValueOrRef::Null) {
+                        buffer.get_or_init(|| {
+                            let l = a.len();
+                            BooleanBufferBuilder::new_from_buffer(
+                                MutableBuffer::new_null(a.len()),
+                                l,
+                            )
+                        });
+                        let buffer = buffer.get_mut().expect("has buffer");
+                        buffer.set_bit(index, true);
+                    }
+                }
+
+                buffer.take().map(|mut b| {
+                    for byte in b.as_slice_mut() {
+                        *byte = !*byte;
+                    }
+
+                    NullBuffer::new(b.build())
+                })
+            }
+            DictionaryValueArray::Set(a) => {
+                let mut buffer = OnceCell::new();
+
+                for (index, value) in a.iter().enumerate() {
+                    if matches!(value, ValueOrRef::Null) {
+                        buffer.get_or_init(|| {
+                            let l = a.len();
+                            BooleanBufferBuilder::new_from_buffer(
+                                MutableBuffer::new_null(a.len()),
+                                l,
+                            )
+                        });
+                        let buffer = buffer.get_mut().expect("has buffer");
+                        buffer.set_bit(index, true);
+                    }
+                }
+
+                buffer.take().map(|mut b| {
+                    for byte in b.as_slice_mut() {
+                        *byte = !*byte;
+                    }
+
+                    NullBuffer::new(b.build())
+                })
+            }
+            DictionaryValueArray::Boolean => None,
+        }
+    }
+
+    pub fn transform_into_string_array(self) -> (StringArray, IndexLookup) {
         self.transform_into_array(
             ArrayRef::as_string_opt,
             |v| Some(v.to_string()),
@@ -63,9 +121,7 @@ impl DictionaryValueArray<'_> {
         )
     }
 
-    pub fn transform_into_int_array<T: ArrowPrimitiveType>(
-        self,
-    ) -> (PrimitiveArray<T>, Option<AHashMap<usize, Option<usize>>>)
+    pub fn transform_into_int_array<T: ArrowPrimitiveType>(self) -> (PrimitiveArray<T>, IndexLookup)
     where
         T::Native: Hash + Eq + TryFrom<i64>,
         PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
@@ -79,10 +135,7 @@ impl DictionaryValueArray<'_> {
 
     pub fn transform_into_timestamp_nanoseconds_array(
         self,
-    ) -> (
-        PrimitiveArray<TimestampNanosecondType>,
-        Option<AHashMap<usize, Option<usize>>>,
-    ) {
+    ) -> (PrimitiveArray<TimestampNanosecondType>, IndexLookup) {
         self.transform_into_array(
             ArrayRef::as_primitive_opt::<TimestampNanosecondType>,
             |v| {
@@ -96,7 +149,7 @@ impl DictionaryValueArray<'_> {
 
     pub fn transform_into_fixed_sized_binary_array<const SIZE: usize>(
         self,
-    ) -> (FixedSizeBinaryArray, Option<AHashMap<usize, Option<usize>>>) {
+    ) -> (FixedSizeBinaryArray, IndexLookup) {
         self.transform_into_array(
             |v| {
                 v.as_fixed_size_binary_opt().and_then(|v| {
@@ -162,7 +215,7 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn into_set(self) -> (ValueOrRefSet<'a>, Option<AHashMap<usize, Option<usize>>>) {
+    pub fn into_set(self) -> SetWithLookup<ValueOrRef<'a>> {
         let t = &mut |v| {
             if matches!(v, ValueOrRef::Null) {
                 None
@@ -176,24 +229,22 @@ impl<'a> DictionaryValueArray<'a> {
             DictionaryValueArray::Vec(a) => {
                 transform_iter_into_set(t, a.len(), Rc::unwrap_or_clone(a).into_iter().enumerate())
             }
-            DictionaryValueArray::Set(a) => {
-                return (Rc::unwrap_or_clone(a), None);
-            }
+            DictionaryValueArray::Set(a) => (Rc::unwrap_or_clone(a), None),
             DictionaryValueArray::Boolean => {
                 let mut set = ValueOrRefSet::with_capacity_and_hasher(2, RandomState::new());
                 set.insert(ValueOrRef::Boolean(false));
                 set.insert(ValueOrRef::Boolean(true));
-                return (set, None);
+                (set, None)
             }
         };
 
-        (set, Some(lookup))
+        (set, lookup)
     }
 
     pub fn transform_into_set<T: Hash + Eq, FTransform>(
         self,
         transform: &mut FTransform,
-    ) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
+    ) -> SetWithLookup<T>
     where
         FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
     {
@@ -247,7 +298,7 @@ impl<'a> DictionaryValueArray<'a> {
         as_array: FAsArray,
         convert: FConvert,
         build: FBuild,
-    ) -> (TArray, Option<AHashMap<usize, Option<usize>>>)
+    ) -> (TArray, IndexLookup)
     where
         FAsArray: Fn(&Arc<dyn Array>) -> Option<&TArray>,
         FConvert: Fn(ValueOrRef<'a>) -> Option<T>,
@@ -260,7 +311,7 @@ impl<'a> DictionaryValueArray<'a> {
                 } else {
                     let (values, lookup) = transform_array_into_set(&mut |v| convert(v), a);
 
-                    (build(values.into_iter().collect::<Vec<_>>()), Some(lookup))
+                    (build(values.into_iter().collect::<Vec<_>>()), lookup)
                 }
             }
             DictionaryValueArray::Vec(a) => {
@@ -451,7 +502,7 @@ where
 fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(
     transform: &mut FTransform,
     value: Arc<dyn Array>,
-) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
+) -> SetWithLookup<T>
 where
     FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
 {
@@ -654,28 +705,41 @@ where
     }
 }
 
-fn transform_iter_into_set<'a, T: Hash + Eq, FTransform, I>(
-    transform: &mut FTransform,
+fn transform_iter_into_set<T: Hash + Eq, FTransform, I, V>(
+    mut transform: FTransform,
     max_length: usize,
     iter: I,
-) -> (IndexSet<T, RandomState>, AHashMap<usize, Option<usize>>)
+) -> SetWithLookup<T>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
-    I: Iterator<Item = (usize, ValueOrRef<'a>)>,
+    FTransform: FnMut(V) -> Option<T>,
+    I: Iterator<Item = (usize, V)>,
 {
     let mut value_index_lookup = AHashMap::with_capacity(max_length);
     let mut transformed_values = IndexSet::with_capacity_and_hasher(max_length, RandomState::new());
 
+    let mut remapped = false;
+
     for (index, value) in iter {
         if let Some(transformed_value) = transform(value) {
-            let (transformed_index, _) = transformed_values.insert_full(transformed_value);
+            let (transformed_index, added) = transformed_values.insert_full(transformed_value);
             value_index_lookup.insert(index, Some(transformed_index));
+            if !added {
+                remapped = true;
+            }
         } else {
             value_index_lookup.insert(index, None);
+            remapped = true;
         }
     }
 
-    (transformed_values, value_index_lookup)
+    (
+        transformed_values,
+        if remapped {
+            Some(value_index_lookup)
+        } else {
+            None
+        },
+    )
 }
 
 fn transform_iter_into_array<
@@ -690,7 +754,7 @@ fn transform_iter_into_array<
     values: TItems,
     build: FBuild,
     transform: FTransform,
-) -> (TOutput, Option<AHashMap<usize, Option<usize>>>)
+) -> (TOutput, IndexLookup)
 where
     FBuild: Fn(Vec<TInput>) -> TOutput,
     FTransform: Fn(ValueOrRef<'a>) -> Option<TInput>,
@@ -944,5 +1008,46 @@ impl<'a> Iterator for FixedSizeBinaryArrayIter<'a, '_> {
         self.current = current + 1;
 
         Some(ret)
+    }
+}
+
+pub trait ArrowArraySetTransformer {
+    fn into_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
+    where
+        FTransform: FnMut(Option<Buffer>) -> Option<V>;
+}
+
+impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
+    fn into_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
+    where
+        FTransform: FnMut(Option<Buffer>) -> Option<V>,
+    {
+        let offsets = self.value_offsets();
+        let values = self.values();
+
+        if let Some(nulls) = self.nulls() {
+            let mut previous_offset = 0;
+            let i = offsets.iter().enumerate().map(|(index, end)| {
+                let end = T::as_usize(*end);
+                let r = if nulls.is_null(index) {
+                    None
+                } else {
+                    let buffer = values.slice_with_length(previous_offset, end);
+                    Some(buffer)
+                };
+                previous_offset = end;
+                r
+            });
+            transform_iter_into_set(transform, self.len(), i.enumerate())
+        } else {
+            let mut previous_offset = 0;
+            let i = offsets.iter().map(|end| {
+                let end = T::as_usize(*end);
+                let buffer = values.slice_with_length(previous_offset, end);
+                previous_offset = end;
+                Some(buffer)
+            });
+            transform_iter_into_set(transform, self.len(), i.enumerate())
+        }
     }
 }
