@@ -9,13 +9,12 @@ use std::{
     sync::Arc,
 };
 
-use crate::{arrow_helpers::ArrowTypedDictionaryValueIndexAccessor, *};
-use ahash::AHashMap;
-use arrow::{
-    array::*,
-    buffer::{Buffer, MutableBuffer},
-    datatypes::*,
+use crate::{
+    arrow_helpers::{ArrowGenericByteArrayBufferAccessor, ArrowTypedDictionaryValueIndexAccessor},
+    *,
 };
+use ahash::AHashMap;
+use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
 use data_engine_columnar::*;
 use otap_df_pdata::{otlp::attributes::*, schema::consts};
 
@@ -360,10 +359,10 @@ impl OtapAttributesBatch<'_> {
         match attribute_type {
             STRING_ATTRIBUTE_VALUE_TYPE => ValueOrRef::String(StringValueOrRef::Buffer({
                 unsafe {
-                    get_generic_byte_array_buffer_value_unchecked(
-                        self.attribute_strings.expect("has string values").values(),
-                        attribute_value_index,
-                    )
+                    self.attribute_strings
+                        .expect("has string values")
+                        .values()
+                        .get_buffer_value_unchecked(attribute_value_index)
                 }
             })),
             MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
@@ -379,10 +378,10 @@ impl OtapAttributesBatch<'_> {
             }
             BYTES_ATTRIBUTE_VALUE_TYPE => ValueOrRef::Array(ArrayValueOrRef::Buffer({
                 BufferArray::new_u8(unsafe {
-                    get_generic_byte_array_buffer_value_unchecked(
-                        self.attribute_bytes.expect("has bytes values").values(),
-                        attribute_value_index,
-                    )
+                    self.attribute_bytes
+                        .expect("has bytes values")
+                        .values()
+                        .get_buffer_value_unchecked(attribute_value_index)
                 })
             })),
             d => panic!("Attribute type '{d}' is not supported"),
@@ -471,16 +470,6 @@ impl<'record> OtapAttributesBatch<'record> {
             attributes_batch,
         )
     }
-}
-
-pub(crate) unsafe fn get_generic_byte_array_buffer_value_unchecked<T: ByteArrayType>(
-    bytes: &GenericByteArray<T>,
-    value_index: usize,
-) -> Buffer {
-    let offsets = bytes.value_offsets();
-    let start = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index) });
-    let end = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index + 1) });
-    bytes.values().slice_with_length(start, end - start).clone()
 }
 
 #[derive(Debug)]

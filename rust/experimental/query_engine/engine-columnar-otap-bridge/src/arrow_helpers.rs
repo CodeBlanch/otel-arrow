@@ -6,7 +6,7 @@ use std::{hash::Hash, rc::Rc, sync::Arc};
 use ahash::{AHashMap, RandomState};
 use arrow::{
     array::*,
-    buffer::{BooleanBuffer, MutableBuffer},
+    buffer::{BooleanBuffer, Buffer, MutableBuffer},
     datatypes::*,
     util::bit_util,
 };
@@ -1477,12 +1477,8 @@ impl AttributesBuilder<'_> {
                             && let Some(value_index) =
                                 strings.get_value_index_null_safe(existing_attribute_index)
                         {
-                            let buffer = unsafe {
-                                get_generic_byte_array_buffer_value_unchecked(
-                                    strings.values(),
-                                    value_index,
-                                )
-                            };
+                            let buffer =
+                                unsafe { strings.values().get_buffer_value_unchecked(value_index) };
 
                             self.process_value(ValueOrRef::String(StringValueOrRef::Buffer(buffer)))
                         } else {
@@ -1528,12 +1524,8 @@ impl AttributesBuilder<'_> {
                             && let Some(value_index) =
                                 sers.get_value_index_null_safe(existing_attribute_index)
                         {
-                            let buffer = unsafe {
-                                get_generic_byte_array_buffer_value_unchecked(
-                                    sers.values(),
-                                    value_index,
-                                )
-                            };
+                            let buffer =
+                                unsafe { sers.values().get_buffer_value_unchecked(value_index) };
 
                             self.process_slice_value(
                                 VecOrBuffer::Buffer(BufferWrapper::new(buffer)),
@@ -1547,12 +1539,8 @@ impl AttributesBuilder<'_> {
                         if let Some(sers) = attributes_batch.attribute_sers
                             && let Some(value_index) = sers.get_value_index_null_safe(key_index)
                         {
-                            let buffer = unsafe {
-                                get_generic_byte_array_buffer_value_unchecked(
-                                    sers.values(),
-                                    value_index,
-                                )
-                            };
+                            let buffer =
+                                unsafe { sers.values().get_buffer_value_unchecked(value_index) };
 
                             self.process_map_value(
                                 VecOrBuffer::Buffer(BufferWrapper::new(buffer)),
@@ -1566,12 +1554,8 @@ impl AttributesBuilder<'_> {
                         if let Some(bytes) = attributes_batch.attribute_bytes
                             && let Some(value_index) = bytes.get_value_index_null_safe(key_index)
                         {
-                            let buffer = unsafe {
-                                get_generic_byte_array_buffer_value_unchecked(
-                                    bytes.values(),
-                                    value_index,
-                                )
-                            };
+                            let buffer =
+                                unsafe { bytes.values().get_buffer_value_unchecked(value_index) };
 
                             self.process_value(ValueOrRef::Array(ArrayValueOrRef::Buffer(
                                 BufferArray::new_u8(buffer),
@@ -2199,6 +2183,19 @@ impl<K: ArrowDictionaryKeyType, V: Array> ArrowTypedDictionaryValueIndexAccessor
         }
 
         Some(value_index)
+    }
+}
+
+pub(crate) trait ArrowGenericByteArrayBufferAccessor {
+    unsafe fn get_buffer_value_unchecked(&self, value_index: usize) -> Buffer;
+}
+
+impl<T: ByteArrayType> ArrowGenericByteArrayBufferAccessor for GenericByteArray<T> {
+    unsafe fn get_buffer_value_unchecked(&self, value_index: usize) -> Buffer {
+        let offsets = self.value_offsets();
+        let start = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index) });
+        let end = T::Offset::as_usize(unsafe { *offsets.get_unchecked(value_index + 1) });
+        self.values().slice_with_length(start, end - start).clone()
     }
 }
 
