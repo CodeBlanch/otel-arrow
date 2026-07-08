@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::*;
+use crate::{arrow_helpers::ArrowTypedDictionaryValueIndexAccessor, *};
 use ahash::AHashMap;
 use arrow::{
     array::*,
@@ -151,8 +151,7 @@ pub struct OtapAttributesBatch<'record> {
     pub(crate) attribute_keys:
         AdaptiveDictionaryReader<'record, GenericByteArray<GenericStringType<i32>>>,
     pub(crate) attribute_types: &'record PrimitiveArray<UInt8Type>,
-    pub(crate) attribute_string_keys: &'record PrimitiveArray<UInt16Type>,
-    pub(crate) attribute_string_values: &'record GenericByteArray<GenericStringType<i32>>,
+    pub(crate) attribute_strings: Option<TypedDictionaryArray<'record, UInt16Type, StringArray>>,
     pub(crate) attribute_ints:
         Option<TypedDictionaryArray<'record, UInt16Type, PrimitiveArray<Int64Type>>>,
     pub(crate) attribute_doubles: Option<&'record PrimitiveArray<Float64Type>>,
@@ -290,20 +289,23 @@ impl OtapAttributesBatch<'_> {
         match attribute_type {
             EMPTY_ATTRIBUTE_VALUE_TYPE => {}
             STRING_ATTRIBUTE_VALUE_TYPE => {
-                let keys = self.attribute_string_keys;
-                return Some(if keys.is_valid(attribute_index) {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    AttributeValueOrIndex::ValueIndex(value_index as usize)
-                } else {
-                    AttributeValueOrIndex::Value(ValueOrRef::String(StringValueOrRef::Empty))
-                });
+                return Some(
+                    if let Some(strings) = self.attribute_strings
+                        && let Some(value_index) =
+                            strings.get_value_index_null_safe(attribute_index)
+                    {
+                        AttributeValueOrIndex::ValueIndex(value_index)
+                    } else {
+                        AttributeValueOrIndex::Value(ValueOrRef::String(StringValueOrRef::Empty))
+                    },
+                );
             }
             INT_ATTRIBUTE_VALUE_TYPE => {
                 return Some(
                     if let Some(ints) = self.attribute_ints
-                        && ints.is_valid(attribute_index)
+                        && let Some(value_index) = ints.get_value_index_null_safe(attribute_index)
                     {
-                        let value = unsafe { ints.value_unchecked(attribute_index) };
+                        let value = unsafe { ints.value_unchecked(value_index) };
                         AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
                     } else {
                         AttributeValueOrIndex::Value(ValueOrRef::Integer(0))
@@ -331,19 +333,17 @@ impl OtapAttributesBatch<'_> {
                 }
             }
             MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
-                if let Some(keys) = self.attribute_sers.map(|v| v.keys())
-                    && keys.is_valid(attribute_index)
+                if let Some(sers) = self.attribute_sers
+                    && let Some(value_index) = sers.get_value_index_null_safe(attribute_index)
                 {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index as usize));
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
             BYTES_ATTRIBUTE_VALUE_TYPE => {
-                if let Some(keys) = self.attribute_bytes.map(|v| v.keys())
-                    && keys.is_valid(attribute_index)
+                if let Some(bytes) = self.attribute_bytes
+                    && let Some(value_index) = bytes.get_value_index_null_safe(attribute_index)
                 {
-                    let value_index = unsafe { keys.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::ValueIndex(value_index as usize));
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
                 }
             }
             d => panic!("Attribute type '{d}' is not supported"),
@@ -361,7 +361,7 @@ impl OtapAttributesBatch<'_> {
             STRING_ATTRIBUTE_VALUE_TYPE => ValueOrRef::String(StringValueOrRef::Buffer({
                 unsafe {
                     get_generic_byte_array_buffer_value_unchecked(
-                        self.attribute_string_values,
+                        self.attribute_strings.expect("has string values").values(),
                         attribute_value_index,
                     )
                 }
@@ -397,29 +397,6 @@ impl<'record> OtapAttributesBatch<'record> {
         id_to_record_index_map: Option<PrimitiveArray<UInt16Type>>,
         attributes_batch: &'record RecordBatch,
     ) -> OtapAttributesBatch<'record> {
-        let strings = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_STR)
-            .expect("strings")
-            .as_dictionary::<UInt16Type>()
-            .downcast_dict::<StringArray>()
-            .expect("Attribute strings were an unexpected type");
-
-        let bytes = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_BYTES)
-            .map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<BinaryArray>()
-                    .expect("Attribute bytes were an unexpected type")
-            });
-
-        let ser = attributes_batch
-            .column_by_name(consts::ATTRIBUTE_SER)
-            .map(|c| {
-                c.as_dictionary::<UInt16Type>()
-                    .downcast_dict::<BinaryArray>()
-                    .expect("Attribute ser was an unexpected type")
-            });
-
         let id_to_record_index_map = if let Some(id_to_record_index_map) = id_to_record_index_map {
             let v = OnceCell::new();
             v.set(id_to_record_index_map).expect("set");
@@ -442,8 +419,13 @@ impl<'record> OtapAttributesBatch<'record> {
                 .column_by_name(consts::ATTRIBUTE_TYPE)
                 .expect("has types")
                 .as_primitive::<UInt8Type>(),
-            attribute_string_keys: strings.keys(),
-            attribute_string_values: strings.values(),
+            attribute_strings: attributes_batch
+                .column_by_name(consts::ATTRIBUTE_STR)
+                .map(|v| {
+                    v.as_dictionary::<UInt16Type>()
+                        .downcast_dict::<StringArray>()
+                        .expect("Attribute strings were an unexpected type")
+                }),
             attribute_ints: attributes_batch
                 .column_by_name(consts::ATTRIBUTE_INT)
                 .map(|c| {
@@ -457,8 +439,20 @@ impl<'record> OtapAttributesBatch<'record> {
             attribute_bools: attributes_batch
                 .column_by_name(consts::ATTRIBUTE_BOOL)
                 .map(|c| c.as_boolean()),
-            attribute_bytes: bytes,
-            attribute_sers: ser,
+            attribute_bytes: attributes_batch
+                .column_by_name(consts::ATTRIBUTE_BYTES)
+                .map(|c| {
+                    c.as_dictionary::<UInt16Type>()
+                        .downcast_dict::<BinaryArray>()
+                        .expect("Attribute bytes were an unexpected type")
+                }),
+            attribute_sers: attributes_batch
+                .column_by_name(consts::ATTRIBUTE_SER)
+                .map(|c| {
+                    c.as_dictionary::<UInt16Type>()
+                        .downcast_dict::<BinaryArray>()
+                        .expect("Attribute ser was an unexpected type")
+                }),
         }
     }
 

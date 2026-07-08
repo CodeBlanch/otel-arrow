@@ -559,64 +559,65 @@ impl<'a> AttributesBuilder<'a> {
             .max()
             .map_or(0, |v| v + 1);
 
-        let (strings_values, strings_values_lookup) =
-            DictionaryValueArray::Array(Arc::new(attributes_batch.attribute_string_values.clone()))
-                .transform_into_set(&mut |v| {
-                    if let ValueOrRef::String(s) = v {
-                        Some(s)
-                    } else {
-                        None
-                    }
-                });
-        let mut strings_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
-        let mut strings_nulls = None;
-        match strings_values_lookup {
-            None => unsafe {
-                AttributesBuilder::fill_from_slice_unchecked(
-                    attributes_batch
-                        .attribute_string_keys
-                        .values()
-                        .to_byte_slice(),
-                    strings_keys.as_slice_mut(),
-                    0,
-                    existing_attributes_count * 2,
-                );
-                if let Some(nulls) = attributes_batch.attribute_string_keys.nulls() {
-                    let mut null_buffer = MutableBuffer::new_null(attribute_count);
+        let strings_dict = if let Some(strings) = attributes_batch.attribute_strings {
+            let (strings_values, strings_values_lookup) = DictionaryValueArray::Array(Arc::new(
+                strings.values().clone(),
+            ))
+            .transform_into_set(&mut |v| {
+                if let ValueOrRef::String(s) = v {
+                    Some(s)
+                } else {
+                    None
+                }
+            });
+            let mut strings_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
+            let mut strings_nulls = None;
+            match strings_values_lookup {
+                None => unsafe {
                     AttributesBuilder::fill_from_slice_unchecked(
-                        nulls.validity(),
-                        null_buffer.as_slice_mut(),
+                        strings.keys().values().to_byte_slice(),
+                        strings_keys.as_slice_mut(),
                         0,
-                        bit_util::ceil(existing_attributes_count, 8),
+                        existing_attributes_count * 2,
                     );
-                    strings_nulls = Some(null_buffer);
-                }
-            },
-            Some(lookup) => {
-                let keys = strings_keys.typed_data_mut::<u16>();
-                for (key_index, value_index) in
-                    attributes_batch.attribute_string_keys.iter().enumerate()
-                {
-                    if let Some(value_index) = value_index
-                        && let Some(Some(transformed_value_index)) =
-                            lookup.get(&(value_index as usize))
-                    {
-                        keys[key_index] = *transformed_value_index as u16;
-                        continue;
+                    if let Some(nulls) = strings.keys().nulls() {
+                        let mut null_buffer = MutableBuffer::new_null(attribute_count);
+                        AttributesBuilder::fill_from_slice_unchecked(
+                            nulls.validity(),
+                            null_buffer.as_slice_mut(),
+                            0,
+                            bit_util::ceil(existing_attributes_count, 8),
+                        );
+                        strings_nulls = Some(null_buffer);
                     }
+                },
+                Some(lookup) => {
+                    let keys = strings_keys.typed_data_mut::<u16>();
+                    for (key_index, value_index) in strings.keys().iter().enumerate() {
+                        if let Some(value_index) = value_index
+                            && let Some(Some(transformed_value_index)) =
+                                lookup.get(&(value_index as usize))
+                        {
+                            keys[key_index] = *transformed_value_index as u16;
+                            continue;
+                        }
 
-                    let nulls = strings_nulls
-                        .get_or_insert_with(|| MutableBuffer::new_null(attribute_count));
-                    bit_util::set_bit(nulls, key_index);
-                }
-                strings_nulls = strings_nulls.map(|mut v| {
-                    for v in v.as_slice_mut() {
-                        *v = !*v;
+                        let nulls = strings_nulls
+                            .get_or_insert_with(|| MutableBuffer::new_null(attribute_count));
+                        bit_util::set_bit(nulls, key_index);
                     }
-                    v
-                })
+                    strings_nulls = strings_nulls.map(|mut v| {
+                        for v in v.as_slice_mut() {
+                            *v = !*v;
+                        }
+                        v
+                    })
+                }
             }
-        }
+            Some((strings_keys, strings_nulls, strings_values))
+        } else {
+            None
+        };
 
         let ints_dict = if let Some(ints) = attributes_batch.attribute_ints {
             let (ints_values, ints_values_lookup) = DictionaryValueArray::Array(Arc::new(
@@ -843,7 +844,7 @@ impl<'a> AttributesBuilder<'a> {
             keys_array_u16,
             keys_array_buffer,
             keys_value_builder,
-            strings_dict: Some((strings_keys, strings_nulls, strings_values)),
+            strings_dict,
             ints_dict,
             doubles_array,
             bools_array,
@@ -862,17 +863,25 @@ impl<'a> AttributesBuilder<'a> {
     ) {
         let attribute_count = self.types_array_buffer.len();
         let attribute_index = self.attribute_position;
+
+        debug_assert!(attribute_index < attribute_count);
+
         self.attribute_position = attribute_index + 1;
 
         if self.keys_array_u16 {
-            self.keys_array_buffer.typed_data_mut::<u16>()[attribute_index] = key_index as u16;
+            *unsafe {
+                self.keys_array_buffer
+                    .typed_data_mut::<u16>()
+                    .get_unchecked_mut(attribute_index)
+            } = key_index as u16;
         } else {
-            self.keys_array_buffer[attribute_index] = key_index as u8;
+            *unsafe { self.keys_array_buffer.get_unchecked_mut(attribute_index) } = key_index as u8;
         }
 
         let processed_value = self.process_value(value);
 
-        self.types_array_buffer[attribute_index] = processed_value.get_attribute_type();
+        *unsafe { self.types_array_buffer.get_unchecked_mut(attribute_index) } =
+            processed_value.get_attribute_type();
 
         let ids = self.ids_array.0.typed_data_mut::<u16>().as_mut_ptr();
         let ids_nulls = self.ids_array.1.as_mut();
@@ -1117,42 +1126,34 @@ impl<'a> AttributesBuilder<'a> {
         }
 
         match processed_value {
-            ProcessedValue::String(value_index) => {
-                let strings = self.strings_dict.as_mut().expect("has strings");
+            ProcessedValue::String(value_index) => unsafe {
+                Self::fill_dictionay_range_unchecked(
+                    attribute_count,
+                    &attribute_range,
+                    value_index,
+                    &mut self.strings_dict,
+                );
 
-                unsafe {
-                    Self::fill_dictionay_range_unchecked(
-                        attribute_count,
-                        &attribute_range,
-                        value_index,
-                        strings,
-                    );
+                self.update_nulls_unchecked(
+                    STRING_ATTRIBUTE_VALUE_TYPE,
+                    attribute_count,
+                    self.attribute_position,
+                );
+            },
+            ProcessedValue::Integer(value_index) => unsafe {
+                Self::fill_dictionay_range_unchecked(
+                    attribute_count,
+                    &attribute_range,
+                    value_index,
+                    &mut self.ints_dict,
+                );
 
-                    self.update_nulls_unchecked(
-                        STRING_ATTRIBUTE_VALUE_TYPE,
-                        attribute_count,
-                        self.attribute_position,
-                    );
-                }
-            }
-            ProcessedValue::Integer(value_index) => {
-                let ints = self.ints_dict.as_mut().expect("has ints");
-
-                unsafe {
-                    Self::fill_dictionay_range_unchecked(
-                        attribute_count,
-                        &attribute_range,
-                        value_index,
-                        ints,
-                    );
-
-                    self.update_nulls_unchecked(
-                        INT_ATTRIBUTE_VALUE_TYPE,
-                        attribute_count,
-                        self.attribute_position,
-                    );
-                }
-            }
+                self.update_nulls_unchecked(
+                    INT_ATTRIBUTE_VALUE_TYPE,
+                    attribute_count,
+                    self.attribute_position,
+                );
+            },
             ProcessedValue::Double(value) => {
                 let doubles = self.doubles_array.as_mut().expect("has doubles");
                 if let Some(value) = value {
@@ -1216,42 +1217,34 @@ impl<'a> AttributesBuilder<'a> {
                     );
                 }
             }
-            ProcessedValue::Bytes(value_index) => {
-                let bytes = self.bytes_dict.as_mut().expect("has bytes");
+            ProcessedValue::Bytes(value_index) => unsafe {
+                Self::fill_dictionay_range_unchecked(
+                    attribute_count,
+                    &attribute_range,
+                    value_index,
+                    &mut self.bytes_dict,
+                );
 
-                unsafe {
-                    Self::fill_dictionay_range_unchecked(
-                        attribute_count,
-                        &attribute_range,
-                        value_index,
-                        bytes,
-                    );
+                self.update_nulls_unchecked(
+                    BYTES_ATTRIBUTE_VALUE_TYPE,
+                    attribute_count,
+                    self.attribute_position,
+                );
+            },
+            ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => unsafe {
+                Self::fill_dictionay_range_unchecked(
+                    attribute_count,
+                    &attribute_range,
+                    value_index,
+                    &mut self.sers_dict,
+                );
 
-                    self.update_nulls_unchecked(
-                        BYTES_ATTRIBUTE_VALUE_TYPE,
-                        attribute_count,
-                        self.attribute_position,
-                    );
-                }
-            }
-            ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => {
-                let sers = self.sers_dict.as_mut().expect("has sers");
-
-                unsafe {
-                    Self::fill_dictionay_range_unchecked(
-                        attribute_count,
-                        &attribute_range,
-                        value_index,
-                        sers,
-                    );
-
-                    self.update_nulls_unchecked(
-                        SLICE_ATTRIBUTE_VALUE_TYPE,
-                        attribute_count,
-                        self.attribute_position,
-                    );
-                }
-            }
+                self.update_nulls_unchecked(
+                    SLICE_ATTRIBUTE_VALUE_TYPE,
+                    attribute_count,
+                    self.attribute_position,
+                );
+            },
             ProcessedValue::Empty => unsafe {
                 self.update_nulls_unchecked(
                     EMPTY_ATTRIBUTE_VALUE_TYPE,
@@ -1480,17 +1473,14 @@ impl AttributesBuilder<'_> {
                 } {
                     EMPTY_ATTRIBUTE_VALUE_TYPE => ProcessedValue::Empty,
                     STRING_ATTRIBUTE_VALUE_TYPE => {
-                        if attributes_batch
-                            .attribute_string_keys
-                            .is_valid(existing_attribute_index)
+                        if let Some(strings) = attributes_batch.attribute_strings
+                            && let Some(value_index) =
+                                strings.get_value_index_null_safe(existing_attribute_index)
                         {
                             let buffer = unsafe {
                                 get_generic_byte_array_buffer_value_unchecked(
-                                    attributes_batch.attribute_string_values,
-                                    attributes_batch
-                                        .attribute_string_keys
-                                        .value_unchecked(existing_attribute_index)
-                                        as usize,
+                                    strings.values(),
+                                    value_index,
                                 )
                             };
 
@@ -1501,10 +1491,11 @@ impl AttributesBuilder<'_> {
                     }
                     INT_ATTRIBUTE_VALUE_TYPE => {
                         if let Some(ints) = attributes_batch.attribute_ints
-                            && ints.keys().is_valid(existing_attribute_index)
+                            && let Some(value_index) =
+                                ints.get_value_index_null_safe(existing_attribute_index)
                         {
                             self.process_value(ValueOrRef::Integer(unsafe {
-                                ints.values().value_unchecked(existing_attribute_index)
+                                ints.values().value_unchecked(value_index)
                             }))
                         } else {
                             ProcessedValue::Empty
@@ -1534,12 +1525,13 @@ impl AttributesBuilder<'_> {
                     }
                     SLICE_ATTRIBUTE_VALUE_TYPE => {
                         if let Some(sers) = attributes_batch.attribute_sers
-                            && sers.keys().is_valid(existing_attribute_index)
+                            && let Some(value_index) =
+                                sers.get_value_index_null_safe(existing_attribute_index)
                         {
                             let buffer = unsafe {
                                 get_generic_byte_array_buffer_value_unchecked(
                                     sers.values(),
-                                    sers.keys().value_unchecked(existing_attribute_index) as usize,
+                                    value_index,
                                 )
                             };
 
@@ -1553,12 +1545,12 @@ impl AttributesBuilder<'_> {
                     }
                     MAP_ATTRIBUTE_VALUE_TYPE => {
                         if let Some(sers) = attributes_batch.attribute_sers
-                            && sers.keys().is_valid(existing_attribute_index)
+                            && let Some(value_index) = sers.get_value_index_null_safe(key_index)
                         {
                             let buffer = unsafe {
                                 get_generic_byte_array_buffer_value_unchecked(
                                     sers.values(),
-                                    sers.keys().value_unchecked(existing_attribute_index) as usize,
+                                    value_index,
                                 )
                             };
 
@@ -1572,12 +1564,12 @@ impl AttributesBuilder<'_> {
                     }
                     BYTES_ATTRIBUTE_VALUE_TYPE => {
                         if let Some(bytes) = attributes_batch.attribute_bytes
-                            && bytes.keys().is_valid(existing_attribute_index)
+                            && let Some(value_index) = bytes.get_value_index_null_safe(key_index)
                         {
                             let buffer = unsafe {
                                 get_generic_byte_array_buffer_value_unchecked(
                                     bytes.values(),
-                                    bytes.keys().value_unchecked(existing_attribute_index) as usize,
+                                    value_index,
                                 )
                             };
 
@@ -1592,66 +1584,62 @@ impl AttributesBuilder<'_> {
                 };
 
                 match processed_value {
-                    ProcessedValue::String(value_index) => {
-                        let strings = self.strings_dict.as_mut().expect("has strings");
+                    ProcessedValue::String(value_index) => unsafe {
+                        if let Some(value_index) = value_index {
+                            let strings = self.strings_dict.as_mut().expect("has strings");
 
-                        unsafe {
-                            if let Some(value_index) = value_index {
-                                if let Some(nulls) = strings.1.as_mut() {
-                                    bit_util::set_bit(nulls, attribute_index);
-                                }
-
-                                *strings
-                                    .0
-                                    .typed_data_mut::<u16>()
-                                    .get_unchecked_mut(attribute_index) = value_index as u16;
-                            } else {
-                                Self::ensure_nulls_unchecked(
-                                    &mut strings.1,
-                                    attribute_count,
-                                    attribute_index,
-                                );
+                            if let Some(nulls) = strings.1.as_mut() {
+                                bit_util::set_bit(nulls, attribute_index);
                             }
 
-                            self.update_nulls_unchecked(
-                                STRING_ATTRIBUTE_VALUE_TYPE,
+                            *strings
+                                .0
+                                .typed_data_mut::<u16>()
+                                .get_unchecked_mut(attribute_index) = value_index as u16;
+                        } else if let Some(strings) = self.strings_dict.as_mut() {
+                            Self::ensure_nulls_unchecked(
+                                &mut strings.1,
                                 attribute_count,
                                 attribute_index,
                             );
                         }
-                    }
-                    ProcessedValue::Integer(value_index) => {
-                        let ints = self.ints_dict.as_mut().expect("has ints");
 
-                        unsafe {
-                            if let Some(value_index) = value_index {
-                                if let Some(nulls) = ints.1.as_mut() {
-                                    bit_util::set_bit(nulls, attribute_index);
-                                }
+                        self.update_nulls_unchecked(
+                            STRING_ATTRIBUTE_VALUE_TYPE,
+                            attribute_count,
+                            attribute_index,
+                        );
+                    },
+                    ProcessedValue::Integer(value_index) => unsafe {
+                        if let Some(value_index) = value_index {
+                            let ints = self.ints_dict.as_mut().expect("has ints");
 
-                                *ints
-                                    .0
-                                    .typed_data_mut::<u16>()
-                                    .get_unchecked_mut(attribute_index) = value_index as u16;
-                            } else {
-                                Self::ensure_nulls_unchecked(
-                                    &mut ints.1,
-                                    attribute_count,
-                                    attribute_index,
-                                );
+                            if let Some(nulls) = ints.1.as_mut() {
+                                bit_util::set_bit(nulls, attribute_index);
                             }
 
-                            self.update_nulls_unchecked(
-                                INT_ATTRIBUTE_VALUE_TYPE,
+                            *ints
+                                .0
+                                .typed_data_mut::<u16>()
+                                .get_unchecked_mut(attribute_index) = value_index as u16;
+                        } else if let Some(ints) = self.ints_dict.as_mut() {
+                            Self::ensure_nulls_unchecked(
+                                &mut ints.1,
                                 attribute_count,
                                 attribute_index,
                             );
                         }
-                    }
+
+                        self.update_nulls_unchecked(
+                            INT_ATTRIBUTE_VALUE_TYPE,
+                            attribute_count,
+                            attribute_index,
+                        );
+                    },
                     ProcessedValue::Double(value) => {
-                        let doubles = self.doubles_array.as_mut().expect("has doubles");
-
                         if let Some(value) = value {
+                            let doubles = self.doubles_array.as_mut().expect("has doubles");
+
                             if let Some(nulls) = doubles.1.as_mut() {
                                 bit_util::set_bit(nulls, attribute_index);
                             }
@@ -1662,7 +1650,7 @@ impl AttributesBuilder<'_> {
                                     .typed_data_mut::<f64>()
                                     .get_unchecked_mut(attribute_index)
                             } = value;
-                        } else {
+                        } else if let Some(doubles) = self.doubles_array.as_mut() {
                             unsafe {
                                 Self::ensure_nulls_unchecked(
                                     &mut doubles.1,
@@ -1699,62 +1687,58 @@ impl AttributesBuilder<'_> {
                             );
                         }
                     }
-                    ProcessedValue::Bytes(value_index) => {
-                        let bytes = self.bytes_dict.as_mut().expect("has bytes");
+                    ProcessedValue::Bytes(value_index) => unsafe {
+                        if let Some(value_index) = value_index {
+                            let bytes = self.bytes_dict.as_mut().expect("has bytes");
 
-                        unsafe {
-                            if let Some(value_index) = value_index {
-                                if let Some(nulls) = bytes.1.as_mut() {
-                                    bit_util::set_bit(nulls, attribute_index);
-                                }
-
-                                *bytes
-                                    .0
-                                    .typed_data_mut::<u16>()
-                                    .get_unchecked_mut(attribute_index) = value_index as u16;
-                            } else {
-                                Self::ensure_nulls_unchecked(
-                                    &mut bytes.1,
-                                    attribute_count,
-                                    attribute_index,
-                                );
+                            if let Some(nulls) = bytes.1.as_mut() {
+                                bit_util::set_bit(nulls, attribute_index);
                             }
 
-                            self.update_nulls_unchecked(
-                                BYTES_ATTRIBUTE_VALUE_TYPE,
+                            *bytes
+                                .0
+                                .typed_data_mut::<u16>()
+                                .get_unchecked_mut(attribute_index) = value_index as u16;
+                        } else if let Some(bytes) = self.bytes_dict.as_mut() {
+                            Self::ensure_nulls_unchecked(
+                                &mut bytes.1,
                                 attribute_count,
                                 attribute_index,
                             );
                         }
-                    }
-                    ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => {
-                        let sers = self.sers_dict.as_mut().expect("has sers");
 
-                        unsafe {
-                            if let Some(value_index) = value_index {
-                                if let Some(nulls) = sers.1.as_mut() {
-                                    bit_util::set_bit(nulls, attribute_index);
-                                }
+                        self.update_nulls_unchecked(
+                            BYTES_ATTRIBUTE_VALUE_TYPE,
+                            attribute_count,
+                            attribute_index,
+                        );
+                    },
+                    ProcessedValue::Slice(value_index) | ProcessedValue::Map(value_index) => unsafe {
+                        if let Some(value_index) = value_index {
+                            let sers = self.sers_dict.as_mut().expect("has sers");
 
-                                *sers
-                                    .0
-                                    .typed_data_mut::<u16>()
-                                    .get_unchecked_mut(attribute_index) = value_index as u16;
-                            } else {
-                                Self::ensure_nulls_unchecked(
-                                    &mut sers.1,
-                                    attribute_count,
-                                    attribute_index,
-                                );
+                            if let Some(nulls) = sers.1.as_mut() {
+                                bit_util::set_bit(nulls, attribute_index);
                             }
 
-                            self.update_nulls_unchecked(
-                                SLICE_ATTRIBUTE_VALUE_TYPE,
+                            *sers
+                                .0
+                                .typed_data_mut::<u16>()
+                                .get_unchecked_mut(attribute_index) = value_index as u16;
+                        } else if let Some(sers) = self.sers_dict.as_mut() {
+                            Self::ensure_nulls_unchecked(
+                                &mut sers.1,
                                 attribute_count,
                                 attribute_index,
                             );
                         }
-                    }
+
+                        self.update_nulls_unchecked(
+                            SLICE_ATTRIBUTE_VALUE_TYPE,
+                            attribute_count,
+                            attribute_index,
+                        );
+                    },
                     ProcessedValue::Empty => unsafe {
                         self.update_nulls_unchecked(
                             EMPTY_ATTRIBUTE_VALUE_TYPE,
@@ -1856,13 +1840,15 @@ impl AttributesBuilder<'_> {
         attribute_count: usize,
         attribute_range: &std::ops::Range<usize>,
         value_index: Option<usize>,
-        dictionary: &mut (MutableBuffer, Option<MutableBuffer>, T),
+        dictionary: &mut Option<(MutableBuffer, Option<MutableBuffer>, T)>,
     ) {
-        let nulls = &mut dictionary.1;
         if let Some(value_index) = value_index {
+            let dictionary = dictionary.as_mut().expect("has dictionary");
+
             let keys = dictionary.0.typed_data_mut::<u16>();
             keys[attribute_range.clone()].fill(value_index as u16);
-            if let Some(nulls) = nulls {
+
+            if let Some(nulls) = &mut dictionary.1 {
                 unsafe {
                     Self::fill_bit_range_unchecked(
                         nulls,
@@ -1871,7 +1857,9 @@ impl AttributesBuilder<'_> {
                     )
                 };
             }
-        } else if nulls.is_none() {
+        } else if let Some(nulls) = dictionary.as_mut().map(|v| &mut v.1)
+            && nulls.is_none()
+        {
             let mut buffer = MutableBuffer::new_null(attribute_count);
 
             unsafe { Self::fill_bits_from_start_unchecked(&mut buffer, attribute_range.start) };
@@ -1919,7 +1907,7 @@ impl AttributesBuilder<'_> {
         start_bit_inclusive: usize,
         end_bit_exclusive: usize,
     ) {
-        debug_assert!(start_bit_inclusive <= end_bit_exclusive);
+        debug_assert!(start_bit_inclusive < end_bit_exclusive);
         debug_assert!(end_bit_exclusive <= buffer.len() * 8);
 
         let start_byte = start_bit_inclusive / 8;
@@ -1941,7 +1929,7 @@ impl AttributesBuilder<'_> {
         buffer[start_byte + 1..end_byte].fill(0xff);
 
         // Last partial byte (LSB)
-        buffer[end_byte] |= (1u8 << (end_bit + 1)) - 1;
+        buffer[end_byte] |= (!0u8) >> (7 - end_bit);
     }
 
     unsafe fn fill_from_slice_unchecked(
@@ -2186,6 +2174,31 @@ impl VecOrBuffer {
             VecOrBuffer::Vec(items) => items.is_empty(),
             VecOrBuffer::Buffer(buffer_wrapper) => buffer_wrapper.is_empty(),
         }
+    }
+}
+
+pub(crate) trait ArrowTypedDictionaryValueIndexAccessor {
+    fn get_value_index_null_safe(&self, key_index: usize) -> Option<usize>;
+}
+
+impl<K: ArrowDictionaryKeyType, V: Array> ArrowTypedDictionaryValueIndexAccessor
+    for TypedDictionaryArray<'_, K, V>
+{
+    fn get_value_index_null_safe(&self, key_index: usize) -> Option<usize> {
+        let keys = self.keys();
+        if keys.is_null(key_index) {
+            return None;
+        }
+
+        let value_index = K::Native::as_usize(unsafe { keys.value_unchecked(key_index) });
+
+        if let Some(value_nulls) = self.values().nulls()
+            && value_nulls.is_null(value_index)
+        {
+            return None;
+        }
+
+        Some(value_index)
     }
 }
 
