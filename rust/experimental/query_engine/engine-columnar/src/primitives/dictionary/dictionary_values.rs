@@ -226,9 +226,10 @@ impl<'a> DictionaryValueArray<'a> {
 
         let (set, lookup) = match self {
             DictionaryValueArray::Array(a) => transform_array_into_set(t, a),
-            DictionaryValueArray::Vec(a) => {
-                transform_iter_into_set(t, a.len(), Rc::unwrap_or_clone(a).into_iter().enumerate())
-            }
+            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
+                Ok(v) => transform_iter_into_set(t, v.len(), v.into_iter().enumerate()),
+                Err(v) => transform_iter_into_set(t, v.len(), v.iter().cloned().enumerate()),
+            },
             DictionaryValueArray::Set(a) => (Rc::unwrap_or_clone(a), None),
             DictionaryValueArray::Boolean => {
                 let mut set = ValueOrRefSet::with_capacity_and_hasher(2, RandomState::new());
@@ -250,16 +251,18 @@ impl<'a> DictionaryValueArray<'a> {
     {
         match self {
             DictionaryValueArray::Array(a) => transform_array_into_set(transform, a),
-            DictionaryValueArray::Vec(a) => transform_iter_into_set(
-                transform,
-                a.len(),
-                Rc::unwrap_or_clone(a).into_iter().enumerate(),
-            ),
-            DictionaryValueArray::Set(a) => transform_iter_into_set(
-                transform,
-                a.len(),
-                Rc::unwrap_or_clone(a).into_iter().enumerate(),
-            ),
+            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
+                Ok(v) => transform_iter_into_set(transform, v.len(), v.into_iter().enumerate()),
+                Err(v) => {
+                    transform_iter_into_set(transform, v.len(), v.iter().cloned().enumerate())
+                }
+            },
+            DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
+                Ok(v) => transform_iter_into_set(transform, v.len(), v.into_iter().enumerate()),
+                Err(v) => {
+                    transform_iter_into_set(transform, v.len(), v.iter().cloned().enumerate())
+                }
+            },
             DictionaryValueArray::Boolean => transform_iter_into_set(
                 transform,
                 2,
@@ -270,20 +273,20 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn transform_into_vec<T, FTransform>(self, mut transform: &mut FTransform) -> Vec<Option<T>>
+    pub fn transform_into_vec<T, FTransform>(self, transform: &mut FTransform) -> Vec<Option<T>>
     where
         FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
     {
         match self {
             DictionaryValueArray::Array(a) => transform_array_into_vec(transform, a),
-            DictionaryValueArray::Vec(a) => Rc::unwrap_or_clone(a)
-                .into_iter()
-                .map(&mut transform)
-                .collect(),
-            DictionaryValueArray::Set(a) => Rc::unwrap_or_clone(a)
-                .into_iter()
-                .map(&mut transform)
-                .collect(),
+            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
+                Ok(v) => v.into_iter().map(transform).collect(),
+                Err(v) => v.iter().map(|v| transform(v.clone())).collect(),
+            },
+            DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
+                Ok(v) => v.into_iter().map(transform).collect(),
+                Err(v) => v.iter().map(|v| transform(v.clone())).collect(),
+            },
             DictionaryValueArray::Boolean => {
                 vec![
                     transform(ValueOrRef::Boolean(false)),
@@ -314,18 +317,14 @@ impl<'a> DictionaryValueArray<'a> {
                     (build(values.into_iter().collect::<Vec<_>>()), lookup)
                 }
             }
-            DictionaryValueArray::Vec(a) => {
-                let length = a.len();
-                let values = Rc::unwrap_or_clone(a).into_iter();
-
-                transform_iter_into_array(length, values, build, convert)
-            }
-            DictionaryValueArray::Set(a) => {
-                let length = a.len();
-                let values = Rc::unwrap_or_clone(a).into_iter();
-
-                transform_iter_into_array(length, values, build, convert)
-            }
+            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
+                Ok(v) => transform_iter_into_array(v.len(), v.into_iter(), build, convert),
+                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned(), build, convert),
+            },
+            DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
+                Ok(v) => transform_iter_into_array(v.len(), v.into_iter(), build, convert),
+                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned(), build, convert),
+            },
             DictionaryValueArray::Boolean => (
                 build(vec![
                     convert(ValueOrRef::Boolean(false)).expect("false value"),

@@ -291,11 +291,18 @@ mod tests {
 
     #[test]
     fn test_engine_filter_all() {
+        let attr = KeyValue {
+            key: "code.line.number".into(),
+            value: Some(AnyValue {
+                value: Some(Value::IntValue(1)),
+            }),
+        };
+
         let log_records = vec![
-            LogRecord::build().finish(),
-            LogRecord::build().finish(),
-            LogRecord::build().finish(),
-            LogRecord::build().finish(),
+            LogRecord::build().attributes(vec![attr.clone()]).finish(),
+            LogRecord::build().attributes(vec![attr.clone()]).finish(),
+            LogRecord::build().attributes(vec![attr.clone()]).finish(),
+            LogRecord::build().attributes(vec![attr.clone()]).finish(),
         ];
 
         let otap_batch = to_otap_logs(log_records);
@@ -310,7 +317,7 @@ mod tests {
             logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
         );
 
-        let pipeline = parse_kql_logs_query_into_pipeline("source | where false", None).unwrap();
+        let pipeline = parse_kql_logs_query_into_pipeline("source | where attributes[\"code.line.number\"] >= 0 or not(attributes[\"some.attr\"] >= 0 and severity_text == \"WARN\")", None).unwrap();
 
         println!("{pipeline}");
 

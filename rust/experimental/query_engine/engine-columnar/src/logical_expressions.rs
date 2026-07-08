@@ -300,48 +300,62 @@ where
         _ => unreachable!(),
     };
 
-    if let Some(left) = left_single {
+    let (data_type, compare_result) = if let Some(left) = left_single {
         if let Some(right) = right_single {
-            ResolvedLogicalValue::Single(compare(&left.to_value(), &right.to_value()))
-        } else {
-            ResolvedLogicalValue::Array {
-                data_type: right_dictionary
-                    .as_ref()
-                    .expect("right is dictionary")
-                    .keys()
-                    .data_type(),
-                values: Arc::new(compare_single_to_dictionary(
-                    &left,
-                    right_dictionary.expect("right is dictionary"),
-                    compare,
-                )),
-            }
+            return ResolvedLogicalValue::Single(compare(&left.to_value(), &right.to_value()));
         }
+
+        let data_type = right_dictionary
+            .as_ref()
+            .expect("right is dictionary")
+            .keys()
+            .data_type();
+
+        let compare_result = compare_single_to_dictionary(
+            &left,
+            right_dictionary.expect("right is dictionary"),
+            compare,
+        );
+
+        (data_type, compare_result)
     } else if let Some(right) = right_single {
-        ResolvedLogicalValue::Array {
-            data_type: left_dictionary
-                .as_ref()
-                .expect("left is dictionary")
-                .keys()
-                .data_type(),
-            values: Arc::new(compare_dictionary_to_single(
-                left_dictionary.expect("left is dictionary"),
-                &right,
-                compare,
-            )),
-        }
+        let data_type = left_dictionary
+            .as_ref()
+            .expect("left is dictionary")
+            .keys()
+            .data_type();
+
+        let compare_result = compare_dictionary_to_single(
+            left_dictionary.expect("left is dictionary"),
+            &right,
+            compare,
+        );
+
+        (data_type, compare_result)
+    } else {
+        let data_type = left_dictionary
+            .as_ref()
+            .expect("left is dictionary")
+            .keys()
+            .data_type();
+
+        let compare_result = compare_dictionary_to_dictionary(
+            left_dictionary.expect("left is dictionary"),
+            right_dictionary.expect("right is dictionary"),
+            compare,
+        );
+
+        (data_type, compare_result)
+    };
+
+    if compare_result.true_count() == compare_result.len() {
+        ResolvedLogicalValue::Single(true)
+    } else if compare_result.false_count() == compare_result.len() {
+        ResolvedLogicalValue::Single(false)
     } else {
         ResolvedLogicalValue::Array {
-            data_type: left_dictionary
-                .as_ref()
-                .expect("left is dictionary")
-                .keys()
-                .data_type(),
-            values: Arc::new(compare_dictionary_to_dictionary(
-                left_dictionary.expect("left is dictionary"),
-                right_dictionary.expect("right is dictionary"),
-                compare,
-            )),
+            data_type,
+            values: Arc::new(compare_result),
         }
     }
 }

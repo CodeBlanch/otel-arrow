@@ -8,9 +8,9 @@ mod common;
 use crate::common::bench_log_pipeline;
 
 fn bench_filter_pipelines(c: &mut Criterion) {
-    let batch_sizes = [32, 1024, 8192];
+    let batch_sizes = [/*32, 1024, */ 8192];
 
-    bench_log_pipeline(
+    /*bench_log_pipeline(
         c,
         &batch_sizes,
         "simple_field_filter",
@@ -66,7 +66,7 @@ fn bench_filter_pipelines(c: &mut Criterion) {
         // won't get optimized into a Composite<AttributeFilterExec> so we can test the fast path
         // in Composite<FilterExec>
         "source | where severity_text == \"invalid value\" and attributes[\"code.line.number\"] == 2",
-    );
+    );*/
     bench_log_pipeline(
         c,
         &batch_sizes,
