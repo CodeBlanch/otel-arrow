@@ -151,11 +151,15 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
 
         let records = factory.create(None, &batches);
 
+        let mut current_batch_record_count = records.len();
+
+        if current_batch_record_count == 0 {
+            return;
+        }
+
         let diagnostic_level = records
             .get_diagnostic_level()
             .unwrap_or(self.engine.diagnostic_level);
-
-        let mut current_batch_record_count = records.len();
 
         let mut execution_context = ExecutionContext::new(
             diagnostic_level,
@@ -171,6 +175,14 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
         for expression in pipeline.get_expressions() {
             match expression {
                 DataExpression::Discard(d) => {
+                    if current_batch_record_count == 0 {
+                        execution_context.add_diagnostic_if_enabled(
+                            ColumnarEngineDiagnosticLevel::Verbose,
+                            d,
+                            || "No records to discard".into(),
+                        );
+                        continue;
+                    }
                     if let Some(predicate) = d.get_predicate() {
                         match execute_logical_expression(&execution_context, predicate) {
                             ResolvedLogicalValue::Single(single) => {
@@ -354,16 +366,20 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
             }
         }
 
-        let mut state = execution_context.into_parts().expect("has records").into();
+        if current_batch_record_count > 0 {
+            let mut state = execution_context.into_parts().expect("has records").into();
 
-        factory.apply(
-            &ColumnarEngineDiagnosticReceiverImpl::new(diagnostic_level, &self.diagnostics),
-            pipeline,
-            &mut state,
-            &mut batches,
-        );
+            factory.apply(
+                &ColumnarEngineDiagnosticReceiverImpl::new(diagnostic_level, &self.diagnostics),
+                pipeline,
+                &mut state,
+                &mut batches,
+            );
 
-        self.included_record_count += current_batch_record_count;
+            self.included_record_count += current_batch_record_count;
+        } else {
+            std::mem::drop(execution_context);
+        }
 
         self.included_batches.push(batches);
     }
