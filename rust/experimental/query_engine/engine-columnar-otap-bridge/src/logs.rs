@@ -28,6 +28,8 @@ use crate::{arrow_helpers::*, filter::*, *};
 static LOGS_BATCH_POSITION: usize = POSITION_LOOKUP[ArrowPayloadType::Logs as usize];
 static LOG_ATTRIBUTES_BATCH_POSITION: usize = POSITION_LOOKUP[ArrowPayloadType::LogAttrs as usize];
 
+type ColumnTransform = fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>;
+
 pub struct OtapLogRecordBatchFactory {
     diagnostic_level: Option<ColumnarEngineDiagnosticLevel>,
 }
@@ -370,6 +372,7 @@ impl Default for OtapLogRecordBatchFactory {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_log_record_field_update<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
     diagnostic_receiver: &T,
     expression: &'pipeline dyn Expression,
@@ -1407,12 +1410,7 @@ impl OtapLogRecordField {
         }
     }
 
-    pub fn get_column_name_and_transform(
-        &self,
-    ) -> (
-        &'static str,
-        fn(DictionaryKeyArray, DictionaryValueArray) -> Option<Arc<dyn Array>>,
-    ) {
+    pub fn get_column_name_and_transform(&self) -> (&'static str, ColumnTransform) {
         match self {
             OtapLogRecordField::TimeUnixNano => (consts::TIME_UNIX_NANO, |keys, values| {
                 primitive_array_writer(

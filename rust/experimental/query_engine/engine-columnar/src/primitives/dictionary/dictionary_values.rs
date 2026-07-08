@@ -1012,13 +1012,13 @@ impl<'a> Iterator for FixedSizeBinaryArrayIter<'a, '_> {
 }
 
 pub trait ArrowArraySetTransformer {
-    fn into_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
+    fn to_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
     where
         FTransform: FnMut(Option<Buffer>) -> Option<V>;
 }
 
 impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
-    fn into_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
+    fn to_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
     where
         FTransform: FnMut(Option<Buffer>) -> Option<V>,
     {

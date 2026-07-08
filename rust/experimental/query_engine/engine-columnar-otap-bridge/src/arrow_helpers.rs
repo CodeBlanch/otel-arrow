@@ -734,7 +734,7 @@ impl<'a> AttributesBuilder<'a> {
         let sers_dict = if let Some(sers) = attributes_batch.attribute_sers {
             let (sers_values, sers_values_lookup) = sers
                 .values()
-                .into_set(|v| v.map(|v| VecOrBuffer::Buffer(BufferWrapper::<u8>::new(v))));
+                .to_set(|v| v.map(|v| VecOrBuffer::Buffer(BufferWrapper::<u8>::new(v))));
             let mut sers_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
             let mut sers_nulls = None;
             match sers_values_lookup {
@@ -786,7 +786,7 @@ impl<'a> AttributesBuilder<'a> {
 
         let bytes_dict = if let Some(bytes) = attributes_batch.attribute_bytes {
             let (bytes_values, bytes_values_lookup) =
-                bytes.values().into_set(|v| v.map(BufferWrapper::<u8>::new));
+                bytes.values().to_set(|v| v.map(BufferWrapper::<u8>::new));
             let mut bytes_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
             let mut bytes_nulls = None;
             match bytes_values_lookup {
