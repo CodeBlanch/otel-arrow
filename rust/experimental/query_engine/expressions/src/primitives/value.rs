@@ -336,6 +336,16 @@ impl Value<'_> {
         left: &Value,
         right: &Value,
     ) -> Result<i64, ExpressionError> {
+        if let Value::Integer(left) = left
+            && let Value::Integer(right) = right
+        {
+            return Ok(compare_ordered_values(left.get_value(), right.get_value()));
+        } else if let Value::Double(left) = left
+            && let Value::Double(right) = right
+        {
+            return Ok(compare_double_values(left.get_value(), right.get_value()));
+        }
+
         let left_type = left.get_value_type();
         let right_type = right.get_value_type();
 
@@ -488,7 +498,7 @@ impl Value<'_> {
         let mut result = None;
 
         pattern
-            .convert_to_regex(&mut |r: &Regex| {
+            .convert_to_regex(|r: &Regex| {
                 result = Some(r.is_match(haystack.convert_to_string().as_ref()));
             })
             .map_err(|e| {
@@ -515,7 +525,7 @@ impl Value<'_> {
         let mut result = None;
 
         pattern
-            .convert_to_regex(&mut |r: &Regex| {
+            .convert_to_regex(|r: &Regex| {
                 result = match capture_group {
                     Value::String(name) => match r.captures(haystack.get_value()) {
                         Some(c) => match c.name(name.get_value()) {

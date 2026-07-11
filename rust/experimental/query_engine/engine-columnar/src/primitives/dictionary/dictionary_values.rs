@@ -4,13 +4,9 @@
 use std::{cell::OnceCell, hash::Hash, marker::PhantomData, rc::Rc, sync::Arc};
 
 use ahash::{AHashMap, RandomState};
-use arrow::{
-    array::*,
-    buffer::{Buffer, MutableBuffer, NullBuffer},
-    datatypes::*,
-};
+use arrow::{array::*, buffer::*, datatypes::*, util::bit_util};
 use chrono::{TimeZone, Utc};
-use data_engine_expressions::{ArrayValue, AsValue, IndexValueClosureCallback};
+use data_engine_expressions::*;
 use indexmap::IndexSet;
 
 use crate::*;
@@ -124,12 +120,11 @@ impl DictionaryValueArray<'_> {
     pub fn transform_into_int_array<T: ArrowPrimitiveType>(self) -> (PrimitiveArray<T>, IndexLookup)
     where
         T::Native: Hash + Eq + TryFrom<i64>,
-        PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
     {
         self.transform_into_array(
             ArrayRef::as_primitive_opt::<T>,
             |v| v.to_int::<T::Native>(),
-            PrimitiveArray::<T>::from,
+            PrimitiveArray::<T>::from_iter_values,
         )
     }
 
@@ -143,7 +138,7 @@ impl DictionaryValueArray<'_> {
                     .convert_to_datetime()
                     .and_then(|v| v.timestamp_nanos_opt())
             },
-            PrimitiveArray::<TimestampNanosecondType>::from,
+            PrimitiveArray::<TimestampNanosecondType>::from_iter_values,
         )
     }
 
@@ -195,7 +190,7 @@ impl DictionaryValueArray<'_> {
                 _ => None,
             },
             |v| {
-                if v.is_empty() {
+                if v.len() == 0 {
                     FixedSizeBinaryArray::new_null(SIZE as i32, 0)
                 } else {
                     FixedSizeBinaryArray::try_from_iter(v.into_iter()).expect("valid array")
@@ -216,7 +211,7 @@ impl<'a> DictionaryValueArray<'a> {
     }
 
     pub fn into_set(self) -> SetWithLookup<ValueOrRef<'a>> {
-        let t = &mut |v| {
+        let transform_owned = |v| {
             if matches!(v, ValueOrRef::Null) {
                 None
             } else {
@@ -224,11 +219,21 @@ impl<'a> DictionaryValueArray<'a> {
             }
         };
 
+        let transform_borrow = |v| {
+            if matches!(v, &ValueOrRef::Null) {
+                None
+            } else {
+                Some(v.clone())
+            }
+        };
+
         let (set, lookup) = match self {
-            DictionaryValueArray::Array(a) => transform_array_into_set(t, a),
+            DictionaryValueArray::Array(a) => transform_array_into_set(transform_owned, a),
             DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_set(t, v.len(), v.into_iter().enumerate()),
-                Err(v) => transform_iter_into_set(t, v.len(), v.iter().cloned().enumerate()),
+                Ok(v) => {
+                    transform_iter_into_set(transform_owned, v.len(), v.into_iter().enumerate())
+                }
+                Err(v) => transform_iter_into_set(transform_borrow, v.len(), v.iter().enumerate()),
             },
             DictionaryValueArray::Set(a) => (Rc::unwrap_or_clone(a), None),
             DictionaryValueArray::Boolean => {
@@ -244,7 +249,7 @@ impl<'a> DictionaryValueArray<'a> {
 
     pub fn transform_into_set<T: Hash + Eq, FTransform>(
         self,
-        transform: &mut FTransform,
+        transform: FTransform,
     ) -> SetWithLookup<T>
     where
         FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
@@ -273,25 +278,22 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn transform_into_vec<T, FTransform>(self, transform: &mut FTransform) -> Vec<Option<T>>
+    pub fn transform_into_boolean<FTransform>(self, transform: FTransform) -> BooleanArray
     where
-        FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
+        FTransform: FnMut(&ValueOrRef<'a>) -> Option<bool>,
     {
         match self {
-            DictionaryValueArray::Array(a) => transform_array_into_vec(transform, a),
-            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => v.into_iter().map(transform).collect(),
-                Err(v) => v.iter().map(|v| transform(v.clone())).collect(),
-            },
-            DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
-                Ok(v) => v.into_iter().map(transform).collect(),
-                Err(v) => v.iter().map(|v| transform(v.clone())).collect(),
-            },
+            DictionaryValueArray::Array(a) => transform_array_into_boolean(transform, a),
+            DictionaryValueArray::Vec(a) => {
+                transform_iter_into_boolean_array(a.iter().map(transform))
+            }
+            DictionaryValueArray::Set(a) => {
+                transform_iter_into_boolean_array(a.iter().map(transform))
+            }
             DictionaryValueArray::Boolean => {
-                vec![
-                    transform(ValueOrRef::Boolean(false)),
-                    transform(ValueOrRef::Boolean(true)),
-                ]
+                let mut buffer = MutableBuffer::from_len_zeroed(1);
+                unsafe { *buffer.as_mut_ptr() = 0b10 };
+                BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, 2), None)
             }
         }
     }
@@ -305,33 +307,30 @@ impl<'a> DictionaryValueArray<'a> {
     where
         FAsArray: Fn(&Arc<dyn Array>) -> Option<&TArray>,
         FConvert: Fn(ValueOrRef<'a>) -> Option<T>,
-        FBuild: Fn(Vec<T>) -> TArray,
+        FBuild: Fn(indexmap::set::IntoIter<T>) -> TArray,
     {
         match self {
             DictionaryValueArray::Array(a) => {
                 if let Some(s) = as_array(&a) {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_set(&mut |v| convert(v), a);
+                    let (values, lookup) = transform_array_into_set(convert, a);
 
-                    (build(values.into_iter().collect::<Vec<_>>()), lookup)
+                    (build(values.into_iter()), lookup)
                 }
             }
             DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_array(v.len(), v.into_iter(), build, convert),
-                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned(), build, convert),
+                Ok(v) => transform_iter_into_array(v.len(), v.into_iter().map(convert), build),
+                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned().map(convert), build),
             },
             DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_array(v.len(), v.into_iter(), build, convert),
-                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned(), build, convert),
+                Ok(v) => transform_iter_into_array(v.len(), v.into_iter().map(convert), build),
+                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned().map(convert), build),
             },
-            DictionaryValueArray::Boolean => (
-                build(vec![
-                    convert(ValueOrRef::Boolean(false)).expect("false value"),
-                    convert(ValueOrRef::Boolean(true)).expect("true value"),
-                ]),
-                None,
-            ),
+            DictionaryValueArray::Boolean => {
+                let values = [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)];
+                transform_iter_into_array(2, values.into_iter().map(convert), build)
+            }
         }
     }
 }
@@ -378,128 +377,8 @@ impl<'a> From<Vec<ValueOrRef<'a>>> for DictionaryValueArray<'a> {
     }
 }
 
-fn transform_array_into_vec<'a, T, FTransform>(
-    mut transform: FTransform,
-    value: Arc<dyn Array>,
-) -> Vec<Option<T>>
-where
-    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
-{
-    match value.data_type() {
-        DataType::Int8 => value
-            .as_primitive::<Int8Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-        DataType::Int16 => value
-            .as_primitive::<Int16Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-        DataType::Int32 => value
-            .as_primitive::<Int32Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-        DataType::Int64 => value
-            .as_primitive::<Int64Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, ValueOrRef::Integer)))
-            .collect(),
-
-        DataType::UInt8 => value
-            .as_primitive::<UInt8Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-        DataType::UInt16 => value
-            .as_primitive::<UInt16Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-        DataType::UInt32 => value
-            .as_primitive::<UInt32Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-        DataType::UInt64 => value
-            .as_primitive::<UInt64Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))))
-            .collect(),
-
-        DataType::Float16 => value
-            .as_primitive::<Float16Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))))
-            .collect(),
-        DataType::Float32 => value
-            .as_primitive::<Float32Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))))
-            .collect(),
-        DataType::Float64 => value
-            .as_primitive::<Float64Type>()
-            .into_iter()
-            .map(|v| transform(v.map_or(ValueOrRef::Null, ValueOrRef::Double)))
-            .collect(),
-
-        DataType::Utf8 => StringArrayIter::new(value.as_string::<i32>())
-            .map(transform)
-            .collect(),
-        DataType::LargeUtf8 => StringArrayIter::new(value.as_string::<i64>())
-            .map(transform)
-            .collect(),
-
-        DataType::Timestamp(time_unit, _) => match time_unit {
-            TimeUnit::Second => value
-                .as_primitive::<TimestampSecondType>()
-                .into_iter()
-                .map(|v| {
-                    transform(v.map_or(ValueOrRef::Null, |secs| {
-                        ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
-                    }))
-                })
-                .collect(),
-            TimeUnit::Millisecond => value
-                .as_primitive::<TimestampMillisecondType>()
-                .into_iter()
-                .map(|v| {
-                    transform(v.map_or(ValueOrRef::Null, |millis| {
-                        ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
-                    }))
-                })
-                .collect(),
-            TimeUnit::Microsecond => value
-                .as_primitive::<TimestampMicrosecondType>()
-                .into_iter()
-                .map(|v| {
-                    transform(v.map_or(ValueOrRef::Null, |micros| {
-                        ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
-                    }))
-                })
-                .collect(),
-            TimeUnit::Nanosecond => value
-                .as_primitive::<TimestampNanosecondType>()
-                .into_iter()
-                .map(|v| {
-                    transform(v.map_or(ValueOrRef::Null, |nanos| {
-                        ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
-                    }))
-                })
-                .collect(),
-        },
-
-        DataType::FixedSizeBinary(_) => FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary())
-            .map(transform)
-            .collect(),
-
-        d => todo!("{d} is not implemented"),
-    }
-}
-
 fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(
-    transform: &mut FTransform,
+    transform: FTransform,
     value: Arc<dyn Array>,
 ) -> SetWithLookup<T>
 where
@@ -704,6 +583,140 @@ where
     }
 }
 
+pub fn transform_array_into_boolean<'a, FTransform>(
+    mut transform: FTransform,
+    value: Arc<dyn Array>,
+) -> BooleanArray
+where
+    FTransform: FnMut(&ValueOrRef<'a>) -> Option<bool>,
+{
+    match value.data_type() {
+        DataType::Int8 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<Int8Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+        DataType::Int16 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<Int16Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+        DataType::Int32 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<Int32Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+        DataType::Int64 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<Int64Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, ValueOrRef::Integer))),
+        ),
+
+        DataType::UInt8 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<UInt8Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+        DataType::UInt16 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<UInt16Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+        DataType::UInt32 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<UInt32Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+        DataType::UInt64 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<UInt64Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
+        ),
+
+        DataType::Float16 => {
+            transform_iter_into_boolean_array(value.as_primitive::<Float16Type>().into_iter().map(
+                |v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))),
+            ))
+        }
+        DataType::Float32 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<Float32Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64)))),
+        ),
+        DataType::Float64 => transform_iter_into_boolean_array(
+            value
+                .as_primitive::<Float64Type>()
+                .into_iter()
+                .map(|v| transform(&v.map_or(ValueOrRef::Null, ValueOrRef::Double))),
+        ),
+
+        DataType::Utf8 => transform_iter_into_boolean_array(
+            StringArrayIter::new(value.as_string::<i32>()).map(|v| transform(&v)),
+        ),
+        DataType::LargeUtf8 => transform_iter_into_boolean_array(
+            StringArrayIter::new(value.as_string::<i64>()).map(|v| transform(&v)),
+        ),
+
+        DataType::Timestamp(time_unit, _) => match time_unit {
+            TimeUnit::Second => transform_iter_into_boolean_array(
+                value
+                    .as_primitive::<TimestampSecondType>()
+                    .into_iter()
+                    .map(|v| {
+                        transform(&v.map_or(ValueOrRef::Null, |secs| {
+                            ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
+                        }))
+                    }),
+            ),
+            TimeUnit::Millisecond => transform_iter_into_boolean_array(
+                value
+                    .as_primitive::<TimestampMillisecondType>()
+                    .into_iter()
+                    .map(|v| {
+                        transform(&v.map_or(ValueOrRef::Null, |millis| {
+                            ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
+                        }))
+                    }),
+            ),
+            TimeUnit::Microsecond => transform_iter_into_boolean_array(
+                value
+                    .as_primitive::<TimestampMicrosecondType>()
+                    .into_iter()
+                    .map(|v| {
+                        transform(&v.map_or(ValueOrRef::Null, |micros| {
+                            ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
+                        }))
+                    }),
+            ),
+            TimeUnit::Nanosecond => transform_iter_into_boolean_array(
+                value
+                    .as_primitive::<TimestampNanosecondType>()
+                    .into_iter()
+                    .map(|v| {
+                        transform(&v.map_or(ValueOrRef::Null, |nanos| {
+                            ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
+                        }))
+                    }),
+            ),
+        },
+
+        DataType::FixedSizeBinary(_) => transform_iter_into_boolean_array(
+            FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()).map(|v| transform(&v)),
+        ),
+
+        d => todo!("{d} is not implemented"),
+    }
+}
+
 fn transform_iter_into_set<T: Hash + Eq, FTransform, I, V>(
     mut transform: FTransform,
     max_length: usize,
@@ -742,27 +755,23 @@ where
 }
 
 fn transform_iter_into_array<
-    'a,
-    TItems: Iterator<Item = ValueOrRef<'a>>,
+    TItems: Iterator<Item = Option<TInput>>,
     TInput: Hash + PartialEq + Eq,
     TOutput: Array,
     FBuild,
-    FTransform,
 >(
     length: usize,
     values: TItems,
     build: FBuild,
-    transform: FTransform,
 ) -> (TOutput, IndexLookup)
 where
-    FBuild: Fn(Vec<TInput>) -> TOutput,
-    FTransform: Fn(ValueOrRef<'a>) -> Option<TInput>,
+    FBuild: Fn(indexmap::set::IntoIter<TInput>) -> TOutput,
 {
     let mut lookup = AHashMap::with_capacity(length);
     let mut set = IndexSet::with_capacity_and_hasher(length, RandomState::new());
 
-    for (value_index, v) in values.enumerate() {
-        if let Some(v) = transform(v) {
+    for (value_index, value) in values.enumerate() {
+        if let Some(v) = value {
             let (index, _) = set.insert_full(v);
 
             lookup.insert(value_index, Some(index));
@@ -771,7 +780,36 @@ where
         }
     }
 
-    (build(set.into_iter().collect::<Vec<_>>()), Some(lookup))
+    (build(set.into_iter()), Some(lookup))
+}
+
+fn transform_iter_into_boolean_array<TIterator>(values: TIterator) -> BooleanArray
+where
+    TIterator: Iterator<Item = Option<bool>> + ExactSizeIterator,
+{
+    let length = values.len();
+    let mut buffer = MutableBuffer::new_null(length);
+    let mut nulls = None;
+
+    for (value_index, value) in values.enumerate() {
+        match value {
+            None => {
+                unsafe { arrow_utils::ensure_nulls_unchecked(&mut nulls, length, value_index) };
+            }
+            Some(v) => {
+                if v {
+                    bit_util::set_bit(&mut buffer, value_index);
+                }
+                if let Some(nulls) = &mut nulls {
+                    bit_util::set_bit(nulls, value_index);
+                }
+            }
+        }
+    }
+    BooleanArray::new(
+        BooleanBuffer::new(buffer.into(), 0, length),
+        nulls.and_then(|v| NullBufferBuilder::new_from_buffer(v, length).build()),
+    )
 }
 
 pub(crate) fn get_value_from_array(value: &Arc<dyn Array>, index: usize) -> ValueOrRef<'static> {
@@ -963,6 +1001,12 @@ impl<'a, T: OffsetSizeTrait> Iterator for StringArrayIter<'a, '_, T> {
     }
 }
 
+impl<T: OffsetSizeTrait> ExactSizeIterator for StringArrayIter<'_, '_, T> {
+    fn len(&self) -> usize {
+        self.length
+    }
+}
+
 struct FixedSizeBinaryArrayIter<'a, 'b> {
     values: &'b FixedSizeBinaryArray,
     marker: PhantomData<&'a FixedSizeBinaryArray>,
@@ -1007,6 +1051,12 @@ impl<'a> Iterator for FixedSizeBinaryArrayIter<'a, '_> {
         self.current = current + 1;
 
         Some(ret)
+    }
+}
+
+impl ExactSizeIterator for FixedSizeBinaryArrayIter<'_, '_> {
+    fn len(&self) -> usize {
+        self.values.len()
     }
 }
 

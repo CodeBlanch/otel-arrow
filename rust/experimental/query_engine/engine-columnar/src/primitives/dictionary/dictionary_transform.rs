@@ -3,32 +3,33 @@
 
 use std::{cell::OnceCell, sync::Arc};
 
-use arrow::{
-    array::*,
-    buffer::{BooleanBuffer, MutableBuffer, NullBuffer},
-    datatypes::*,
-};
+use arrow::{array::*, buffer::*, datatypes::*};
 
-use crate::*;
+use crate::{arrow_utils::ArrowArrayValueAccessor, *};
+
+pub(crate) enum BooleanArrayOrValue {
+    Value(bool),
+    Array(BooleanArray),
+}
 
 impl<'a> Dictionary<'a> {
     pub(crate) fn transform_into_boolean<FTransform>(
         self,
         mut transform: FTransform,
-    ) -> BooleanArray
+    ) -> BooleanArrayOrValue
     where
-        FTransform: FnMut(ValueOrRef<'_>) -> Option<bool>,
+        FTransform: FnMut(&ValueOrRef<'_>) -> Option<bool>,
     {
         let (keys, values) = self.into_parts();
 
         match keys {
             DictionaryKeyArray::KeyArray(key_array) => {
-                transform_array_into_boolean(&key_array, values, transform)
+                transform_dictionary_into_boolean(&key_array, values, transform)
             }
             DictionaryKeyArray::BooleanArray {
                 data_type: _,
                 values: key_array,
-            } => BooleanArray::from(key_array.into_data()),
+            } => BooleanArrayOrValue::Array(BooleanArray::from(key_array.into_data())),
             DictionaryKeyArray::UniqueValues {
                 data_type: _,
                 length,
@@ -40,13 +41,13 @@ impl<'a> Dictionary<'a> {
 
                 let mut null_buffer = None;
 
-                let transformered_values = values.transform_into_vec(&mut transform);
+                let transformered_values = values.transform_into_boolean(&mut transform);
 
                 assert!(transformered_values.len() == length);
 
                 for key_index in 0..length {
-                    if let Some(v) = unsafe { transformered_values.get_unchecked(key_index) } {
-                        if *v {
+                    if let Some(v) = (&transformered_values).get_value_null_safe(key_index) {
+                        if v {
                             unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                         }
                     } else {
@@ -54,10 +55,10 @@ impl<'a> Dictionary<'a> {
                     }
                 }
 
-                BooleanArray::new(
+                BooleanArrayOrValue::Array(BooleanArray::new(
                     BooleanBufferBuilder::new_from_buffer(key_buffer, length).finish(),
                     null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, length).build()),
-                )
+                ))
             }
             DictionaryKeyArray::SingleValue {
                 data_type: _,
@@ -69,23 +70,18 @@ impl<'a> Dictionary<'a> {
                         BooleanBuffer::new_unset(length),
                         Some(NullBuffer::new_null(length)),
                     ),
-                    Some(value_index) => match transform(values.get_value_at(value_index)) {
+                    Some(value_index) => match transform(&values.get_value_at(value_index)) {
                         None => (
                             BooleanBuffer::new_unset(length),
                             Some(NullBuffer::new_null(length)),
                         ),
-                        Some(v) => (
-                            if v {
-                                BooleanBuffer::new_set(length)
-                            } else {
-                                BooleanBuffer::new_unset(length)
-                            },
-                            None,
-                        ),
+                        Some(v) => {
+                            return BooleanArrayOrValue::Value(v);
+                        }
                     },
                 };
 
-                BooleanArray::new(key_buffer, null_buffer)
+                BooleanArrayOrValue::Array(BooleanArray::new(key_buffer, null_buffer))
             }
         }
     }
@@ -150,52 +146,52 @@ impl<'a> Dictionary<'a> {
     }
 }
 
-fn transform_array_into_boolean<FTransform>(
+fn transform_dictionary_into_boolean<FTransform>(
     key_array: &Arc<dyn Array>,
     values: DictionaryValueArray<'_>,
     transform: FTransform,
-) -> BooleanArray
+) -> BooleanArrayOrValue
 where
-    FTransform: FnMut(ValueOrRef<'_>) -> Option<bool>,
+    FTransform: FnMut(&ValueOrRef<'_>) -> Option<bool>,
 {
     match key_array.data_type() {
-        DataType::Int8 => transform_array_into_boolean_typed(
+        DataType::Int8 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<Int8Type>(),
             values,
             transform,
         ),
-        DataType::Int16 => transform_array_into_boolean_typed(
+        DataType::Int16 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<Int16Type>(),
             values,
             transform,
         ),
-        DataType::Int32 => transform_array_into_boolean_typed(
+        DataType::Int32 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<Int32Type>(),
             values,
             transform,
         ),
-        DataType::Int64 => transform_array_into_boolean_typed(
+        DataType::Int64 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<Int64Type>(),
             values,
             transform,
         ),
 
-        DataType::UInt8 => transform_array_into_boolean_typed(
+        DataType::UInt8 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<UInt8Type>(),
             values,
             transform,
         ),
-        DataType::UInt16 => transform_array_into_boolean_typed(
+        DataType::UInt16 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<UInt16Type>(),
             values,
             transform,
         ),
-        DataType::UInt32 => transform_array_into_boolean_typed(
+        DataType::UInt32 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<UInt32Type>(),
             values,
             transform,
         ),
-        DataType::UInt64 => transform_array_into_boolean_typed(
+        DataType::UInt64 => transform_dictionary_into_boolean_typed(
             key_array.as_primitive::<UInt64Type>(),
             values,
             transform,
@@ -205,34 +201,33 @@ where
     }
 }
 
-fn transform_array_into_boolean_typed<K: ArrowDictionaryKeyType, FTransform>(
+fn transform_dictionary_into_boolean_typed<K: ArrowDictionaryKeyType, FTransform>(
     keys: &PrimitiveArray<K>,
     values: DictionaryValueArray<'_>,
     mut transform: FTransform,
-) -> BooleanArray
+) -> BooleanArrayOrValue
 where
-    FTransform: FnMut(ValueOrRef<'_>) -> Option<bool>,
+    FTransform: FnMut(&ValueOrRef<'_>) -> Option<bool>,
 {
     let key_length = keys.len();
 
-    let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
-
-    let mut key_buffer = MutableBuffer::from_len_zeroed(key_bit_length);
-    let key_builder = key_buffer.typed_data_mut::<u8>().as_mut_ptr();
-
-    let mut null_buffer = None;
-
-    let transformered_values = values.transform_into_vec(&mut transform);
+    let transformered_values = values.transform_into_boolean(&mut transform);
 
     if keys.is_nullable() {
+        let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
+
+        let mut key_buffer = MutableBuffer::from_len_zeroed(key_bit_length);
+        let key_builder = key_buffer.typed_data_mut::<u8>().as_mut_ptr();
+
+        let mut null_buffer = None;
+
         let null_value = OnceCell::new();
         for (key_index, value_index) in keys.iter().enumerate() {
             let v = if let Some(value_index) = value_index {
-                transformered_values
-                    .get(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
-                    .unwrap_or(&None)
+                &(&transformered_values)
+                    .get_value_null_safe(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
             } else {
-                null_value.get_or_init(|| transform(ValueOrRef::Null))
+                null_value.get_or_init(|| transform(&ValueOrRef::Null))
             };
 
             if let Some(v) = v {
@@ -243,28 +238,71 @@ where
                 unsafe { push_null(&mut null_buffer, key_index, key_bit_length) };
             }
         }
+
+        BooleanArrayOrValue::Array(BooleanArray::new(
+            BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
+            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).build()),
+        ))
     } else {
+        /*let mut has_nulls = false;
+        let mut true_count = 0;
+        let mut false_count = 0;
+
+        for v in transformered_values.iter() {
+            match v {
+                None => {
+                    has_nulls = true;
+                    break;
+                }
+                Some(true) => true_count += 1,
+                Some(false) => false_count += 1,
+            }
+        }
+
+        if !has_nulls {
+            if false_count == 0 {
+                return BooleanArrayOrValue::Value(true);
+            } else if true_count == 0 {
+                return BooleanArrayOrValue::Value(false);
+            }
+        }
+        */
+
+        let true_count = transformered_values.true_count();
+        let len = transformered_values.len();
+        if true_count == len {
+            return BooleanArrayOrValue::Value(true);
+        } else if true_count == 0 && transformered_values.null_count() == 0 {
+            return BooleanArrayOrValue::Value(false);
+        }
+
+        let key_bit_length = arrow::util::bit_util::ceil(key_length, 8);
+
+        let mut key_buffer = MutableBuffer::from_len_zeroed(key_bit_length);
+        let key_builder = key_buffer.typed_data_mut::<u8>().as_mut_ptr();
+
+        let mut null_buffer = None;
+
         let values = keys.values().as_ptr();
 
         for key_index in 0..key_length {
             let value_index = unsafe { *values.add(key_index) };
-            if let Some(v) = transformered_values
-                .get(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
-                .unwrap_or(&None)
+            if let Some(v) = (&transformered_values)
+                .get_value_null_safe(<K as ArrowPrimitiveType>::Native::as_usize(value_index))
             {
-                if *v {
+                if v {
                     unsafe { arrow::util::bit_util::set_bit_raw(key_builder, key_index) };
                 }
             } else {
                 unsafe { push_null(&mut null_buffer, key_index, key_bit_length) };
             }
         }
-    }
 
-    BooleanArray::new(
-        BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
-        null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).build()),
-    )
+        BooleanArrayOrValue::Array(BooleanArray::new(
+            BooleanBufferBuilder::new_from_buffer(key_buffer, key_length).finish(),
+            null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).build()),
+        ))
+    }
 }
 
 pub(crate) unsafe fn push_null(
@@ -353,7 +391,7 @@ where
     let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(&mut |v| match transform(v) {
+        values.transform_into_set(|v| match transform(v) {
             ValueOrRef::Null => None,
             v => Some(v),
         });
@@ -419,7 +457,7 @@ where
     let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(&mut |v| match transform(v) {
+        values.transform_into_set(|v| match transform(v) {
             ValueOrRef::Null => None,
             v => Some(v),
         });

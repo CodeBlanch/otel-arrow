@@ -1,16 +1,15 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    sync::Arc,
-};
+use std::{collections::hash_map::Entry, sync::Arc};
 
-use arrow::array::*;
+use ahash::AHashMap;
+use arrow::{array::*, datatypes::DataType};
 use data_engine_expressions::*;
 
 use crate::{
-    execution_context::ExecutionContext, resolved_value::*, scalars::execute_scalar_expression, *,
+    dictionary_transform::BooleanArrayOrValue, execution_context::ExecutionContext,
+    resolved_value::*, scalars::execute_scalar_expression, *,
 };
 
 pub fn execute_logical_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
@@ -48,32 +47,34 @@ pub fn execute_logical_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipe
                     if let DictionaryKeyArray::BooleanArray{data_type, values} = keys {
                         ResolvedLogicalValue::Array{data_type, values}
                     } else {
-                        ResolvedLogicalValue::Array { data_type: keys.data_type(),
-                            values: Arc::new(Dictionary::new(keys, values).transform_into_boolean(
-                                |v| {
-                                    match v.to_value() {
-                                        Value::Null => None,
-                                        Value::Boolean(b) => Some(b.get_value()),
-                                        v => {
-                                            if let Some(b) = v.convert_to_bool() {
-                                                Some(b)
-                                            } else {
-                                                execution_context.add_diagnostic_if_enabled(
-                                                    ColumnarEngineDiagnosticLevel::Warn,
-                                                    s,
-                                                    ||
-                                                        format!(
-                                                            "Value of '{}' type returned by scalar expression could not be converted to bool",
-                                                            v.get_value_type()
-                                                        ),
-                                                    );
-                                                None
-                                            }
+                        let data_type = keys.data_type();
+
+                        let transform_result = Dictionary::new(keys, values).transform_into_boolean(
+                            |v| {
+                                match v.to_value() {
+                                    Value::Null => None,
+                                    Value::Boolean(b) => Some(b.get_value()),
+                                    v => {
+                                        if let Some(b) = v.convert_to_bool() {
+                                            Some(b)
+                                        } else {
+                                            execution_context.add_diagnostic_if_enabled(
+                                                ColumnarEngineDiagnosticLevel::Warn,
+                                                s,
+                                                ||
+                                                    format!(
+                                                        "Value of '{}' type returned by scalar expression could not be converted to bool",
+                                                        v.get_value_type()
+                                                    ),
+                                                );
+                                            None
                                         }
                                     }
-                                },
-                            )),
-                        }
+                                }
+                            },
+                        );
+
+                        convert_to_resolved(data_type, transform_result)
                     }
                 },
                 |_| {
@@ -345,26 +346,17 @@ where
             compare,
         );
 
-        (data_type, compare_result)
+        (data_type, BooleanArrayOrValue::Array(compare_result))
     };
 
-    if compare_result.true_count() == compare_result.len() {
-        ResolvedLogicalValue::Single(true)
-    } else if compare_result.false_count() == compare_result.len() {
-        ResolvedLogicalValue::Single(false)
-    } else {
-        ResolvedLogicalValue::Array {
-            data_type,
-            values: Arc::new(compare_result),
-        }
-    }
+    convert_to_resolved(data_type, compare_result)
 }
 
 fn compare_dictionary_to_single<FCompare>(
     dictionary: Dictionary,
     value: &ValueOrRef,
     compare: FCompare,
-) -> BooleanArray
+) -> BooleanArrayOrValue
 where
     FCompare: Fn(&Value, &Value) -> bool,
 {
@@ -377,7 +369,7 @@ fn compare_single_to_dictionary<FCompare>(
     value: &ValueOrRef,
     dictionary: Dictionary,
     compare: FCompare,
-) -> BooleanArray
+) -> BooleanArrayOrValue
 where
     FCompare: Fn(&Value, &Value) -> bool,
 {
@@ -407,7 +399,7 @@ where
     let right_values = right.values();
 
     let mut value_lookup =
-        HashMap::with_capacity(std::cmp::max(left_values.len(), right_values.len()));
+        AHashMap::with_capacity(std::cmp::max(left_values.len(), right_values.len()));
 
     let mut builder = BooleanBuilder::with_capacity(key_len);
 
@@ -440,4 +432,27 @@ where
     }
 
     builder.finish()
+}
+
+fn convert_to_resolved(
+    data_type: DataType,
+    boolean_array_or_value: BooleanArrayOrValue,
+) -> ResolvedLogicalValue {
+    match boolean_array_or_value {
+        BooleanArrayOrValue::Value(v) => ResolvedLogicalValue::Single(v),
+        BooleanArrayOrValue::Array(a) => {
+            let true_count = a.true_count();
+            let len = a.len();
+            if true_count == len {
+                ResolvedLogicalValue::Single(true)
+            } else if true_count == 0 && a.null_count() == 0 {
+                ResolvedLogicalValue::Single(false)
+            } else {
+                ResolvedLogicalValue::Array {
+                    data_type,
+                    values: Arc::new(a),
+                }
+            }
+        }
+    }
 }

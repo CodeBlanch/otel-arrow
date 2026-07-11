@@ -81,7 +81,7 @@ impl Display for BridgePipeline {
 
 #[derive(Debug)]
 pub struct BridgeResponse<'a, T> {
-    pub included_records: T,
+    pub included_records: Option<T>,
     pub included_record_count: usize,
     pub dropped_record_count: usize,
     pub diagnostics: BridgeDiagnostics<'a>,
@@ -161,24 +161,14 @@ pub fn process_otap_logs_using_pipeline<'a>(
 
     let results = batch.flush();
 
-    let mut logs = RawLogsStore::new();
-
-    if !results.included_batches.is_empty() {
-        let batches = logs.batches_mut();
-        for (index, batch) in results
-            .included_batches
-            .into_iter()
-            .next()
-            .unwrap()
-            .into_iter()
-            .enumerate()
-        {
-            batches[index] = batch;
-        }
-    }
+    let logs: Option<Logs> = results
+        .included_batches
+        .into_iter()
+        .next()
+        .map(|batches| RawLogsStore::from_batches(batches).try_into().unwrap());
 
     Ok(BridgeResponse {
-        included_records: logs.try_into().unwrap(),
+        included_records: logs,
         included_record_count: results.included_record_count,
         dropped_record_count: results.dropped_record_count,
         diagnostics: BridgeDiagnostics {
@@ -284,25 +274,28 @@ mod tests {
         LogRecord, LogRecordFlags, LogsData, ResourceLogs, ScopeLogs,
     };
     use otap_df_pdata::proto::opentelemetry::resource::v1::Resource;
+    use otap_df_pdata::testing::fixtures::logs_with_varying_attributes_and_properties;
     use otap_df_pdata::testing::round_trip::{otap_to_otlp, otlp_to_otap, to_otap_logs};
     use otap_df_pdata::{otap::OtapBatchStore, *};
 
     use super::*;
 
+    fn generate_logs_batch(batch_size: usize) -> Logs {
+        let logs_data = logs_with_varying_attributes_and_properties(batch_size);
+        let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
+        match pdata {
+            OtapArrowRecords::Logs(logs) => logs,
+            _ => panic!(),
+        }
+    }
+
     #[test]
     fn test_engine_filter_all() {
-        let attr = KeyValue {
-            key: "code.line.number".into(),
-            value: Some(AnyValue {
-                value: Some(Value::IntValue(1)),
-            }),
-        };
-
         let log_records = vec![
-            LogRecord::build().attributes(vec![attr.clone()]).finish(),
-            LogRecord::build().attributes(vec![attr.clone()]).finish(),
-            LogRecord::build().attributes(vec![attr.clone()]).finish(),
-            LogRecord::build().attributes(vec![attr.clone()]).finish(),
+            LogRecord::build().finish(),
+            LogRecord::build().finish(),
+            LogRecord::build().finish(),
+            LogRecord::build().finish(),
         ];
 
         let otap_batch = to_otap_logs(log_records);
@@ -317,7 +310,7 @@ mod tests {
             logs.get(ArrowPayloadType::Logs).map_or(0, |v| v.num_rows())
         );
 
-        let pipeline = parse_kql_logs_query_into_pipeline("source | where attributes[\"code.line.number\"] >= 0 or not(attributes[\"some.attr\"] >= 0 and severity_text == \"WARN\")", None).unwrap();
+        let pipeline = parse_kql_logs_query_into_pipeline("source | where false", None).unwrap();
 
         println!("{pipeline}");
 
@@ -326,12 +319,13 @@ mod tests {
             &OtapLogRecordBatchFactory::new_with_options(Some(
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
-            logs,
+            generate_logs_batch(4),
         )
         .unwrap();
 
         println!("{results}");
 
+        assert!(results.included_records.is_none());
         assert_eq!(4, results.dropped_record_count);
         assert_eq!(0, results.included_record_count);
     }
@@ -458,7 +452,7 @@ mod tests {
         assert_eq!(3, results.dropped_record_count);
         assert_eq!(1, results.included_record_count);
 
-        let final_batch = &results.included_records;
+        let final_batch = &results.included_records.expect("has logs");
 
         assert_eq!(
             1,
@@ -568,7 +562,7 @@ mod tests {
         assert_eq!(2, results.dropped_record_count);
         assert_eq!(4, results.included_record_count);
 
-        let final_logs = &results.included_records;
+        let final_logs = &results.included_records.expect("has logs");
 
         assert_eq!(
             4,
@@ -708,7 +702,7 @@ mod tests {
         assert_eq!(3, results.dropped_record_count);
         assert_eq!(1, results.included_record_count);
 
-        let final_logs = &results.included_records;
+        let final_logs = &results.included_records.expect("has logs");
 
         assert_eq!(
             1,
@@ -859,7 +853,7 @@ mod tests {
         assert_eq!(2, results.dropped_record_count);
         assert_eq!(2, results.included_record_count);
 
-        let final_logs = &results.included_records;
+        let final_logs = &results.included_records.expect("has logs");
 
         assert_eq!(
             2,
@@ -938,7 +932,7 @@ mod tests {
                     assert_eq!(0, results.dropped_record_count);
                     assert_eq!(number_of_logs, results.included_record_count);
 
-                    let final_batch = results.included_records;
+                    let final_batch = results.included_records.expect("has logs");
 
                     assert_eq!(
                         number_of_logs,
@@ -1664,7 +1658,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = results.included_records;
+        let final_batch = results.included_records.expect("has logs");
 
         assert_eq!(
             3,
@@ -1794,7 +1788,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = results.included_records;
+        let final_batch = results.included_records.expect("has logs");
 
         assert_eq!(
             3,
@@ -1980,7 +1974,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = results.included_records;
+        let final_batch = results.included_records.expect("has logs");
 
         assert_eq!(
             3,
@@ -2175,7 +2169,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = results.included_records;
+        let final_batch = results.included_records.expect("has logs");
 
         assert_eq!(
             3,
@@ -2344,7 +2338,7 @@ mod tests {
         assert_eq!(0, results.dropped_record_count);
         assert_eq!(3, results.included_record_count);
 
-        let final_batch = results.included_records;
+        let final_batch = results.included_records.expect("has logs");
 
         assert_eq!(
             3,

@@ -9,14 +9,12 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    arrow_helpers::{ArrowGenericByteArrayBufferAccessor, ArrowTypedDictionaryValueIndexAccessor},
-    *,
-};
 use ahash::AHashMap;
 use arrow::{array::*, buffer::MutableBuffer, datatypes::*};
-use data_engine_columnar::*;
+use data_engine_columnar::{arrow_utils::*, *};
 use otap_df_pdata::{otlp::attributes::*, schema::consts};
+
+use crate::*;
 
 pub(crate) const EMPTY_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Empty as u8;
 pub(crate) const STRING_ATTRIBUTE_VALUE_TYPE: u8 = AttributeValueType::Str as u8;
@@ -175,8 +173,7 @@ impl OtapAttributesBatch<'_> {
             let mut key_buffer = MutableBuffer::from_len_zeroed(record_count * 2);
             let keys = key_buffer.typed_data_mut::<u16>().as_mut_ptr();
 
-            let mut null_buffer =
-                MutableBuffer::from_len_zeroed(arrow::util::bit_util::ceil(record_count, 8));
+            let mut null_buffer = MutableBuffer::new_null(record_count);
             let nulls = null_buffer.typed_data_mut::<u8>().as_mut_ptr();
             let mut null_count = record_count;
 
@@ -196,7 +193,7 @@ impl OtapAttributesBatch<'_> {
                         let index = match attribute_value {
                             AttributeValueOrIndex::ValueIndex(attribute_value_index) => {
                                 let lookup_key =
-                                    ((attribute_type as usize) << 16) | attribute_value_index;
+                                    ((attribute_type as usize) << 24) | attribute_value_index;
                                 match value_lookup.entry(lookup_key) {
                                     Entry::Occupied(occupied) => *occupied.get(),
                                     Entry::Vacant(vacant) => {
@@ -288,47 +285,42 @@ impl OtapAttributesBatch<'_> {
         match attribute_type {
             EMPTY_ATTRIBUTE_VALUE_TYPE => {}
             STRING_ATTRIBUTE_VALUE_TYPE => {
-                return Some(
-                    if let Some(strings) = self.attribute_strings
-                        && let Some(value_index) =
-                            strings.get_value_index_null_safe(attribute_index)
-                    {
-                        AttributeValueOrIndex::ValueIndex(value_index)
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::String(StringValueOrRef::Empty))
-                    },
-                );
+                if let Some(strings) = self.attribute_strings
+                    && let Some(value_index) = strings.get_value_index_null_safe(attribute_index)
+                {
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
+                }
             }
             INT_ATTRIBUTE_VALUE_TYPE => {
-                return Some(
-                    if let Some(ints) = self.attribute_ints
-                        && let Some(value_index) = ints.get_value_index_null_safe(attribute_index)
-                    {
-                        let value = unsafe { ints.value_unchecked(value_index) };
-                        AttributeValueOrIndex::Value(ValueOrRef::Integer(value))
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::Integer(0))
-                    },
-                );
+                if let Some(ints) = self.attribute_ints
+                    && let Some(value_index) = ints.get_value_index_null_safe(attribute_index)
+                {
+                    return Some(AttributeValueOrIndex::ValueIndex(value_index));
+                }
+
+                return Some(AttributeValueOrIndex::ValueIndex(u16::MAX as usize + 1));
             }
             DOUBLE_ATTRIBUTE_VALUE_TYPE => {
-                return Some(
-                    if let Some(doubles) = self.attribute_doubles
-                        && doubles.is_valid(attribute_index)
-                    {
-                        let value = unsafe { doubles.value_unchecked(attribute_index) };
-                        AttributeValueOrIndex::Value(ValueOrRef::Double(value))
-                    } else {
-                        AttributeValueOrIndex::Value(ValueOrRef::Double(0f64))
-                    },
-                );
+                if let Some(doubles) = self.attribute_doubles
+                    && doubles.is_valid(attribute_index)
+                {
+                    let value = unsafe { doubles.value_unchecked(attribute_index) };
+                    if !value.is_zero() {
+                        return Some(AttributeValueOrIndex::Value(ValueOrRef::Double(value)));
+                    }
+                }
+
+                return Some(AttributeValueOrIndex::ValueIndex(u16::MAX as usize + 1));
             }
             BOOL_ATTRIBUTE_VALUE_TYPE => {
                 if let Some(bools) = self.attribute_bools
                     && bools.is_valid(attribute_index)
                 {
-                    let value = unsafe { bools.value_unchecked(attribute_index) };
-                    return Some(AttributeValueOrIndex::Value(ValueOrRef::Boolean(value)));
+                    return Some(if unsafe { bools.value_unchecked(attribute_index) } {
+                        AttributeValueOrIndex::ValueIndex(1)
+                    } else {
+                        AttributeValueOrIndex::ValueIndex(0)
+                    });
                 }
             }
             MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
@@ -365,6 +357,26 @@ impl OtapAttributesBatch<'_> {
                         .get_buffer_value_unchecked(attribute_value_index)
                 }
             })),
+            INT_ATTRIBUTE_VALUE_TYPE => {
+                if attribute_value_index == u16::MAX as usize + 1 {
+                    return ValueOrRef::Integer(0);
+                }
+
+                unsafe {
+                    ValueOrRef::Integer(
+                        self.attribute_ints
+                            .expect("has ints")
+                            .values()
+                            .value_unchecked(attribute_value_index),
+                    )
+                }
+            }
+            DOUBLE_ATTRIBUTE_VALUE_TYPE => {
+                debug_assert!(attribute_value_index == u16::MAX as usize + 1);
+
+                ValueOrRef::Double(0f64)
+            }
+            BOOL_ATTRIBUTE_VALUE_TYPE => ValueOrRef::Boolean(attribute_value_index != 0),
             MAP_ATTRIBUTE_VALUE_TYPE | SLICE_ATTRIBUTE_VALUE_TYPE => {
                 let value = unsafe {
                     self.attribute_sers
