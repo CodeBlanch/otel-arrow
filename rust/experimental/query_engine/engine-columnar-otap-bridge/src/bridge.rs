@@ -274,20 +274,10 @@ mod tests {
         LogRecord, LogRecordFlags, LogsData, ResourceLogs, ScopeLogs,
     };
     use otap_df_pdata::proto::opentelemetry::resource::v1::Resource;
-    use otap_df_pdata::testing::fixtures::logs_with_varying_attributes_and_properties;
     use otap_df_pdata::testing::round_trip::{otap_to_otlp, otlp_to_otap, to_otap_logs};
     use otap_df_pdata::{otap::OtapBatchStore, *};
 
     use super::*;
-
-    fn generate_logs_batch(batch_size: usize) -> Logs {
-        let logs_data = logs_with_varying_attributes_and_properties(batch_size);
-        let pdata = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
-        match pdata {
-            OtapArrowRecords::Logs(logs) => logs,
-            _ => panic!(),
-        }
-    }
 
     #[test]
     fn test_engine_filter_all() {
@@ -319,7 +309,7 @@ mod tests {
             &OtapLogRecordBatchFactory::new_with_options(Some(
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
-            generate_logs_batch(4),
+            logs,
         )
         .unwrap();
 
