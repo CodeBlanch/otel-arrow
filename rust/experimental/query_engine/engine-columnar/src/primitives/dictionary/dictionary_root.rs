@@ -256,8 +256,6 @@ fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
     key_filter: Option<&RoaringBitmap>,
     values: &Dictionary<'a>,
 ) -> Dictionary<'a> {
-    let (mut source_values, lookup) = source_values.into_set();
-
     if key_filter.is_none()
         && let DictionaryKeyArray::SingleValue {
             data_type,
@@ -277,6 +275,8 @@ fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
             None => Dictionary::new_null_with_data_type(*length, data_type.clone()),
         };
     }
+
+    let (mut source_values, lookup) = source_values.into_set();
 
     let mut source_key_builder = source_keys.transform_into_key_builder::<K>(lookup);
 
