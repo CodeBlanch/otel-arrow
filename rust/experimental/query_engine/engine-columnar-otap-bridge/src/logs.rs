@@ -711,8 +711,7 @@ fn update_dictionary_values_for_path<'a, TDiagnostic: ColumnarEngineDiagnosticRe
 ) -> Dictionary<'a> {
     let (source_keys, source_values) = source.into_parts();
 
-    let (mut source_values, source_value_lookup) =
-        Into::<DictionaryValueArray>::into(source_values).into_set();
+    let (mut source_values, source_value_lookup) = source_values.into_set();
 
     let key_length = source_keys.len();
 
