@@ -297,7 +297,8 @@ impl DictionaryKeyArray {
                     let mut builder = DictionaryKeyArrayBuilder::<KOutput>::new(length);
                     let mut writer = builder.get_writer();
 
-                    let transformed_value_index = if let Some(lookup) = value_index_lookup {
+                    let transformed_value_index = if let Some(lookup) = value_index_lookup.as_ref()
+                    {
                         lookup.get(&value_index).and_then(|v| {
                             v.map(|v| {
                                 <KOutput as ArrowPrimitiveType>::Native::from_usize(v).unwrap()

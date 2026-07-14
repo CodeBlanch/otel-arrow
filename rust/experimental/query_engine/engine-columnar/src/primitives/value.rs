@@ -60,13 +60,13 @@ pub enum ValueOrRef<'a> {
 }
 
 impl<'a> ValueOrRef<'a> {
-    pub fn to_string(self) -> StringValueOrRef<'a> {
+    pub fn to_string(&self) -> StringValueOrRef<'a> {
         self.into()
     }
 }
 
 impl ValueOrRef<'_> {
-    pub fn to_int<T>(self) -> Option<T>
+    pub fn to_int<T>(&self) -> Option<T>
     where
         T: TryFrom<i64>,
     {
@@ -74,7 +74,7 @@ impl ValueOrRef<'_> {
             ValueOrRef::Null => {
                 return None;
             }
-            ValueOrRef::Integer(i) => i,
+            ValueOrRef::Integer(i) => *i,
             v => match v.to_value().convert_to_integer() {
                 None => {
                     return None;

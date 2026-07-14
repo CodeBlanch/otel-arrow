@@ -167,11 +167,11 @@ impl AsRef<str> for StringValueOrRef<'_> {
     }
 }
 
-impl<'a> From<ValueOrRef<'a>> for StringValueOrRef<'a> {
-    fn from(value: ValueOrRef<'a>) -> Self {
+impl<'a> From<&ValueOrRef<'a>> for StringValueOrRef<'a> {
+    fn from(value: &ValueOrRef<'a>) -> Self {
         match value {
             ValueOrRef::Null => StringValueOrRef::Empty,
-            ValueOrRef::String(s) => s,
+            ValueOrRef::String(s) => s.clone(),
             v => StringValueOrRef::Owned(Rc::new(v.to_value().convert_to_string().into())),
         }
     }

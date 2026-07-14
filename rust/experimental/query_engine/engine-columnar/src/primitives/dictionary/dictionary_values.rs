@@ -158,7 +158,7 @@ impl DictionaryValueArray<'_> {
             |v| match v {
                 ValueOrRef::Array(ArrayValueOrRef::Buffer(BufferArray::U8(values))) => {
                     if values.len() == SIZE {
-                        Some(values)
+                        Some(values.clone())
                     } else {
                         None
                     }
@@ -211,7 +211,7 @@ impl<'a> DictionaryValueArray<'a> {
     }
 
     pub fn into_set(self) -> SetWithLookup<ValueOrRef<'a>> {
-        let transform_owned = |v| {
+        let transform = |v| {
             if matches!(v, ValueOrRef::Null) {
                 None
             } else {
@@ -219,21 +219,11 @@ impl<'a> DictionaryValueArray<'a> {
             }
         };
 
-        let transform_borrow = |v| {
-            if matches!(v, &ValueOrRef::Null) {
-                None
-            } else {
-                Some(v.clone())
-            }
-        };
-
         let (set, lookup) = match self {
-            DictionaryValueArray::Array(a) => transform_array_into_set(transform_owned, a),
+            DictionaryValueArray::Array(a) => transform_array_into_set(transform, a),
             DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => {
-                    transform_iter_into_set(transform_owned, v.len(), v.into_iter().enumerate())
-                }
-                Err(v) => transform_iter_into_set(transform_borrow, v.len(), v.iter().enumerate()),
+                Ok(v) => transform_iter_into_set(transform, v.into_iter()),
+                Err(v) => transform_iter_into_set(transform, v.iter().cloned()),
             },
             DictionaryValueArray::Set(a) => (Rc::unwrap_or_clone(a), None),
             DictionaryValueArray::Boolean => {
@@ -257,23 +247,16 @@ impl<'a> DictionaryValueArray<'a> {
         match self {
             DictionaryValueArray::Array(a) => transform_array_into_set(transform, a),
             DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_set(transform, v.len(), v.into_iter().enumerate()),
-                Err(v) => {
-                    transform_iter_into_set(transform, v.len(), v.iter().cloned().enumerate())
-                }
+                Ok(v) => transform_iter_into_set(transform, v.into_iter()),
+                Err(v) => transform_iter_into_set(transform, v.iter().cloned()),
             },
             DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_set(transform, v.len(), v.into_iter().enumerate()),
-                Err(v) => {
-                    transform_iter_into_set(transform, v.len(), v.iter().cloned().enumerate())
-                }
+                Ok(v) => transform_iter_into_set(transform, v.into_iter()),
+                Err(v) => transform_iter_into_set(transform, v.iter().cloned()),
             },
             DictionaryValueArray::Boolean => transform_iter_into_set(
                 transform,
-                2,
-                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)]
-                    .into_iter()
-                    .enumerate(),
+                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)].into_iter(),
             ),
         }
     }
@@ -284,12 +267,8 @@ impl<'a> DictionaryValueArray<'a> {
     {
         match self {
             DictionaryValueArray::Array(a) => transform_array_into_boolean(transform, a),
-            DictionaryValueArray::Vec(a) => {
-                transform_iter_into_boolean_array(a.iter().map(transform))
-            }
-            DictionaryValueArray::Set(a) => {
-                transform_iter_into_boolean_array(a.iter().map(transform))
-            }
+            DictionaryValueArray::Vec(a) => iter_into_boolean_array(a.iter().map(transform)),
+            DictionaryValueArray::Set(a) => iter_into_boolean_array(a.iter().map(transform)),
             DictionaryValueArray::Boolean => {
                 let mut buffer = MutableBuffer::from_len_zeroed(1);
                 unsafe { *buffer.as_mut_ptr() = 0b10 };
@@ -306,7 +285,7 @@ impl<'a> DictionaryValueArray<'a> {
     ) -> (TArray, IndexLookup)
     where
         FAsArray: Fn(&Arc<dyn Array>) -> Option<&TArray>,
-        FConvert: Fn(ValueOrRef<'a>) -> Option<T>,
+        FConvert: Fn(&ValueOrRef<'a>) -> Option<T>,
         FBuild: Fn(indexmap::set::IntoIter<T>) -> TArray,
     {
         match self {
@@ -314,22 +293,24 @@ impl<'a> DictionaryValueArray<'a> {
                 if let Some(s) = as_array(&a) {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_set(convert, a);
+                    let (values, lookup) = transform_array_into_set(|v| convert(&v), a);
 
                     (build(values.into_iter()), lookup)
                 }
             }
-            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_array(v.len(), v.into_iter().map(convert), build),
-                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned().map(convert), build),
-            },
-            DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_array(v.len(), v.into_iter().map(convert), build),
-                Err(v) => transform_iter_into_array(v.len(), v.iter().cloned().map(convert), build),
-            },
+            DictionaryValueArray::Vec(a) => {
+                let null_value = convert(&ValueOrRef::Null);
+
+                iter_into_array(a.iter().map(convert), null_value, build)
+            }
+            DictionaryValueArray::Set(a) => {
+                let null_value = convert(&ValueOrRef::Null);
+
+                iter_into_array(a.iter().map(convert), null_value, build)
+            }
             DictionaryValueArray::Boolean => {
                 let values = [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)];
-                transform_iter_into_array(2, values.into_iter().map(convert), build)
+                iter_into_array(values.iter().map(convert), None, build)
             }
         }
     }
@@ -377,6 +358,19 @@ impl<'a> From<Vec<ValueOrRef<'a>>> for DictionaryValueArray<'a> {
     }
 }
 
+fn transform_iter_into_set<'a, T: Hash + Eq, FTransform, I>(
+    mut transform: FTransform,
+    values: I,
+) -> SetWithLookup<T>
+where
+    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
+    I: Iterator<Item = ValueOrRef<'a>> + ExactSizeIterator,
+{
+    let null_value = transform(ValueOrRef::Null);
+
+    iter_into_set(values.map(transform), null_value)
+}
+
 fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(
     transform: FTransform,
     value: Arc<dyn Array>,
@@ -390,9 +384,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
         DataType::Int16 => {
@@ -400,9 +392,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
         DataType::Int32 => {
@@ -410,9 +400,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
         DataType::Int64 => {
@@ -420,9 +408,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer)),
             )
         }
 
@@ -431,9 +417,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
         DataType::UInt16 => {
@@ -441,9 +425,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
         DataType::UInt32 => {
@@ -451,9 +433,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
         DataType::UInt64 => {
@@ -461,9 +441,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Integer(v as i64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
             )
         }
 
@@ -472,9 +450,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Double(f64::from(v))))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))),
             )
         }
         DataType::Float32 => {
@@ -482,9 +458,7 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Double(v as f64)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))),
             )
         }
         DataType::Float64 => {
@@ -492,22 +466,16 @@ where
 
             transform_iter_into_set(
                 transform,
-                a.len(),
-                a.enumerate()
-                    .filter_map(|(i, v)| v.map(|v| (i, ValueOrRef::Double(v)))),
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double)),
             )
         }
 
-        DataType::Utf8 => transform_iter_into_set(
-            transform,
-            value.len(),
-            StringArrayIter::new(value.as_string::<i32>()).enumerate(),
-        ),
-        DataType::LargeUtf8 => transform_iter_into_set(
-            transform,
-            value.len(),
-            StringArrayIter::new(value.as_string::<i64>()).enumerate(),
-        ),
+        DataType::Utf8 => {
+            transform_iter_into_set(transform, StringArrayIter::new(value.as_string::<i32>()))
+        }
+        DataType::LargeUtf8 => {
+            transform_iter_into_set(transform, StringArrayIter::new(value.as_string::<i64>()))
+        }
 
         DataType::Timestamp(time_unit, _) => match time_unit {
             TimeUnit::Second => {
@@ -515,13 +483,9 @@ where
 
                 transform_iter_into_set(
                     transform,
-                    a.len(),
-                    a.enumerate().filter_map(|(i, v)| {
-                        v.map(|secs| {
-                            (
-                                i,
-                                ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into()),
-                            )
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |secs| {
+                            ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
                         })
                     }),
                 )
@@ -531,15 +495,9 @@ where
 
                 transform_iter_into_set(
                     transform,
-                    a.len(),
-                    a.enumerate().filter_map(|(i, v)| {
-                        v.map(|millis| {
-                            (
-                                i,
-                                ValueOrRef::DateTime(
-                                    Utc.timestamp_millis_opt(millis).unwrap().into(),
-                                ),
-                            )
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |millis| {
+                            ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
                         })
                     }),
                 )
@@ -549,13 +507,9 @@ where
 
                 transform_iter_into_set(
                     transform,
-                    a.len(),
-                    a.enumerate().filter_map(|(i, v)| {
-                        v.map(|micros| {
-                            (
-                                i,
-                                ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into()),
-                            )
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |micros| {
+                            ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
                         })
                     }),
                 )
@@ -565,9 +519,10 @@ where
 
                 transform_iter_into_set(
                     transform,
-                    a.len(),
-                    a.enumerate().filter_map(|(i, v)| {
-                        v.map(|nanos| (i, ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())))
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |nanos| {
+                            ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
+                        })
                     }),
                 )
             }
@@ -575,8 +530,7 @@ where
 
         DataType::FixedSizeBinary(_) => transform_iter_into_set(
             transform,
-            value.len(),
-            FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()).enumerate(),
+            FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()),
         ),
 
         d => todo!("{d} is not implemented"),
@@ -591,50 +545,50 @@ where
     FTransform: FnMut(&ValueOrRef<'a>) -> Option<bool>,
 {
     match value.data_type() {
-        DataType::Int8 => transform_iter_into_boolean_array(
+        DataType::Int8 => iter_into_boolean_array(
             value
                 .as_primitive::<Int8Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
         ),
-        DataType::Int16 => transform_iter_into_boolean_array(
+        DataType::Int16 => iter_into_boolean_array(
             value
                 .as_primitive::<Int16Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
         ),
-        DataType::Int32 => transform_iter_into_boolean_array(
+        DataType::Int32 => iter_into_boolean_array(
             value
                 .as_primitive::<Int32Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
         ),
-        DataType::Int64 => transform_iter_into_boolean_array(
+        DataType::Int64 => iter_into_boolean_array(
             value
                 .as_primitive::<Int64Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, ValueOrRef::Integer))),
         ),
 
-        DataType::UInt8 => transform_iter_into_boolean_array(
+        DataType::UInt8 => iter_into_boolean_array(
             value
                 .as_primitive::<UInt8Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
         ),
-        DataType::UInt16 => transform_iter_into_boolean_array(
+        DataType::UInt16 => iter_into_boolean_array(
             value
                 .as_primitive::<UInt16Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
         ),
-        DataType::UInt32 => transform_iter_into_boolean_array(
+        DataType::UInt32 => iter_into_boolean_array(
             value
                 .as_primitive::<UInt32Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))),
         ),
-        DataType::UInt64 => transform_iter_into_boolean_array(
+        DataType::UInt64 => iter_into_boolean_array(
             value
                 .as_primitive::<UInt64Type>()
                 .into_iter()
@@ -642,32 +596,32 @@ where
         ),
 
         DataType::Float16 => {
-            transform_iter_into_boolean_array(value.as_primitive::<Float16Type>().into_iter().map(
-                |v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))),
-            ))
+            iter_into_boolean_array(value.as_primitive::<Float16Type>().into_iter().map(|v| {
+                transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v))))
+            }))
         }
-        DataType::Float32 => transform_iter_into_boolean_array(
+        DataType::Float32 => iter_into_boolean_array(
             value
                 .as_primitive::<Float32Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64)))),
         ),
-        DataType::Float64 => transform_iter_into_boolean_array(
+        DataType::Float64 => iter_into_boolean_array(
             value
                 .as_primitive::<Float64Type>()
                 .into_iter()
                 .map(|v| transform(&v.map_or(ValueOrRef::Null, ValueOrRef::Double))),
         ),
 
-        DataType::Utf8 => transform_iter_into_boolean_array(
+        DataType::Utf8 => iter_into_boolean_array(
             StringArrayIter::new(value.as_string::<i32>()).map(|v| transform(&v)),
         ),
-        DataType::LargeUtf8 => transform_iter_into_boolean_array(
+        DataType::LargeUtf8 => iter_into_boolean_array(
             StringArrayIter::new(value.as_string::<i64>()).map(|v| transform(&v)),
         ),
 
         DataType::Timestamp(time_unit, _) => match time_unit {
-            TimeUnit::Second => transform_iter_into_boolean_array(
+            TimeUnit::Second => iter_into_boolean_array(
                 value
                     .as_primitive::<TimestampSecondType>()
                     .into_iter()
@@ -677,7 +631,7 @@ where
                         }))
                     }),
             ),
-            TimeUnit::Millisecond => transform_iter_into_boolean_array(
+            TimeUnit::Millisecond => iter_into_boolean_array(
                 value
                     .as_primitive::<TimestampMillisecondType>()
                     .into_iter()
@@ -687,7 +641,7 @@ where
                         }))
                     }),
             ),
-            TimeUnit::Microsecond => transform_iter_into_boolean_array(
+            TimeUnit::Microsecond => iter_into_boolean_array(
                 value
                     .as_primitive::<TimestampMicrosecondType>()
                     .into_iter()
@@ -697,7 +651,7 @@ where
                         }))
                     }),
             ),
-            TimeUnit::Nanosecond => transform_iter_into_boolean_array(
+            TimeUnit::Nanosecond => iter_into_boolean_array(
                 value
                     .as_primitive::<TimestampNanosecondType>()
                     .into_iter()
@@ -709,7 +663,7 @@ where
             ),
         },
 
-        DataType::FixedSizeBinary(_) => transform_iter_into_boolean_array(
+        DataType::FixedSizeBinary(_) => iter_into_boolean_array(
             FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()).map(|v| transform(&v)),
         ),
 
@@ -717,73 +671,92 @@ where
     }
 }
 
-fn transform_iter_into_set<T: Hash + Eq, FTransform, I, V>(
-    mut transform: FTransform,
-    max_length: usize,
-    iter: I,
-) -> SetWithLookup<T>
+fn init_lookup(capacity: usize, fill_count: usize) -> AHashMap<usize, Option<usize>> {
+    let mut lookup = AHashMap::with_capacity(capacity);
+    for value_index in 0..fill_count {
+        lookup.insert(value_index, Some(value_index));
+    }
+    lookup
+}
+
+fn iter_into_set<T: Hash + Eq, I>(values: I, mut null_value: Option<T>) -> SetWithLookup<T>
 where
-    FTransform: FnMut(V) -> Option<T>,
-    I: Iterator<Item = (usize, V)>,
+    I: Iterator<Item = Option<T>> + ExactSizeIterator,
 {
-    let mut value_index_lookup = AHashMap::with_capacity(max_length);
-    let mut transformed_values = IndexSet::with_capacity_and_hasher(max_length, RandomState::new());
+    let mut set = IndexSet::with_capacity_and_hasher(values.len(), RandomState::new());
+    let mut lookup = None;
+    let mut null_value_index = None;
 
-    let mut remapped = false;
+    for (value_index, value) in values.enumerate() {
+        if let Some(value) = value {
+            let (index, inserted) = set.insert_full(value);
 
-    for (index, value) in iter {
-        if let Some(transformed_value) = transform(value) {
-            let (transformed_index, added) = transformed_values.insert_full(transformed_value);
-            value_index_lookup.insert(index, Some(transformed_index));
-            if !added {
-                remapped = true;
+            if !inserted {
+                lookup
+                    .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
+                    .insert(value_index, Some(index));
+            } else if let Some(lookup) = lookup.as_mut() {
+                lookup.insert(value_index, Some(index));
             }
         } else {
-            value_index_lookup.insert(index, None);
-            remapped = true;
+            match null_value_index {
+                None => {
+                    if let Some(null_value) = null_value.take() {
+                        let (index, inserted) = set.insert_full(null_value);
+
+                        if !inserted {
+                            lookup
+                                .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
+                                .insert(value_index, Some(index));
+                        } else if let Some(lookup) = lookup.as_mut() {
+                            lookup.insert(value_index, Some(index));
+                        }
+
+                        null_value_index = Some(Some(index));
+                    } else {
+                        lookup
+                            .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
+                            .insert(value_index, None);
+
+                        null_value_index = Some(None)
+                    }
+                }
+                Some(Some(null_value_index)) => {
+                    lookup
+                        .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
+                        .insert(value_index, Some(null_value_index));
+                }
+                Some(None) => {
+                    lookup
+                        .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
+                        .insert(value_index, None);
+                }
+            }
         }
     }
 
-    (
-        transformed_values,
-        if remapped {
-            Some(value_index_lookup)
-        } else {
-            None
-        },
-    )
+    (set, lookup)
 }
 
-fn transform_iter_into_array<
-    TItems: Iterator<Item = Option<TInput>>,
+fn iter_into_array<
+    TItems: Iterator<Item = Option<TInput>> + ExactSizeIterator,
     TInput: Hash + PartialEq + Eq,
     TOutput: Array,
     FBuild,
 >(
-    length: usize,
     values: TItems,
+    null_value: Option<TInput>,
     build: FBuild,
 ) -> (TOutput, IndexLookup)
 where
     FBuild: Fn(indexmap::set::IntoIter<TInput>) -> TOutput,
 {
-    let mut lookup = AHashMap::with_capacity(length);
-    let mut set = IndexSet::with_capacity_and_hasher(length, RandomState::new());
+    let (set, lookup) = iter_into_set(values, null_value);
 
-    for (value_index, value) in values.enumerate() {
-        if let Some(v) = value {
-            let (index, _) = set.insert_full(v);
-
-            lookup.insert(value_index, Some(index));
-        } else {
-            lookup.insert(value_index, None);
-        }
-    }
-
-    (build(set.into_iter()), Some(lookup))
+    (build(set.into_iter()), lookup)
 }
 
-fn transform_iter_into_boolean_array<TIterator>(values: TIterator) -> BooleanArray
+fn iter_into_boolean_array<TIterator>(values: TIterator) -> BooleanArray
 where
     TIterator: Iterator<Item = Option<bool>> + ExactSizeIterator,
 {
@@ -1067,12 +1040,13 @@ pub trait ArrowArraySetTransformer {
 }
 
 impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
-    fn to_set<V: Hash + Eq, FTransform>(&self, transform: FTransform) -> SetWithLookup<V>
+    fn to_set<V: Hash + Eq, FTransform>(&self, mut transform: FTransform) -> SetWithLookup<V>
     where
         FTransform: FnMut(Option<Buffer>) -> Option<V>,
     {
         let offsets = self.value_offsets();
         let values = self.values();
+        let null_value = transform(None);
 
         if let Some(nulls) = self.nulls() {
             let mut previous_offset = 0;
@@ -1082,21 +1056,21 @@ impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
                     None
                 } else {
                     let buffer = values.slice_with_length(previous_offset, end);
-                    Some(buffer)
+                    transform(Some(buffer))
                 };
                 previous_offset = end;
                 r
             });
-            transform_iter_into_set(transform, self.len(), i.enumerate())
+            iter_into_set(i, null_value)
         } else {
             let mut previous_offset = 0;
             let i = offsets.iter().map(|end| {
                 let end = T::as_usize(*end);
                 let buffer = values.slice_with_length(previous_offset, end);
                 previous_offset = end;
-                Some(buffer)
+                transform(Some(buffer))
             });
-            transform_iter_into_set(transform, self.len(), i.enumerate())
+            iter_into_set(i, null_value)
         }
     }
 }
