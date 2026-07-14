@@ -65,20 +65,16 @@ impl<'a> Dictionary<'a> {
                 length,
                 value_index,
             } => {
-                let (key_buffer, null_buffer) = match value_index {
+                let (key_buffer, null_buffer) = match value_index
+                    .and_then(|value_index| transform(&values.get_value_at(value_index)))
+                {
                     None => (
                         BooleanBuffer::new_unset(length),
                         Some(NullBuffer::new_null(length)),
                     ),
-                    Some(value_index) => match transform(&values.get_value_at(value_index)) {
-                        None => (
-                            BooleanBuffer::new_unset(length),
-                            Some(NullBuffer::new_null(length)),
-                        ),
-                        Some(v) => {
-                            return BooleanArrayOrValue::Value(v);
-                        }
-                    },
+                    Some(v) => {
+                        return BooleanArrayOrValue::Value(v);
+                    }
                 };
 
                 BooleanArrayOrValue::Array(BooleanArray::new(key_buffer, null_buffer))
