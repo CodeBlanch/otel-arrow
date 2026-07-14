@@ -1415,7 +1415,7 @@ impl OtapLogRecordField {
                 primitive_array_writer(
                     keys,
                     values,
-                    DictionaryValueArray::transform_into_timestamp_nanoseconds_array,
+                    DictionaryValueArray::into_timestamp_nanoseconds_array,
                 )
             }),
             OtapLogRecordField::ObservedTimeUnixNano => {
@@ -1423,7 +1423,7 @@ impl OtapLogRecordField {
                     primitive_array_writer(
                         keys,
                         values,
-                        DictionaryValueArray::transform_into_timestamp_nanoseconds_array,
+                        DictionaryValueArray::into_timestamp_nanoseconds_array,
                     )
                 })
             }
@@ -1431,43 +1431,35 @@ impl OtapLogRecordField {
                 adaptive_dictionary_writer(
                     keys,
                     values,
-                    DictionaryValueArray::transform_into_int_array::<Int32Type>,
+                    DictionaryValueArray::into_int_array::<Int32Type>,
                 )
             }),
             OtapLogRecordField::SeverityText => (consts::SEVERITY_TEXT, |keys, values| {
-                adaptive_dictionary_writer(
-                    keys,
-                    values,
-                    DictionaryValueArray::transform_into_string_array,
-                )
+                adaptive_dictionary_writer(keys, values, DictionaryValueArray::into_string_array)
             }),
             OtapLogRecordField::TraceId => (consts::TRACE_ID, |keys, values| {
                 adaptive_dictionary_writer(
                     keys,
                     values,
-                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<16>,
+                    DictionaryValueArray::into_fixed_sized_binary_array::<16>,
                 )
             }),
             OtapLogRecordField::SpanId => (consts::SPAN_ID, |keys, values| {
                 adaptive_dictionary_writer(
                     keys,
                     values,
-                    DictionaryValueArray::transform_into_fixed_sized_binary_array::<8>,
+                    DictionaryValueArray::into_fixed_sized_binary_array::<8>,
                 )
             }),
             OtapLogRecordField::Flags => (consts::FLAGS, |keys, values| {
                 primitive_array_writer(
                     keys,
                     values,
-                    DictionaryValueArray::transform_into_int_array::<UInt32Type>,
+                    DictionaryValueArray::into_int_array::<UInt32Type>,
                 )
             }),
             OtapLogRecordField::EventName => (consts::EVENT_NAME, |keys, values| {
-                adaptive_dictionary_writer(
-                    keys,
-                    values,
-                    DictionaryValueArray::transform_into_string_array,
-                )
+                adaptive_dictionary_writer(keys, values, DictionaryValueArray::into_string_array)
             }),
             OtapLogRecordField::Body => (consts::BODY, body_writer),
         }

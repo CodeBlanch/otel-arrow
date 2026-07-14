@@ -109,7 +109,7 @@ impl DictionaryValueArray<'_> {
         }
     }
 
-    pub fn transform_into_string_array(self) -> (StringArray, IndexLookup) {
+    pub fn into_string_array(self) -> (StringArray, IndexLookup) {
         self.transform_into_array(
             ArrayRef::as_string_opt,
             |v| Some(v.to_string()),
@@ -117,7 +117,7 @@ impl DictionaryValueArray<'_> {
         )
     }
 
-    pub fn transform_into_int_array<T: ArrowPrimitiveType>(self) -> (PrimitiveArray<T>, IndexLookup)
+    pub fn into_int_array<T: ArrowPrimitiveType>(self) -> (PrimitiveArray<T>, IndexLookup)
     where
         T::Native: Hash + Eq + TryFrom<i64>,
     {
@@ -128,7 +128,7 @@ impl DictionaryValueArray<'_> {
         )
     }
 
-    pub fn transform_into_timestamp_nanoseconds_array(
+    pub fn into_timestamp_nanoseconds_array(
         self,
     ) -> (PrimitiveArray<TimestampNanosecondType>, IndexLookup) {
         self.transform_into_array(
@@ -142,7 +142,7 @@ impl DictionaryValueArray<'_> {
         )
     }
 
-    pub fn transform_into_fixed_sized_binary_array<const SIZE: usize>(
+    pub fn into_fixed_sized_binary_array<const SIZE: usize>(
         self,
     ) -> (FixedSizeBinaryArray, IndexLookup) {
         self.transform_into_array(
@@ -277,15 +277,15 @@ impl<'a> DictionaryValueArray<'a> {
         }
     }
 
-    pub fn transform_into_array<TArray: Array + Clone, T: Hash + Eq, FAsArray, FConvert, FBuild>(
+    pub fn transform_into_array<TArray: Array + Clone, T: Hash + Eq, FAsArray, FTransform, FBuild>(
         self,
         as_array: FAsArray,
-        convert: FConvert,
+        transform: FTransform,
         build: FBuild,
     ) -> (TArray, IndexLookup)
     where
         FAsArray: Fn(&Arc<dyn Array>) -> Option<&TArray>,
-        FConvert: Fn(&ValueOrRef<'a>) -> Option<T>,
+        FTransform: Fn(&ValueOrRef<'a>) -> Option<T>,
         FBuild: Fn(indexmap::set::IntoIter<T>) -> TArray,
     {
         match self {
@@ -293,24 +293,24 @@ impl<'a> DictionaryValueArray<'a> {
                 if let Some(s) = as_array(&a) {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_set(|v| convert(&v), a);
+                    let (values, lookup) = transform_array_into_set(|v| transform(&v), a);
 
                     (build(values.into_iter()), lookup)
                 }
             }
             DictionaryValueArray::Vec(a) => {
-                let null_value = convert(&ValueOrRef::Null);
+                let null_value = transform(&ValueOrRef::Null);
 
-                iter_into_array(a.iter().map(convert), null_value, build)
+                iter_into_array(a.iter().map(transform), null_value, build)
             }
             DictionaryValueArray::Set(a) => {
-                let null_value = convert(&ValueOrRef::Null);
+                let null_value = transform(&ValueOrRef::Null);
 
-                iter_into_array(a.iter().map(convert), null_value, build)
+                iter_into_array(a.iter().map(transform), null_value, build)
             }
             DictionaryValueArray::Boolean => {
                 let values = [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)];
-                iter_into_array(values.iter().map(convert), None, build)
+                iter_into_array(values.iter().map(transform), None, build)
             }
         }
     }

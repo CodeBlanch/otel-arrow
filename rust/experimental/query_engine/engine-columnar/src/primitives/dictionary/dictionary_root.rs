@@ -278,7 +278,7 @@ fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
 
     let (mut source_values, lookup) = source_values.into_set();
 
-    let mut source_key_builder = source_keys.transform_into_key_builder::<K>(lookup);
+    let mut source_key_builder = source_keys.into_key_builder::<K>(lookup);
 
     let key_length = source_key_builder.get_key_length();
     let mut source_key_writer = source_key_builder.get_writer();

@@ -162,49 +162,48 @@ impl DictionaryKeyArray {
         }
     }
 
-    pub fn transform_into_key_array<KOutput: ArrowDictionaryKeyType>(
+    pub fn into_key_array<KOutput: ArrowDictionaryKeyType>(
         self,
         value_index_lookup: IndexLookup,
     ) -> PrimitiveArray<KOutput> {
-        self.transform_into_key_builder(value_index_lookup).finish()
+        self.into_key_builder(value_index_lookup).finish()
     }
 
-    pub(crate) fn transform_into_key_builder<KOutput: ArrowDictionaryKeyType>(
+    pub(crate) fn into_key_builder<KOutput: ArrowDictionaryKeyType>(
         self,
         value_index_lookup: IndexLookup,
     ) -> DictionaryKeyArrayBuilder<KOutput> {
         match self {
             DictionaryKeyArray::KeyArray(array) => match array.data_type() {
-                DataType::UInt8 => transform_key_array_into_key_builder(
+                DataType::UInt8 => key_array_into_key_builder(
                     array.as_primitive::<UInt8Type>(),
                     value_index_lookup,
                 ),
-                DataType::UInt16 => transform_key_array_into_key_builder(
+                DataType::UInt16 => key_array_into_key_builder(
                     array.as_primitive::<UInt16Type>(),
                     value_index_lookup,
                 ),
-                DataType::UInt32 => transform_key_array_into_key_builder(
+                DataType::UInt32 => key_array_into_key_builder(
                     array.as_primitive::<UInt32Type>(),
                     value_index_lookup,
                 ),
-                DataType::UInt64 => transform_key_array_into_key_builder(
+                DataType::UInt64 => key_array_into_key_builder(
                     array.as_primitive::<UInt64Type>(),
                     value_index_lookup,
                 ),
 
-                DataType::Int8 => transform_key_array_into_key_builder(
-                    array.as_primitive::<Int8Type>(),
-                    value_index_lookup,
-                ),
-                DataType::Int16 => transform_key_array_into_key_builder(
+                DataType::Int8 => {
+                    key_array_into_key_builder(array.as_primitive::<Int8Type>(), value_index_lookup)
+                }
+                DataType::Int16 => key_array_into_key_builder(
                     array.as_primitive::<Int16Type>(),
                     value_index_lookup,
                 ),
-                DataType::Int32 => transform_key_array_into_key_builder(
+                DataType::Int32 => key_array_into_key_builder(
                     array.as_primitive::<Int32Type>(),
                     value_index_lookup,
                 ),
-                DataType::Int64 => transform_key_array_into_key_builder(
+                DataType::Int64 => key_array_into_key_builder(
                     array.as_primitive::<Int64Type>(),
                     value_index_lookup,
                 ),
@@ -330,10 +329,7 @@ impl DictionaryKeyArray {
     }
 }
 
-fn transform_key_array_into_key_builder<
-    KInput: ArrowDictionaryKeyType,
-    KOutput: ArrowDictionaryKeyType,
->(
+fn key_array_into_key_builder<KInput: ArrowDictionaryKeyType, KOutput: ArrowDictionaryKeyType>(
     keys: &PrimitiveArray<KInput>,
     value_index_lookup: IndexLookup,
 ) -> DictionaryKeyArrayBuilder<KOutput> {

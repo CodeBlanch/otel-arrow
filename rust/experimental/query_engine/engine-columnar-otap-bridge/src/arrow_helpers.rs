@@ -152,11 +152,11 @@ where
 
     Some(match transformed_values.len() {
         v if v < u8::MAX as usize => Arc::new(DictionaryArray::<UInt8Type>::new(
-            keys.transform_into_key_array(lookup),
+            keys.into_key_array(lookup),
             Arc::new(transformed_values),
         )),
         _ => Arc::new(DictionaryArray::<UInt16Type>::new(
-            keys.transform_into_key_array(lookup),
+            keys.into_key_array(lookup),
             Arc::new(transformed_values),
         )),
     })
