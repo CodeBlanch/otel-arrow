@@ -84,7 +84,7 @@ impl<'a> Dictionary<'a> {
 
     pub(crate) fn transform_into_any<FTransform>(self, mut transform: FTransform) -> Dictionary<'a>
     where
-        FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
+        FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
     {
         let (keys, values) = self.into_parts();
 
@@ -131,7 +131,7 @@ impl<'a> Dictionary<'a> {
                 value_index,
             } => match value_index {
                 None => Dictionary::new(keys, values),
-                Some(value_index) => match transform(values.get_value_at(value_index)) {
+                Some(value_index) => match transform(&values.get_value_at(value_index)) {
                     ValueOrRef::Null => {
                         Dictionary::new_null_with_data_type(length, data_type.clone())
                     }
@@ -334,7 +334,7 @@ fn transform_array_into_any<'a, FTransform>(
     transform: FTransform,
 ) -> Dictionary<'a>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
+    FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     match key_data_type {
         DataType::Int8 => {
@@ -379,7 +379,7 @@ fn transform_array_into_any_typed<'a, K: ArrowDictionaryKeyType, FTransform>(
     mut transform: FTransform,
 ) -> Dictionary<'a>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
+    FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     let key_length = keys.len();
 
@@ -387,10 +387,7 @@ where
     let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(|v| match transform(v) {
-            ValueOrRef::Null => None,
-            v => Some(v),
-        });
+        values.transform_into_set(&mut transform);
 
     let mut null_index = None;
 
@@ -412,7 +409,7 @@ where
         let (has_value_index, value_index) = match null_index {
             Some(v) => v,
             None => {
-                let v = match transform(ValueOrRef::Null) {
+                let v = match transform(&ValueOrRef::Null) {
                     ValueOrRef::Null => (
                         false,
                         <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),
@@ -447,16 +444,13 @@ fn transform_any_typed_keyless<'a, K: ArrowDictionaryKeyType, FTransform>(
     mut transform: FTransform,
 ) -> Dictionary<'a>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> ValueOrRef<'a>,
+    FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
     let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(|v| match transform(v) {
-            ValueOrRef::Null => None,
-            v => Some(v),
-        });
+        values.transform_into_set(&mut transform);
 
     let mut null_index = None;
 
@@ -476,7 +470,7 @@ where
         let (has_value_index, value_index) = match null_index {
             Some(v) => v,
             None => {
-                let v = match transform(ValueOrRef::Null) {
+                let v = match transform(&ValueOrRef::Null) {
                     ValueOrRef::Null => (
                         false,
                         <K as ArrowPrimitiveType>::Native::from_usize(0).unwrap(),

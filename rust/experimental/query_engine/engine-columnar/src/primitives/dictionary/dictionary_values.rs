@@ -211,20 +211,12 @@ impl<'a> DictionaryValueArray<'a> {
     }
 
     pub fn into_set(self) -> SetWithLookup<ValueOrRef<'a>> {
-        let transform = |v| {
-            if matches!(v, ValueOrRef::Null) {
-                None
-            } else {
-                Some(v)
-            }
-        };
-
         let (set, lookup) = match self {
-            DictionaryValueArray::Array(a) => transform_array_into_set(transform, a),
+            DictionaryValueArray::Array(a) => transform_array_into_set(|v| v.clone(), a),
             DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_set(transform, v.into_iter()),
-                Err(v) => transform_iter_into_set(transform, v.iter().cloned()),
-            },
+                Ok(a) => iter_into_set(a.into_iter()),
+                Err(a) => iter_into_set(a.iter().cloned()),
+            }
             DictionaryValueArray::Set(a) => (Rc::unwrap_or_clone(a), None),
             DictionaryValueArray::Boolean => {
                 let mut set = ValueOrRefSet::with_capacity_and_hasher(2, RandomState::new());
@@ -237,26 +229,38 @@ impl<'a> DictionaryValueArray<'a> {
         (set, lookup)
     }
 
-    pub fn transform_into_set<T: Hash + Eq, FTransform>(
+    pub fn transform_into_set<FTransform>(
+        self,
+        transform: FTransform,
+    ) -> (ValueOrRefSet<'a>, IndexLookup)
+    where
+        FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
+    {
+        match self {
+            DictionaryValueArray::Array(a) => transform_array_into_set(transform, a),
+            DictionaryValueArray::Vec(a) => iter_into_set(a.iter().map(transform)),
+            DictionaryValueArray::Set(a) => iter_into_set(a.iter().map(transform)),
+            DictionaryValueArray::Boolean => iter_into_set(
+                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)]
+                    .iter()
+                    .map(transform),
+            ),
+        }
+    }
+
+    pub fn transform_into_generic_set<T: Hash + Eq, FTransform>(
         self,
         transform: FTransform,
     ) -> SetWithLookup<T>
     where
-        FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
+        FTransform: FnMut(&ValueOrRef<'a>) -> Option<T>,
     {
         match self {
-            DictionaryValueArray::Array(a) => transform_array_into_set(transform, a),
-            DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_set(transform, v.into_iter()),
-                Err(v) => transform_iter_into_set(transform, v.iter().cloned()),
-            },
-            DictionaryValueArray::Set(a) => match Rc::try_unwrap(a) {
-                Ok(v) => transform_iter_into_set(transform, v.into_iter()),
-                Err(v) => transform_iter_into_set(transform, v.iter().cloned()),
-            },
-            DictionaryValueArray::Boolean => transform_iter_into_set(
-                transform,
-                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)].into_iter(),
+            DictionaryValueArray::Array(a) => transform_array_into_generic_set(transform, a),
+            DictionaryValueArray::Vec(a) => iter_into_generic_set(a.iter().map(transform)),
+            DictionaryValueArray::Set(a) => iter_into_generic_set(a.iter().map(transform)),
+            DictionaryValueArray::Boolean => iter_into_generic_set(
+                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)].iter().map(transform),
             ),
         }
     }
@@ -293,24 +297,27 @@ impl<'a> DictionaryValueArray<'a> {
                 if let Some(s) = as_array(&a) {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_set(|v| transform(&v), a);
+                    let (values, lookup) = transform_array_into_generic_set(|v| transform(&v), a);
 
                     (build(values.into_iter()), lookup)
                 }
             }
             DictionaryValueArray::Vec(a) => {
-                let null_value = transform(&ValueOrRef::Null);
+                let (set, lookup) = iter_into_generic_set(a.iter().map(transform));
 
-                iter_into_array(a.iter().map(transform), null_value, build)
+                (build(set.into_iter()), lookup)
             }
             DictionaryValueArray::Set(a) => {
-                let null_value = transform(&ValueOrRef::Null);
+                let (set, lookup) = iter_into_generic_set(a.iter().map(transform));
 
-                iter_into_array(a.iter().map(transform), null_value, build)
+                (build(set.into_iter()), lookup)
             }
             DictionaryValueArray::Boolean => {
                 let values = [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)];
-                iter_into_array(values.iter().map(transform), None, build)
+
+                let (set, lookup) = iter_into_generic_set(values.iter().map(transform));
+
+                (build(set.into_iter()), lookup)
             }
         }
     }
@@ -358,179 +365,300 @@ impl<'a> From<Vec<ValueOrRef<'a>>> for DictionaryValueArray<'a> {
     }
 }
 
-fn transform_iter_into_set<'a, T: Hash + Eq, FTransform, I>(
+fn transform_array_into_set<'a, FTransform>(
     mut transform: FTransform,
-    values: I,
-) -> SetWithLookup<T>
-where
-    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
-    I: Iterator<Item = ValueOrRef<'a>> + ExactSizeIterator,
-{
-    let null_value = transform(ValueOrRef::Null);
-
-    iter_into_set(values.map(transform), null_value)
-}
-
-fn transform_array_into_set<'a, T: Hash + Eq, FTransform>(
-    transform: FTransform,
     value: Arc<dyn Array>,
-) -> SetWithLookup<T>
+) -> SetWithLookup<ValueOrRef<'a>>
 where
-    FTransform: FnMut(ValueOrRef<'a>) -> Option<T>,
+    FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
 {
     match value.data_type() {
         DataType::Int8 => {
             let a = value.as_primitive::<Int8Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
         DataType::Int16 => {
             let a = value.as_primitive::<Int16Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
         DataType::Int32 => {
             let a = value.as_primitive::<Int32Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
         DataType::Int64 => {
             let a = value.as_primitive::<Int64Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer)),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer)).map(|v| transform(&v)),
             )
         }
 
         DataType::UInt8 => {
             let a = value.as_primitive::<UInt8Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
         DataType::UInt16 => {
             let a = value.as_primitive::<UInt16Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
         DataType::UInt32 => {
             let a = value.as_primitive::<UInt32Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
         DataType::UInt64 => {
             let a = value.as_primitive::<UInt64Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
             )
         }
 
         DataType::Float16 => {
             let a = value.as_primitive::<Float16Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))).map(|v| transform(&v)),
             )
         }
         DataType::Float32 => {
             let a = value.as_primitive::<Float32Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))).map(|v| transform(&v)),
             )
         }
         DataType::Float64 => {
             let a = value.as_primitive::<Float64Type>().into_iter();
 
-            transform_iter_into_set(
-                transform,
-                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double)),
+            iter_into_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double)).map(|v| transform(&v)),
             )
         }
 
         DataType::Utf8 => {
-            transform_iter_into_set(transform, StringArrayIter::new(value.as_string::<i32>()))
+            iter_into_set(StringArrayIter::new(value.as_string::<i32>()).map(|v| transform(&v)))
         }
         DataType::LargeUtf8 => {
-            transform_iter_into_set(transform, StringArrayIter::new(value.as_string::<i64>()))
+            iter_into_set(StringArrayIter::new(value.as_string::<i64>()).map(|v| transform(&v)))
         }
 
         DataType::Timestamp(time_unit, _) => match time_unit {
             TimeUnit::Second => {
                 let a = value.as_primitive::<TimestampSecondType>().into_iter();
 
-                transform_iter_into_set(
-                    transform,
+                iter_into_set(
                     a.map(|v| {
                         v.map_or(ValueOrRef::Null, |secs| {
                             ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
                         })
-                    }),
+                    }).map(|v| transform(&v)),
                 )
             }
             TimeUnit::Millisecond => {
                 let a = value.as_primitive::<TimestampMillisecondType>().into_iter();
 
-                transform_iter_into_set(
-                    transform,
+                iter_into_set(
                     a.map(|v| {
                         v.map_or(ValueOrRef::Null, |millis| {
                             ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
                         })
-                    }),
+                    }).map(|v| transform(&v)),
                 )
             }
             TimeUnit::Microsecond => {
                 let a = value.as_primitive::<TimestampMicrosecondType>().into_iter();
 
-                transform_iter_into_set(
-                    transform,
+                iter_into_set(
                     a.map(|v| {
                         v.map_or(ValueOrRef::Null, |micros| {
                             ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
                         })
-                    }),
+                    }).map(|v| transform(&v)),
                 )
             }
             TimeUnit::Nanosecond => {
                 let a = value.as_primitive::<TimestampNanosecondType>().into_iter();
 
-                transform_iter_into_set(
-                    transform,
+                iter_into_set(
                     a.map(|v| {
                         v.map_or(ValueOrRef::Null, |nanos| {
                             ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
                         })
-                    }),
+                    }).map(|v| transform(&v)),
                 )
             }
         },
 
-        DataType::FixedSizeBinary(_) => transform_iter_into_set(
-            transform,
-            FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()),
+        DataType::FixedSizeBinary(_) => iter_into_set(
+            FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()).map(|v| transform(&v)),
+        ),
+
+        d => todo!("{d} is not implemented"),
+    }
+}
+
+fn transform_array_into_generic_set<'a, T: Hash + Eq, FTransform>(
+    mut transform: FTransform,
+    value: Arc<dyn Array>,
+) -> SetWithLookup<T>
+where
+    FTransform: FnMut(&ValueOrRef<'a>) -> Option<T>,
+{
+    match value.data_type() {
+        DataType::Int8 => {
+            let a = value.as_primitive::<Int8Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::Int16 => {
+            let a = value.as_primitive::<Int16Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::Int32 => {
+            let a = value.as_primitive::<Int32Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::Int64 => {
+            let a = value.as_primitive::<Int64Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer)).map(|v| transform(&v)),
+            )
+        }
+
+        DataType::UInt8 => {
+            let a = value.as_primitive::<UInt8Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::UInt16 => {
+            let a = value.as_primitive::<UInt16Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::UInt32 => {
+            let a = value.as_primitive::<UInt32Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::UInt64 => {
+            let a = value.as_primitive::<UInt64Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+            )
+        }
+
+        DataType::Float16 => {
+            let a = value.as_primitive::<Float16Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))).map(|v| transform(&v)),
+            )
+        }
+        DataType::Float32 => {
+            let a = value.as_primitive::<Float32Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))).map(|v| transform(&v)),
+            )
+        }
+        DataType::Float64 => {
+            let a = value.as_primitive::<Float64Type>().into_iter();
+
+            iter_into_generic_set(
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double)).map(|v| transform(&v)),
+            )
+        }
+
+        DataType::Utf8 => {
+            iter_into_generic_set(StringArrayIter::new(value.as_string::<i32>()).map(|v| transform(&v)))
+        }
+        DataType::LargeUtf8 => {
+            iter_into_generic_set(StringArrayIter::new(value.as_string::<i64>()).map(|v| transform(&v)))
+        }
+
+        DataType::Timestamp(time_unit, _) => match time_unit {
+            TimeUnit::Second => {
+                let a = value.as_primitive::<TimestampSecondType>().into_iter();
+
+                iter_into_generic_set(
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |secs| {
+                            ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
+                        })
+                    }).map(|v| transform(&v)),
+                )
+            }
+            TimeUnit::Millisecond => {
+                let a = value.as_primitive::<TimestampMillisecondType>().into_iter();
+
+                iter_into_generic_set(
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |millis| {
+                            ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
+                        })
+                    }).map(|v| transform(&v)),
+                )
+            }
+            TimeUnit::Microsecond => {
+                let a = value.as_primitive::<TimestampMicrosecondType>().into_iter();
+
+                iter_into_generic_set(
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |micros| {
+                            ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
+                        })
+                    }).map(|v| transform(&v)),
+                )
+            }
+            TimeUnit::Nanosecond => {
+                let a = value.as_primitive::<TimestampNanosecondType>().into_iter();
+
+                iter_into_generic_set(
+                    a.map(|v| {
+                        v.map_or(ValueOrRef::Null, |nanos| {
+                            ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
+                        })
+                    }).map(|v| transform(&v)),
+                )
+            }
+        },
+
+        DataType::FixedSizeBinary(_) => iter_into_generic_set(
+            FixedSizeBinaryArrayIter::new(value.as_fixed_size_binary()).map(|v| transform(&v)),
         ),
 
         d => todo!("{d} is not implemented"),
@@ -679,13 +807,41 @@ fn init_lookup(capacity: usize, fill_count: usize) -> AHashMap<usize, Option<usi
     lookup
 }
 
-fn iter_into_set<T: Hash + Eq, I>(values: I, mut null_value: Option<T>) -> SetWithLookup<T>
+fn iter_into_set<'a, I>(values: I) -> SetWithLookup<ValueOrRef<'a>>
+where
+    I: Iterator<Item = ValueOrRef<'a>> + ExactSizeIterator,
+{
+    let capacity = values.len();
+    let mut set = IndexSet::with_capacity_and_hasher(capacity, RandomState::new());
+    let mut lookup = None;
+
+    for (value_index, value) in values.enumerate() {
+        if matches!(value, ValueOrRef::Null) {
+            lookup
+                .get_or_insert_with(|| init_lookup(capacity, value_index))
+                .insert(value_index, None);
+        } else {
+            let (index, inserted) = set.insert_full(value);
+
+            if !inserted {
+                lookup
+                    .get_or_insert_with(|| init_lookup(capacity, value_index))
+                    .insert(value_index, Some(index));
+            } else if let Some(lookup) = lookup.as_mut() {
+                lookup.insert(value_index, Some(index));
+            }
+        }
+    }
+
+    (set, lookup)
+}
+
+fn iter_into_generic_set<T: Hash + Eq, I>(values: I) -> SetWithLookup<T>
 where
     I: Iterator<Item = Option<T>> + ExactSizeIterator,
 {
     let mut set = IndexSet::with_capacity_and_hasher(values.len(), RandomState::new());
     let mut lookup = None;
-    let mut null_value_index = None;
 
     for (value_index, value) in values.enumerate() {
         if let Some(value) = value {
@@ -699,61 +855,13 @@ where
                 lookup.insert(value_index, Some(index));
             }
         } else {
-            match null_value_index {
-                None => {
-                    if let Some(null_value) = null_value.take() {
-                        let (index, inserted) = set.insert_full(null_value);
-
-                        if !inserted {
-                            lookup
-                                .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
-                                .insert(value_index, Some(index));
-                        } else if let Some(lookup) = lookup.as_mut() {
-                            lookup.insert(value_index, Some(index));
-                        }
-
-                        null_value_index = Some(Some(index));
-                    } else {
-                        lookup
-                            .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
-                            .insert(value_index, None);
-
-                        null_value_index = Some(None)
-                    }
-                }
-                Some(Some(null_value_index)) => {
-                    lookup
-                        .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
-                        .insert(value_index, Some(null_value_index));
-                }
-                Some(None) => {
-                    lookup
-                        .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
-                        .insert(value_index, None);
-                }
-            }
+            lookup
+                .get_or_insert_with(|| init_lookup(set.capacity(), value_index))
+                .insert(value_index, None);
         }
     }
 
     (set, lookup)
-}
-
-fn iter_into_array<
-    TItems: Iterator<Item = Option<TInput>> + ExactSizeIterator,
-    TInput: Hash + PartialEq + Eq,
-    TOutput: Array,
-    FBuild,
->(
-    values: TItems,
-    null_value: Option<TInput>,
-    build: FBuild,
-) -> (TOutput, IndexLookup)
-where
-    FBuild: Fn(indexmap::set::IntoIter<TInput>) -> TOutput,
-{
-    let (set, lookup) = iter_into_set(values, null_value);
-
-    (build(set.into_iter()), lookup)
 }
 
 fn iter_into_boolean_array<TIterator>(values: TIterator) -> BooleanArray
@@ -1046,7 +1154,6 @@ impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
     {
         let offsets = self.value_offsets();
         let values = self.values();
-        let null_value = transform(None);
 
         if let Some(nulls) = self.nulls() {
             let mut previous_offset = 0;
@@ -1061,7 +1168,7 @@ impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
                 previous_offset = end;
                 r
             });
-            iter_into_set(i, null_value)
+            iter_into_generic_set(i)
         } else {
             let mut previous_offset = 0;
             let i = offsets.iter().map(|end| {
@@ -1070,7 +1177,7 @@ impl<T: OffsetSizeTrait> ArrowArraySetTransformer for GenericBinaryArray<T> {
                 previous_offset = end;
                 transform(Some(buffer))
             });
-            iter_into_set(i, null_value)
+            iter_into_generic_set(i)
         }
     }
 }

@@ -558,9 +558,9 @@ impl<'a> AttributesBuilder<'a> {
             let (strings_values, strings_values_lookup) = DictionaryValueArray::Array(Arc::new(
                 strings.values().clone(),
             ))
-            .transform_into_set(|v| {
+            .transform_into_generic_set(|v| {
                 if let ValueOrRef::String(s) = v {
-                    Some(s)
+                    Some(s.clone())
                 } else {
                     None
                 }
@@ -618,9 +618,9 @@ impl<'a> AttributesBuilder<'a> {
             let (ints_values, ints_values_lookup) = DictionaryValueArray::Array(Arc::new(
                 ints.values().clone(),
             ))
-            .transform_into_set(|v| {
+            .transform_into_generic_set(|v| {
                 if let ValueOrRef::Integer(i) = v {
-                    Some(i)
+                    Some(*i)
                 } else {
                     None
                 }

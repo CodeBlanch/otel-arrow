@@ -147,7 +147,7 @@ pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<
                             ) {
                                 Ok(range_end_exclusive) => {
                                     ValueOrRef::String(StringValueOrRef::new_slice(
-                                        string_value,
+                                        string_value.clone(),
                                         range_start_inclusive,
                                         range_end_exclusive,
                                     ))
@@ -174,7 +174,7 @@ pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<
                             ) {
                                 Ok(range_end_exclusive) => ValueOrRef::Array(
                                     ArrayValueOrRef::Slice(ArrayValueOrRefSlice::new(
-                                        array_value,
+                                        array_value.clone(),
                                         range_start_inclusive,
                                         range_end_exclusive,
                                     )),
