@@ -493,6 +493,10 @@ impl<K: ArrowDictionaryKeyType> DictionaryKeyArrayBuilder<K> {
         }
     }
 
+    pub fn has_nulls(&self) -> bool {
+        self.null_buffer.is_some()
+    }
+
     pub fn finish(self) -> PrimitiveArray<K> {
         PrimitiveArray::<K>::new(
             self.key_buffer.into(),

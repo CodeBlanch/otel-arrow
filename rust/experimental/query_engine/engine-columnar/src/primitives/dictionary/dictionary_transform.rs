@@ -386,8 +386,7 @@ where
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(&mut transform);
+    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut transform);
 
     let mut null_index = None;
 
@@ -435,6 +434,15 @@ where
         unsafe { key_writer.set_null_unchecked(key_index) };
     }
 
+    if transformed_values.is_empty() {
+        return Dictionary::new_null::<K>(key_length);
+    } else if transformed_values.len() == 1 && !key_builder.has_nulls() {
+        return Dictionary::new_scalar::<K>(
+            key_length,
+            transformed_values.into_iter().next().expect("has value"),
+        );
+    }
+
     Dictionary::new(key_builder.finish().into(), transformed_values.into())
 }
 
@@ -449,8 +457,7 @@ where
     let mut key_builder = DictionaryKeyArrayBuilder::<K>::new(key_length);
     let mut key_writer = key_builder.get_writer();
 
-    let (mut transformed_values, value_index_lookup) =
-        values.transform_into_set(&mut transform);
+    let (mut transformed_values, value_index_lookup) = values.transform_into_set(&mut transform);
 
     let mut null_index = None;
 
@@ -494,6 +501,15 @@ where
         }
 
         unsafe { key_writer.set_null_unchecked(key_index) };
+    }
+
+    if transformed_values.is_empty() {
+        return Dictionary::new_null::<K>(key_length);
+    } else if transformed_values.len() == 1 && !key_builder.has_nulls() {
+        return Dictionary::new_scalar::<K>(
+            key_length,
+            transformed_values.into_iter().next().expect("has value"),
+        );
     }
 
     Dictionary::new(key_builder.finish().into(), transformed_values.into())

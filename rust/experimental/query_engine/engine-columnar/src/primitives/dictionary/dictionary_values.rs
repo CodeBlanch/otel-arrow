@@ -147,13 +147,8 @@ impl DictionaryValueArray<'_> {
     ) -> (FixedSizeBinaryArray, IndexLookup) {
         self.transform_into_array(
             |v| {
-                v.as_fixed_size_binary_opt().and_then(|v| {
-                    if v.value_length() as usize == SIZE {
-                        Some(v)
-                    } else {
-                        None
-                    }
-                })
+                v.as_fixed_size_binary_opt()
+                    .filter(|&v| v.value_length() as usize == SIZE)
             },
             |v| match v {
                 ValueOrRef::Array(ArrayValueOrRef::Buffer(BufferArray::U8(values))) => {
@@ -216,7 +211,7 @@ impl<'a> DictionaryValueArray<'a> {
             DictionaryValueArray::Vec(a) => match Rc::try_unwrap(a) {
                 Ok(a) => iter_into_set(a.into_iter()),
                 Err(a) => iter_into_set(a.iter().cloned()),
-            }
+            },
             DictionaryValueArray::Set(a) => (Rc::unwrap_or_clone(a), None),
             DictionaryValueArray::Boolean => {
                 let mut set = ValueOrRefSet::with_capacity_and_hasher(2, RandomState::new());
@@ -260,7 +255,9 @@ impl<'a> DictionaryValueArray<'a> {
             DictionaryValueArray::Vec(a) => iter_into_generic_set(a.iter().map(transform)),
             DictionaryValueArray::Set(a) => iter_into_generic_set(a.iter().map(transform)),
             DictionaryValueArray::Boolean => iter_into_generic_set(
-                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)].iter().map(transform),
+                [ValueOrRef::Boolean(false), ValueOrRef::Boolean(true)]
+                    .iter()
+                    .map(transform),
             ),
         }
     }
@@ -297,7 +294,7 @@ impl<'a> DictionaryValueArray<'a> {
                 if let Some(s) = as_array(&a) {
                     (s.clone(), None)
                 } else {
-                    let (values, lookup) = transform_array_into_generic_set(|v| transform(&v), a);
+                    let (values, lookup) = transform_array_into_generic_set(transform, a);
 
                     (build(values.into_iter()), lookup)
                 }
@@ -377,28 +374,32 @@ where
             let a = value.as_primitive::<Int8Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Int16 => {
             let a = value.as_primitive::<Int16Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Int32 => {
             let a = value.as_primitive::<Int32Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Int64 => {
             let a = value.as_primitive::<Int64Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer)).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer))
+                    .map(|v| transform(&v)),
             )
         }
 
@@ -406,28 +407,32 @@ where
             let a = value.as_primitive::<UInt8Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::UInt16 => {
             let a = value.as_primitive::<UInt16Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::UInt32 => {
             let a = value.as_primitive::<UInt32Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::UInt64 => {
             let a = value.as_primitive::<UInt64Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
 
@@ -435,21 +440,24 @@ where
             let a = value.as_primitive::<Float16Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v))))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Float32 => {
             let a = value.as_primitive::<Float32Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Float64 => {
             let a = value.as_primitive::<Float64Type>().into_iter();
 
             iter_into_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double)).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double))
+                    .map(|v| transform(&v)),
             )
         }
 
@@ -469,7 +477,8 @@ where
                         v.map_or(ValueOrRef::Null, |secs| {
                             ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
             TimeUnit::Millisecond => {
@@ -480,7 +489,8 @@ where
                         v.map_or(ValueOrRef::Null, |millis| {
                             ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
             TimeUnit::Microsecond => {
@@ -491,7 +501,8 @@ where
                         v.map_or(ValueOrRef::Null, |micros| {
                             ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
             TimeUnit::Nanosecond => {
@@ -502,7 +513,8 @@ where
                         v.map_or(ValueOrRef::Null, |nanos| {
                             ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
         },
@@ -527,28 +539,32 @@ where
             let a = value.as_primitive::<Int8Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Int16 => {
             let a = value.as_primitive::<Int16Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Int32 => {
             let a = value.as_primitive::<Int32Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Int64 => {
             let a = value.as_primitive::<Int64Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer)).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Integer))
+                    .map(|v| transform(&v)),
             )
         }
 
@@ -556,28 +572,32 @@ where
             let a = value.as_primitive::<UInt8Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::UInt16 => {
             let a = value.as_primitive::<UInt16Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::UInt32 => {
             let a = value.as_primitive::<UInt32Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::UInt64 => {
             let a = value.as_primitive::<UInt64Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Integer(v as i64)))
+                    .map(|v| transform(&v)),
             )
         }
 
@@ -585,30 +605,33 @@ where
             let a = value.as_primitive::<Float16Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v)))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(f64::from(v))))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Float32 => {
             let a = value.as_primitive::<Float32Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64))).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, |v| ValueOrRef::Double(v as f64)))
+                    .map(|v| transform(&v)),
             )
         }
         DataType::Float64 => {
             let a = value.as_primitive::<Float64Type>().into_iter();
 
             iter_into_generic_set(
-                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double)).map(|v| transform(&v)),
+                a.map(|v| v.map_or(ValueOrRef::Null, ValueOrRef::Double))
+                    .map(|v| transform(&v)),
             )
         }
 
-        DataType::Utf8 => {
-            iter_into_generic_set(StringArrayIter::new(value.as_string::<i32>()).map(|v| transform(&v)))
-        }
-        DataType::LargeUtf8 => {
-            iter_into_generic_set(StringArrayIter::new(value.as_string::<i64>()).map(|v| transform(&v)))
-        }
+        DataType::Utf8 => iter_into_generic_set(
+            StringArrayIter::new(value.as_string::<i32>()).map(|v| transform(&v)),
+        ),
+        DataType::LargeUtf8 => iter_into_generic_set(
+            StringArrayIter::new(value.as_string::<i64>()).map(|v| transform(&v)),
+        ),
 
         DataType::Timestamp(time_unit, _) => match time_unit {
             TimeUnit::Second => {
@@ -619,7 +642,8 @@ where
                         v.map_or(ValueOrRef::Null, |secs| {
                             ValueOrRef::DateTime(Utc.timestamp_opt(secs, 0).unwrap().into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
             TimeUnit::Millisecond => {
@@ -630,7 +654,8 @@ where
                         v.map_or(ValueOrRef::Null, |millis| {
                             ValueOrRef::DateTime(Utc.timestamp_millis_opt(millis).unwrap().into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
             TimeUnit::Microsecond => {
@@ -641,7 +666,8 @@ where
                         v.map_or(ValueOrRef::Null, |micros| {
                             ValueOrRef::DateTime(Utc.timestamp_micros(micros).unwrap().into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
             TimeUnit::Nanosecond => {
@@ -652,7 +678,8 @@ where
                         v.map_or(ValueOrRef::Null, |nanos| {
                             ValueOrRef::DateTime(Utc.timestamp_nanos(nanos).into())
                         })
-                    }).map(|v| transform(&v)),
+                    })
+                    .map(|v| transform(&v)),
                 )
             }
         },

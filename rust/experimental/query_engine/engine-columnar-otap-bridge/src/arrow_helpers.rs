@@ -555,16 +555,15 @@ impl<'a> AttributesBuilder<'a> {
             .map_or(0, |v| v + 1);
 
         let strings_dict = if let Some(strings) = attributes_batch.attribute_strings {
-            let (strings_values, strings_values_lookup) = DictionaryValueArray::Array(Arc::new(
-                strings.values().clone(),
-            ))
-            .transform_into_generic_set(|v| {
-                if let ValueOrRef::String(s) = v {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            });
+            let (strings_values, strings_values_lookup) =
+                DictionaryValueArray::Array(Arc::new(strings.values().clone()))
+                    .transform_into_generic_set(|v| {
+                        if let ValueOrRef::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
             let mut strings_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
             let mut strings_nulls = None;
             match strings_values_lookup {
@@ -615,16 +614,15 @@ impl<'a> AttributesBuilder<'a> {
         };
 
         let ints_dict = if let Some(ints) = attributes_batch.attribute_ints {
-            let (ints_values, ints_values_lookup) = DictionaryValueArray::Array(Arc::new(
-                ints.values().clone(),
-            ))
-            .transform_into_generic_set(|v| {
-                if let ValueOrRef::Integer(i) = v {
-                    Some(*i)
-                } else {
-                    None
-                }
-            });
+            let (ints_values, ints_values_lookup) =
+                DictionaryValueArray::Array(Arc::new(ints.values().clone()))
+                    .transform_into_generic_set(|v| {
+                        if let ValueOrRef::Integer(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    });
             let mut ints_keys = MutableBuffer::from_len_zeroed(attribute_count * 2);
             let mut ints_nulls = None;
             match ints_values_lookup {

@@ -310,6 +310,15 @@ fn with_values_typed<'a, K: ArrowDictionaryKeyType>(
         }
     }
 
+    if source_values.is_empty() {
+        return Dictionary::new_null::<K>(key_length);
+    } else if source_values.len() == 1 && !source_key_builder.has_nulls() {
+        return Dictionary::new_scalar::<K>(
+            key_length,
+            source_values.into_iter().next().expect("has value"),
+        );
+    }
+
     Dictionary::new(source_key_builder.finish().into(), source_values.into())
 }
 
