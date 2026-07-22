@@ -240,30 +240,6 @@ where
             null_buffer.and_then(|v| NullBufferBuilder::new_from_buffer(v, key_length).build()),
         ))
     } else {
-        /*let mut has_nulls = false;
-        let mut true_count = 0;
-        let mut false_count = 0;
-
-        for v in transformered_values.iter() {
-            match v {
-                None => {
-                    has_nulls = true;
-                    break;
-                }
-                Some(true) => true_count += 1,
-                Some(false) => false_count += 1,
-            }
-        }
-
-        if !has_nulls {
-            if false_count == 0 {
-                return BooleanArrayOrValue::Value(true);
-            } else if true_count == 0 {
-                return BooleanArrayOrValue::Value(false);
-            }
-        }
-        */
-
         let true_count = transformered_values.true_count();
         let len = transformered_values.len();
         if true_count == len {
