@@ -11,6 +11,7 @@ use crate::{
         length_scalar_expression::execute_length_scalar_expression,
         slice_scalar_expression::execute_slice_scalar_expression,
         source_scalar_expression::execute_source_scalar_expression,
+        variable_scalar_expression::execute_variable_scalar_expression,
     },
     *,
 };
@@ -41,7 +42,7 @@ pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipel
         ScalarExpression::Static(s) => ResolvedScalarValue::new_from_value(s.to_value()),
         ScalarExpression::Temporal(_) => todo!(),
         ScalarExpression::Text(_) => todo!(),
-        ScalarExpression::Variable(_) => todo!(),
+        ScalarExpression::Variable(v) => execute_variable_scalar_expression(execution_context, v),
     };
 
     execution_context.add_diagnostic_if_enabled(

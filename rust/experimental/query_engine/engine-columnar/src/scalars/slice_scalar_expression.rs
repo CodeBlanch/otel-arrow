@@ -401,6 +401,8 @@ pub fn execute_slice_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<
 mod tests {
     use std::collections::HashMap;
 
+    use arrow::datatypes::DataType;
+
     use crate::test_helpers::*;
 
     use super::*;
@@ -947,7 +949,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_dictionary(vec![None, None, None, None, None, None], vec![]),
+                        Dictionary::new_null_with_data_type(6, DataType::UInt16),
                         actual
                     );
                 }
@@ -1139,7 +1141,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_dictionary(vec![None, None, None, None], vec![]),
+                        Dictionary::new_null_with_data_type(4, DataType::UInt16),
                         actual
                     );
                 }

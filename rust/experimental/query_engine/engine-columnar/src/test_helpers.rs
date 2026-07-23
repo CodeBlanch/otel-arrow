@@ -3,14 +3,54 @@
 
 use std::{cell::RefCell, collections::HashMap, fmt::Display};
 
+use ahash::AHashMap;
 use arrow::{array::*, datatypes::*};
 use data_engine_expressions::*;
 use roaring::RoaringBitmap;
 
 use crate::{execution_context::*, resolved_value::*, scalars::execute_scalar_expression, *};
 
+#[derive(Default)]
+pub(crate) struct ExecutionContextState<'pipeline> {
+    records: Option<TestRecords<'pipeline>>,
+    global_variables: AHashMap<Box<str>, Dictionary<'pipeline>>,
+}
+
+impl<'pipeline> ExecutionContextState<'pipeline> {
+    pub fn new() -> ExecutionContextState<'pipeline> {
+        Default::default()
+    }
+
+    pub fn with_records(mut self, records: TestRecords<'pipeline>) -> Self {
+        self.records = Some(records);
+        self
+    }
+
+    pub fn with_global_variables(
+        mut self,
+        global_variables: AHashMap<Box<str>, Dictionary<'pipeline>>,
+    ) -> Self {
+        self.global_variables = global_variables;
+        self
+    }
+}
+
 pub(crate) fn run_scalar_expression_test<FValidate>(
     records: TestRecords,
+    expression: ScalarExpression,
+    validate: FValidate,
+) where
+    for<'a, 'b> FValidate: FnOnce(ResolvedScalarValue<'a, 'b>),
+{
+    run_scalar_expression_test_with_state(
+        ExecutionContextState::new().with_records(records),
+        expression,
+        validate,
+    )
+}
+
+pub(crate) fn run_scalar_expression_test_with_state<FValidate>(
+    state: ExecutionContextState<'_>,
     expression: ScalarExpression,
     validate: FValidate,
 ) where
@@ -20,7 +60,15 @@ pub(crate) fn run_scalar_expression_test<FValidate>(
 
     let p = Default::default();
 
-    let ec = ExecutionContext::new(ColumnarEngineDiagnosticLevel::Error, &d, &p, Some(records));
+    let global_variables = RefCell::new(state.global_variables);
+
+    let ec = ExecutionContext::new(
+        ColumnarEngineDiagnosticLevel::Error,
+        &d,
+        &p,
+        &global_variables,
+        state.records,
+    );
 
     let result = execute_scalar_expression(&ec, &expression);
 

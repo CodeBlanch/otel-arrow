@@ -7,6 +7,7 @@ use std::{
     fmt::{Debug, Display, Write},
 };
 
+use ahash::AHashMap;
 use arrow::array::*;
 use data_engine_expressions::*;
 
@@ -117,7 +118,7 @@ impl ColumnarEngine {
 pub struct ColumnarEngineBatch<'a, const BATCH_SIZE: usize> {
     engine: &'a ColumnarEngine,
     diagnostics: RefCell<Vec<ColumnarEngineDiagnostic<'a>>>,
-    //global_variables: RefCell<MapValueStorage<OwnedValue>>,
+    global_variables: RefCell<AHashMap<Box<str>, Dictionary<'a>>>,
     //summaries: Summaries<'a>,
     included_batches: Vec<[Option<RecordBatch>; BATCH_SIZE]>,
     included_record_count: usize,
@@ -129,7 +130,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
         Self {
             engine,
             diagnostics: RefCell::new(Vec::new()),
-            //global_variables: RefCell::new(MapValueStorage::new(HashMap::new())),
+            global_variables: RefCell::new(AHashMap::new()),
             //summaries: Summaries::new(engine.summary_cardinality_limit),
             included_batches: Vec::new(),
             included_record_count: 0,
@@ -166,7 +167,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
             //&self.engine.external_function_implementations,
             &self.diagnostics,
             pipeline,
-            //&self.global_variables,
+            &self.global_variables,
             //&self.summaries,
             Some(records),
             //None,
@@ -223,7 +224,7 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
                                     //&self.engine.external_function_implementations,
                                     &self.diagnostics,
                                     pipeline,
-                                    //&self.global_variables,
+                                    &self.global_variables,
                                     //&self.summaries,
                                     Some(new_records),
                                     //None,

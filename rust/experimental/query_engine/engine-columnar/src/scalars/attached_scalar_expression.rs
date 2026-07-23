@@ -37,11 +37,8 @@ pub fn execute_attached_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecor
         }
     };
 
-    let key_data_type = record.get_key_data_type();
-
     select_from_record_table(
         execution_context,
-        key_data_type,
         attached_record,
         attached_scalar_expression
             .get_value_accessor()

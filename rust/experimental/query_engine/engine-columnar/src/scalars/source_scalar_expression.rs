@@ -23,11 +23,8 @@ pub fn execute_source_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords
         }
     };
 
-    let key_data_type = record.get_key_data_type();
-
     select_from_record_table(
         execution_context,
-        key_data_type,
         record,
         source_scalar_expression
             .get_value_accessor()
@@ -38,6 +35,8 @@ pub fn execute_source_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use arrow::datatypes::DataType;
 
     use crate::test_helpers::*;
 
@@ -164,7 +163,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_dictionary(vec![None, None, None, None, None, None], vec![]),
+                        Dictionary::new_null_with_data_type(6, DataType::UInt16),
                         actual
                     );
                 }
@@ -272,7 +271,7 @@ mod tests {
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
                     assert_eq!(
-                        build_dictionary(vec![None, None, None, None], vec![]),
+                        Dictionary::new_null_with_data_type(4, DataType::UInt16),
                         actual
                     );
                 }

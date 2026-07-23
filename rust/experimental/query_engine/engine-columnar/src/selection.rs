@@ -12,12 +12,19 @@ use crate::{
 
 pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
     execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
-    key_data_type: DataType,
     root: &'a dyn RecordTable<'pipeline>,
     selectors: &'pipeline [ScalarExpression],
 ) -> ResolvedScalarValue<'pipeline, 'a> {
-    let mut current = ResolvedScalarValue::Table(root);
+    let current = ResolvedScalarValue::Table(root);
 
+    select(execution_context, current, selectors)
+}
+
+pub fn select<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
+    execution_context: &ExecutionContext<'a, 'pipeline, TRecords>,
+    mut current: ResolvedScalarValue<'pipeline, 'a>,
+    selectors: &'pipeline [ScalarExpression],
+) -> ResolvedScalarValue<'pipeline, 'a> {
     for selector in selectors {
         let next = execute_scalar_expression(execution_context, selector).map_into_with_state(
             current,
@@ -96,7 +103,7 @@ pub fn select_from_record_table<'a, 'pipeline, TRecords: ColumnarRecords<'pipeli
                 }
             },
             |current, dictionary| {
-                Some(match key_data_type {
+                Some(match dictionary.keys().data_type() {
                     DataType::UInt8 => select_using_dictionary::<UInt8Type, TRecords>(execution_context, &current, selector, dictionary),
                     DataType::UInt16 => select_using_dictionary::<UInt16Type, TRecords>(execution_context, &current, selector, dictionary),
                     DataType::UInt32 => select_using_dictionary::<UInt32Type, TRecords>(execution_context, &current, selector, dictionary),

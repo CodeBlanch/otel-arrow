@@ -1,8 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 
+use ahash::AHashMap;
 use data_engine_expressions::*;
 
 use crate::{engine_diagnostic::*, *};
@@ -10,6 +11,7 @@ use crate::{engine_diagnostic::*, *};
 pub struct ExecutionContext<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>> {
     diagnostics: ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline>,
     pipeline: &'pipeline PipelineExpression,
+    variables: ExecutionContextVariables<'a, 'pipeline>,
     records: Option<TRecords>,
 }
 
@@ -20,7 +22,7 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>
         diagnostic_level: ColumnarEngineDiagnosticLevel,
         diagnostics: &'a RefCell<Vec<ColumnarEngineDiagnostic<'pipeline>>>,
         pipeline: &'pipeline PipelineExpression,
-        //global_variables: &'b RefCell<MapValueStorage<OwnedValue>>,
+        global_variables: &'a RefCell<AHashMap<Box<str>, Dictionary<'pipeline>>>,
         //summaries: &'b Summaries<'a>,
         records: Option<TRecords>,
         //arguments: Option<&'b dyn ExecutionContextArguments>,
@@ -29,7 +31,7 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>
             diagnostics: ColumnarEngineDiagnosticReceiverImpl::new(diagnostic_level, diagnostics),
             pipeline,
             records,
-            //variables: ExecutionContextVariables::new(global_variables),
+            variables: ExecutionContextVariables::new(global_variables),
             //summaries,
             //arguments,
         }
@@ -71,19 +73,56 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>
         self.records.as_mut()
     }
 
-    /*pub fn take_records(&mut self) -> Option<TRecords> {
-        self.records.take()
-    }*/
-
-    /*pub fn set_records(&mut self, records: TRecords) {
-        self.records = Some(records);
-    }*/
-
-    /*pub(crate) fn take_diagnostics(self) -> Vec<ColumnarEngineDiagnostic<'pipeline>> {
-        self.diagnostics.take()
-    }*/
+    pub fn get_variables(&self) -> &ExecutionContextVariables<'a, 'pipeline> {
+        &self.variables
+    }
 
     pub fn into_parts(self) -> Option<TRecords> {
         self.records
+    }
+}
+
+pub struct ExecutionContextVariables<'a, 'pipeline> {
+    global_variables: &'a RefCell<AHashMap<Box<str>, Dictionary<'pipeline>>>,
+    local_variables: RefCell<AHashMap<Box<str>, Dictionary<'pipeline>>>,
+}
+
+impl<'a, 'pipeline> ExecutionContextVariables<'a, 'pipeline> {
+    pub(crate) fn new(
+        global_variables: &'a RefCell<AHashMap<Box<str>, Dictionary<'pipeline>>>,
+    ) -> Self {
+        Self {
+            global_variables,
+            local_variables: RefCell::new(AHashMap::new()),
+        }
+    }
+
+    pub fn get_global_or_local_variable(
+        &self,
+        name: &str,
+    ) -> Option<Ref<'_, Dictionary<'pipeline>>> {
+        let vars = self.local_variables.borrow();
+
+        let var = Ref::filter_map(vars, |v| v.get(name));
+
+        if let Ok(v) = var {
+            return Some(v);
+        }
+
+        Ref::filter_map(self.global_variables.borrow(), |v| v.get(name)).ok()
+    }
+
+    #[cfg(test)]
+    pub fn get_local_variables(&self) -> Ref<'_, AHashMap<Box<str>, Dictionary<'pipeline>>> {
+        self.local_variables.borrow()
+    }
+
+    pub fn get_local_variables_mut(&self) -> RefMut<'_, AHashMap<Box<str>, Dictionary<'pipeline>>> {
+        self.local_variables.borrow_mut()
+    }
+
+    #[cfg(test)]
+    pub fn get_global_variables(&self) -> Ref<'_, AHashMap<Box<str>, Dictionary<'pipeline>>> {
+        self.global_variables.borrow()
     }
 }
