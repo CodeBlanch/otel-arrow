@@ -1,7 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::RefCell, str::FromStr};
+use std::{
+    cell::{Ref, RefCell},
+    str::FromStr,
+};
 
 use data_engine_expressions::*;
 
@@ -111,6 +114,10 @@ impl<'a, 'pipeline> ColumnarEngineDiagnosticReceiverImpl<'a, 'pipeline> {
             diagnostic_level,
             diagnostics,
         }
+    }
+
+    pub fn get_diagnostics(&self) -> Ref<'_, Vec<ColumnarEngineDiagnostic<'pipeline>>> {
+        self.diagnostics.borrow()
     }
 }
 

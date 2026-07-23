@@ -12,6 +12,7 @@ use crate::{execution_context::*, resolved_value::*, scalars::execute_scalar_exp
 
 #[derive(Default)]
 pub(crate) struct ExecutionContextState<'pipeline> {
+    pipeline: Option<&'pipeline PipelineExpression>,
     records: Option<TestRecords<'pipeline>>,
     global_variables: AHashMap<Box<str>, Dictionary<'pipeline>>,
 }
@@ -19,6 +20,11 @@ pub(crate) struct ExecutionContextState<'pipeline> {
 impl<'pipeline> ExecutionContextState<'pipeline> {
     pub fn new() -> ExecutionContextState<'pipeline> {
         Default::default()
+    }
+
+    pub fn with_pipeline(mut self, pipeline: &'pipeline PipelineExpression) -> Self {
+        self.pipeline = Some(pipeline);
+        self
     }
 
     pub fn with_records(mut self, records: TestRecords<'pipeline>) -> Self {
@@ -58,19 +64,26 @@ pub(crate) fn run_scalar_expression_test_with_state<FValidate>(
 {
     let d = RefCell::new(vec![]);
 
-    let p = Default::default();
+    let mut local_pipeline = None;
+
+    let p = state.pipeline.unwrap_or_else(|| {
+        local_pipeline = Some(Default::default());
+        local_pipeline.as_ref().expect("has pipeline")
+    });
 
     let global_variables = RefCell::new(state.global_variables);
 
     let ec = ExecutionContext::new(
-        ColumnarEngineDiagnosticLevel::Error,
+        ColumnarEngineDiagnosticLevel::Verbose,
         &d,
-        &p,
+        p,
         &global_variables,
         state.records,
     );
 
     let result = execute_scalar_expression(&ec, &expression);
+
+    println!("{ec}");
 
     validate(result)
 }

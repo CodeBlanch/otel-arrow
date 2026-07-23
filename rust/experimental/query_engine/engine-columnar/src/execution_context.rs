@@ -1,7 +1,11 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    fmt::Display,
+    ops::Deref,
+};
 
 use ahash::AHashMap;
 use data_engine_expressions::*;
@@ -79,6 +83,18 @@ impl<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>
 
     pub fn into_parts(self) -> Option<TRecords> {
         self.records
+    }
+}
+
+impl<'pipeline, TRecords: ColumnarRecords<'pipeline>> Display
+    for ExecutionContext<'_, 'pipeline, TRecords>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        format_diagnostics(
+            self.pipeline.get_query(),
+            self.diagnostics.get_diagnostics().deref(),
+            f,
+        )
     }
 }
 

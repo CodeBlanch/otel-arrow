@@ -8,6 +8,7 @@ use crate::{
     resolved_value::*,
     scalars::{
         attached_scalar_expression::execute_attached_scalar_expression,
+        constant_scalar_expression::execute_constant_scalar_expression,
         length_scalar_expression::execute_length_scalar_expression,
         slice_scalar_expression::execute_slice_scalar_expression,
         source_scalar_expression::execute_source_scalar_expression,
@@ -27,7 +28,7 @@ pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipel
         ScalarExpression::Coalesce(_) => todo!(),
         ScalarExpression::Collection(_) => todo!(),
         ScalarExpression::Conditional(_) => todo!(),
-        ScalarExpression::Constant(_) => todo!(),
+        ScalarExpression::Constant(c) => execute_constant_scalar_expression(execution_context, c),
         ScalarExpression::Convert(_) => todo!(),
         ScalarExpression::GetType(_) => todo!(),
         ScalarExpression::GetRecordType(_) => todo!(),

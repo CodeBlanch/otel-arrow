@@ -52,7 +52,22 @@ pub fn select<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
                             }
                         })))
                     }
-                    ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
+                    ResolvedScalarValue::Single(s) => match s {
+                        ValueOrRef::Map(m) => {
+                            Some(ResolvedScalarValue::Single(match m {
+                                MapValueOrRef::Ref(m) => m.get(key.get_value()).map_or(ValueOrRef::Null, |v| v.to_value().into()),
+                                MapValueOrRef::Owned(m) => m.get_values().get(key.get_value()).map_or(ValueOrRef::Null, |v| v.clone())
+                            }))
+                        }
+                        v => {
+                            execution_context.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                selector,
+                                || format!("Could not search for map key '{}' specified in accessor expression because current node is a '{}' value", key.get_value(), v.get_value_type()),
+                            );
+                            None
+                        }
+                    }
                 },
                 ValueOrRef::Integer(index) => match current {
                     ResolvedScalarValue::Dictionary(d) => {
@@ -83,7 +98,33 @@ pub fn select<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
                             }
                         })))
                     }
-                    ResolvedScalarValue::Single(_) => unreachable!("single should never be returned from a source selector"),
+                    ResolvedScalarValue::Single(s) => match s {
+                        ValueOrRef::Array(a) => {
+                            let len = a.len();
+                            let mut index = index.get_value();
+                            if index < 0 {
+                                index += len as i64;
+                            }
+                            if index < 0 || index >= len as i64 {
+                                execution_context.add_diagnostic_if_enabled(
+                                    ColumnarEngineDiagnosticLevel::Warn,
+                                    selector,
+                                    || format!("Array index '{index}' specified in accessor expression is invalid"),
+                                );
+                                None
+                            } else {
+                                Some(ResolvedScalarValue::Single(a.get(index as usize)))
+                            }
+                        }
+                        v => {
+                            execution_context.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                selector,
+                                || format!("Could not search for array index '{}' specified in accessor expression because current node is a '{}' value", index.get_value(), v.get_value_type()),
+                            );
+                            None
+                        }
+                    }
                     ResolvedScalarValue::Table(_) => {
                         execution_context.add_diagnostic_if_enabled(
                             ColumnarEngineDiagnosticLevel::Warn,
