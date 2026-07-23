@@ -4,7 +4,6 @@
 pub(crate) mod arrow_helpers;
 pub(crate) mod attributes;
 pub(crate) mod bridge;
-pub(crate) mod bridge_error;
 pub(crate) mod bridge_options;
 pub(crate) mod common;
 pub(crate) mod filter;
@@ -15,7 +14,6 @@ pub(crate) mod serialization;
 
 pub use attributes::*;
 pub use bridge::*;
-pub use bridge_error::*;
 pub use bridge_options::*;
 pub use common::*;
 pub use logs::*;

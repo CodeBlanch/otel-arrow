@@ -8,7 +8,7 @@ use std::{
 };
 
 use ahash::AHashMap;
-use arrow::array::*;
+use arrow::{array::*, datatypes::DataType};
 use data_engine_expressions::*;
 
 use crate::{
@@ -106,19 +106,17 @@ impl ColumnarEngine {
         &self.pipeline
     }
 
-    pub fn begin_batch<const BATCH_SIZE: usize>(
-        &self,
-    ) -> Result<ColumnarEngineBatch<'_, BATCH_SIZE>, ExpressionError> {
+    pub fn begin_batch<const BATCH_SIZE: usize>(&self) -> ColumnarEngineBatch<'_, BATCH_SIZE> {
         let mut batch = ColumnarEngineBatch::new(self);
-        batch.initialize()?;
-        Ok(batch)
+        batch.initialize();
+        batch
     }
 }
 
 pub struct ColumnarEngineBatch<'a, const BATCH_SIZE: usize> {
     engine: &'a ColumnarEngine,
     diagnostics: RefCell<Vec<ColumnarEngineDiagnostic<'a>>>,
-    global_variables: RefCell<AHashMap<Box<str>, Dictionary<'a>>>,
+    global_variables: RefCell<AHashMap<Box<str>, ResolvedSingleOrDictionaryValue<'a>>>,
     //summaries: Summaries<'a>,
     included_batches: Vec<[Option<RecordBatch>; BATCH_SIZE]>,
     included_record_count: usize,
@@ -138,9 +136,65 @@ impl<'a, const BATCH_SIZE: usize> ColumnarEngineBatch<'a, BATCH_SIZE> {
         }
     }
 
-    pub(crate) fn initialize(&mut self) -> Result<(), ExpressionError> {
-        //todo!()
-        Ok(())
+    pub(crate) fn initialize(&mut self) {
+        let pipeline = &self.engine.pipeline;
+
+        let initializations = pipeline.get_initializations();
+
+        if initializations.is_empty() {
+            return;
+        }
+
+        let execution_context = ExecutionContext::<EmptyRecords>::new(
+            self.engine.diagnostic_level,
+            //&self.engine.external_function_implementations,
+            &self.diagnostics,
+            pipeline,
+            &self.global_variables,
+            //&self.summaries,
+            None,
+        );
+
+        if execution_context.is_diagnostic_level_enabled(ColumnarEngineDiagnosticLevel::Verbose) {
+            for (constant_id, constant) in pipeline.get_constants().iter().enumerate() {
+                execution_context.add_diagnostic(ColumnarEngineDiagnostic::new(
+                    ColumnarEngineDiagnosticLevel::Verbose,
+                    constant,
+                    format!("Constant defined with id '{constant_id}'"),
+                ));
+            }
+        }
+
+        for init in initializations {
+            match init {
+                PipelineInitialization::SetGlobalVariable {
+                    name,
+                    value: scalar,
+                } => {
+                    let value = match execute_scalar_expression(&execution_context, scalar) {
+                        ResolvedScalarValue::Single(s) => {
+                            ResolvedSingleOrDictionaryValue::Single(s)
+                        }
+                        ResolvedScalarValue::Dictionary(d) => {
+                            ResolvedSingleOrDictionaryValue::Dictionary(d)
+                        }
+                        ResolvedScalarValue::Table(_) => {
+                            unreachable!("table should not be returned during initialization")
+                        }
+                    };
+
+                    self.global_variables
+                        .borrow_mut()
+                        .insert(name.as_str().into(), value);
+
+                    execution_context.add_diagnostic_if_enabled(
+                        ColumnarEngineDiagnosticLevel::Verbose,
+                        scalar,
+                        || format!("Global variable defined with name '{name}'"),
+                    );
+                }
+            }
+        }
     }
 
     pub fn push_records<TRecordFactory: ColumnarRecordsFactory<BATCH_SIZE>>(
@@ -408,6 +462,51 @@ pub struct ColumnarEngineResults<'a, const BATCH_SIZE: usize> {
 impl<const BATCH_SIZE: usize> Display for ColumnarEngineResults<'_, BATCH_SIZE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         format_diagnostics(self.pipeline.get_query(), &self.diagnostics, f)
+    }
+}
+
+#[derive(Debug)]
+struct EmptyRecords {}
+
+impl<'pipeline> ColumnarRecords<'pipeline> for EmptyRecords {
+    fn get_diagnostic_level(&self) -> Option<ColumnarEngineDiagnosticLevel> {
+        None
+    }
+
+    fn get_key_data_type(&self) -> DataType {
+        todo!()
+    }
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn get_attached_records(&self, _name: &str) -> Option<&dyn RecordTable<'pipeline>> {
+        None
+    }
+
+    fn set_values<T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
+        &mut self,
+        _diagnostic_receiver: &T,
+        _expression: &'pipeline dyn Expression,
+        _root: &ColumnarEngineSelectionPath<'pipeline>,
+        _path: &[ColumnarEngineSelectionPath<'pipeline>],
+        _key_filter: Option<&roaring::RoaringBitmap>,
+        _values: Dictionary<'pipeline>,
+    ) -> ColumnarRecordsWriteResult {
+        ColumnarRecordsWriteResult::NotFound
+    }
+}
+
+impl<'pipeline> RecordTable<'pipeline> for EmptyRecords {
+    fn get_values(&self, _key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
+        None
+    }
+}
+
+impl Display for EmptyRecords {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
     }
 }
 

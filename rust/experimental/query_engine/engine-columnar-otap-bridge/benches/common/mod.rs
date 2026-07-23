@@ -37,10 +37,7 @@ pub fn bench_log_pipeline(
             ));
             b.iter_with_setup(
                 || batch.clone(),
-                |batch| {
-                    process_otap_logs_using_pipeline(&pipeline, &factory, batch)
-                        .expect("doesn't fail")
-                },
+                |batch| process_otap_logs_using_pipeline(&pipeline, &factory, batch),
             );
         });
     }

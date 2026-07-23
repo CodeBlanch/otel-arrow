@@ -229,6 +229,7 @@ impl From<ResolvedLogicalValue> for ResolvedScalarValue<'_, '_> {
     }
 }
 
+#[derive(Clone)]
 pub enum ResolvedSingleOrDictionaryValue<'a> {
     Single(ValueOrRef<'a>),
     Dictionary(Dictionary<'a>),
@@ -242,6 +243,15 @@ impl<'a> ResolvedSingleOrDictionaryValue<'a> {
                 v => Dictionary::new_scalar_with_data_type(key_data_type, key_count, v),
             },
             ResolvedSingleOrDictionaryValue::Dictionary(d) => d,
+        }
+    }
+}
+
+impl<'a> From<ResolvedSingleOrDictionaryValue<'a>> for ResolvedScalarValue<'a, '_> {
+    fn from(value: ResolvedSingleOrDictionaryValue<'a>) -> Self {
+        match value {
+            ResolvedSingleOrDictionaryValue::Single(s) => ResolvedScalarValue::Single(s),
+            ResolvedSingleOrDictionaryValue::Dictionary(d) => ResolvedScalarValue::Dictionary(d),
         }
     }
 }

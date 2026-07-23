@@ -1,6 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::Deref;
+
 use data_engine_expressions::*;
 
 use crate::{execution_context::ExecutionContext, resolved_value::*, selection::select, *};
@@ -23,7 +25,7 @@ pub fn execute_variable_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecor
 
         select(
             execution_context,
-            ResolvedScalarValue::Dictionary(variable.clone()),
+            variable.deref().clone().into(),
             variable_scalar_expression
                 .get_value_accessor()
                 .get_selectors(),
@@ -47,7 +49,7 @@ mod tests {
 
     use super::*;
 
-    fn build_var1_values() -> Dictionary<'static> {
+    fn build_var1_values_dict() -> Dictionary<'static> {
         build_dictionary(
             vec![Some(0), Some(0), None, Some(1), Some(2), Some(3)],
             vec![
@@ -62,8 +64,12 @@ mod tests {
         )
     }
 
-    fn build_var2_values() -> Dictionary<'static> {
-        build_dictionary(
+    fn build_var1_values() -> ResolvedSingleOrDictionaryValue<'static> {
+        ResolvedSingleOrDictionaryValue::Dictionary(build_var1_values_dict())
+    }
+
+    fn build_var2_values() -> ResolvedSingleOrDictionaryValue<'static> {
+        ResolvedSingleOrDictionaryValue::Dictionary(build_dictionary(
             vec![Some(0), Some(0), None, Some(1)],
             vec![
                 ValueOrRef::Array(ArrayValueOrRef::from([
@@ -73,10 +79,10 @@ mod tests {
                 ])),
                 ValueOrRef::Integer(0),
             ],
-        )
+        ))
     }
 
-    fn build_test_variables() -> AHashMap<Box<str>, Dictionary<'static>> {
+    fn build_test_variables() -> AHashMap<Box<str>, ResolvedSingleOrDictionaryValue<'static>> {
         AHashMap::from([
             ("var1".into(), build_var1_values()),
             ("var2".into(), build_var2_values()),
@@ -96,7 +102,7 @@ mod tests {
             ScalarExpression::Variable(select_valid_var),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
-                    assert_eq!(build_var1_values(), actual)
+                    assert_eq!(build_var1_values_dict(), actual)
                 }
                 _ => panic!("test failure"),
             },

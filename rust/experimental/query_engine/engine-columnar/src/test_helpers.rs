@@ -14,7 +14,7 @@ use crate::{execution_context::*, resolved_value::*, scalars::execute_scalar_exp
 pub(crate) struct ExecutionContextState<'pipeline> {
     pipeline: Option<&'pipeline PipelineExpression>,
     records: Option<TestRecords<'pipeline>>,
-    global_variables: AHashMap<Box<str>, Dictionary<'pipeline>>,
+    global_variables: AHashMap<Box<str>, ResolvedSingleOrDictionaryValue<'pipeline>>,
 }
 
 impl<'pipeline> ExecutionContextState<'pipeline> {
@@ -34,7 +34,7 @@ impl<'pipeline> ExecutionContextState<'pipeline> {
 
     pub fn with_global_variables(
         mut self,
-        global_variables: AHashMap<Box<str>, Dictionary<'pipeline>>,
+        global_variables: AHashMap<Box<str>, ResolvedSingleOrDictionaryValue<'pipeline>>,
     ) -> Self {
         self.global_variables = global_variables;
         self

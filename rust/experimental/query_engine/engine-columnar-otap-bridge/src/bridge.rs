@@ -149,11 +149,8 @@ pub fn process_otap_logs_using_pipeline<'a>(
     pipeline: &'a BridgePipeline,
     factory: &OtapLogRecordBatchFactory,
     otap_logs: Logs,
-) -> Result<BridgeResponse<'a, Logs>, BridgeError> {
-    let mut batch = pipeline
-        .engine
-        .begin_batch()
-        .map_err(|e| BridgeError::PipelineInitializationError(e.to_string()))?;
+) -> BridgeResponse<'a, Logs> {
+    let mut batch = pipeline.engine.begin_batch();
 
     let batches = otap_logs.into_batches();
 
@@ -167,7 +164,7 @@ pub fn process_otap_logs_using_pipeline<'a>(
         .next()
         .map(|batches| RawLogsStore::from_batches(batches).try_into().unwrap());
 
-    Ok(BridgeResponse {
+    BridgeResponse {
         included_records: logs,
         included_record_count: results.included_record_count,
         dropped_record_count: results.dropped_record_count,
@@ -175,7 +172,7 @@ pub fn process_otap_logs_using_pipeline<'a>(
             pipeline,
             diagnostics: results.diagnostics,
         },
-    })
+    }
 }
 
 fn build_parser_options_for_logs_query(
@@ -310,8 +307,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -434,8 +430,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -544,8 +539,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -684,8 +678,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -835,8 +828,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -914,8 +906,7 @@ mod tests {
                             ColumnarEngineDiagnosticLevel::Verbose,
                         )),
                         logs,
-                    )
-                    .unwrap();
+                    );
 
                     println!("{results}");
 
@@ -1640,8 +1631,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -1770,8 +1760,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -1956,8 +1945,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -2151,8 +2139,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
@@ -2320,8 +2307,7 @@ mod tests {
                 ColumnarEngineDiagnosticLevel::Verbose,
             )),
             logs,
-        )
-        .unwrap();
+        );
 
         println!("{results}");
 
