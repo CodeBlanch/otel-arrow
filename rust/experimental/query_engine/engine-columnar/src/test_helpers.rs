@@ -1,10 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::RefCell, collections::HashMap, fmt::Display};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, sync::Arc};
 
 use ahash::AHashMap;
-use arrow::{array::*, datatypes::*};
+use arrow::{array::*, compute::kernels::filter, datatypes::*};
 use data_engine_expressions::*;
 use roaring::RoaringBitmap;
 
@@ -106,28 +106,205 @@ pub(crate) fn build_dictionary(
     Dictionary::new(keys.into(), DictionaryValueArray::Vec(values.into()))
 }
 
+pub(crate) struct TestRecordsFactory {
+}
+
+impl ColumnarRecordsFactory<2> for TestRecordsFactory {
+    type Records<'pipeline, 'record> = TestRecords<'pipeline>;
+    type State<'pipeline> = TestRecords<'pipeline>;
+
+    fn create<'pipeline, 'record>(
+        &self,
+        _state: Option<Self::State<'pipeline>>,
+        batches: &'record [Option<RecordBatch>; 2],
+    ) -> Self::Records<'pipeline, 'record> {
+        TestRecords::from_batches(batches)
+    }
+
+    fn filter<'pipeline>(
+        &self,
+        _state: &mut Self::State<'pipeline>,
+        batches: &mut [Option<RecordBatch>; 2],
+        filter: &BooleanArray,
+    ) {
+        if let Some(records) = &batches[0] {
+            batches[0] = Some(filter::filter_record_batch(records, filter).unwrap());
+
+            if let Some(attached_records) = &batches[1] {
+                batches[1] = Some(filter::filter_record_batch(attached_records, filter).unwrap());
+            }
+
+            return;
+        }
+
+        batches[1] = None;
+    }
+
+    fn apply<'pipeline, T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
+        &self,
+        _diagnostic_receiver: &T,
+        _expression: &'pipeline dyn Expression,
+        state: &mut Self::State<'pipeline>,
+        batches: &mut [Option<RecordBatch>; 2],
+    ) {
+        *batches = state.into_batches();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct TestRecords<'pipeline> {
-    values: HashMap<Box<str>, Dictionary<'pipeline>>,
+    ids: Option<PrimitiveArray<Int64Type>>,
+    values: Option<HashMap<Box<str>, Dictionary<'pipeline>>>,
     attached_records: Option<HashMap<Box<str>, TestRecords<'pipeline>>>,
 }
 
 impl<'pipeline> TestRecords<'pipeline> {
-    pub fn new(values: HashMap<Box<str>, Dictionary<'pipeline>>) -> TestRecords<'pipeline> {
+    pub fn new() -> TestRecords<'pipeline> {
         Self {
-            values,
+            ids: None,
+            values: None,
             attached_records: None,
         }
     }
 
-    pub fn with_attached_records(
+    pub fn with_ids(
+        mut self,
+        ids: PrimitiveArray<Int64Type>
+    ) -> Self {
+        self.ids = Some(ids);
+        self
+    }
+
+    pub fn with_values(
+        mut self,
         values: HashMap<Box<str>, Dictionary<'pipeline>>,
+    ) -> Self {
+        self.values = Some(values);
+        self
+    }
+
+    pub fn with_attached_records(
+        mut self,
         attached_records: HashMap<Box<str>, TestRecords<'pipeline>>,
-    ) -> TestRecords<'pipeline> {
-        Self {
-            values,
-            attached_records: Some(attached_records),
+    ) -> Self {
+        self.attached_records = Some(attached_records);
+        self
+    }
+
+    pub fn from_batches(batches: &[Option<RecordBatch>; 2]) -> Self {
+        let mut state = TestRecords::new();
+
+        if let Some(records) = &batches[0] {
+            let mut values: HashMap<Box<str>, Dictionary> = HashMap::new();
+
+            for (id, field) in records.schema_ref().fields().iter().enumerate() {
+                if field.name() == "ids" {
+                    state = state.with_ids(records.column(id).as_primitive::<Int64Type>().clone())
+                } else {
+                    let d = records.column(id)
+                        .as_dictionary::<UInt16Type>()
+                        .downcast_dict::<StringArray>()
+                        .expect("string dict");
+
+                    values.insert(
+                        field.name().as_str().into(),
+                        d.into());
+                }
+            }
+
+            if values.len() > 0 {
+                state = state.with_values(values);
+            }
         }
+
+        if let Some(attached_records) = &batches[1] {
+            todo!()
+        }
+
+        state
+    }
+
+    pub fn into_batches(&mut self) -> [Option<RecordBatch>; 2] {
+        let mut schema = SchemaBuilder::new();
+        let mut columns: Vec<ArrayRef> = vec![];
+
+        if let Some(ids) = self.ids.take() {
+            schema.push(Field::new("ids", DataType::Int64, false));
+
+            columns.push(Arc::new(ids));
+        }
+
+        if let Some(values) = self.values.take() {
+            for (key, value) in values {
+                let (keys, values) = value.into_parts();
+
+                let (transformed_values, lookup) = values.into_string_array();
+
+                let array = Arc::new(DictionaryArray::<UInt16Type>::new(
+                    keys.into_key_array(lookup),
+                    Arc::new(transformed_values),
+                ));
+
+                schema.push(Field::new(key, array.data_type().clone(), true));
+
+                columns.push(array);
+            }
+        }
+
+        if columns.is_empty() {
+            return [None, None];
+        }
+
+        let records = RecordBatch::try_new(schema.finish().into(), columns).expect("valid batch");
+
+        if let Some(attached_records) = self.attached_records.take() {
+            let mut schema = SchemaBuilder::new();
+            let mut columns: Vec<ArrayRef> = vec![];
+
+            for (key, mut value) in attached_records {
+                let mut struct_fields = vec![];
+                let mut struct_columns = vec![];
+
+                if let Some(values) = value.values.take() {
+                    for (key, value) in values {
+                        let (keys, values) = value.into_parts();
+
+                        let (transformed_values, lookup) = values.into_string_array();
+
+                        let array: Arc<dyn Array> = Arc::new(DictionaryArray::<UInt16Type>::new(
+                            keys.into_key_array(lookup),
+                            Arc::new(transformed_values),
+                        ));
+
+                        struct_fields.push(Field::new(key, array.data_type().clone(), true));
+                        struct_columns.push(array);
+                    }
+                }
+
+                let struct_fields: Fields = struct_fields.into();
+
+                let array = Arc::new(StructArray::try_new(struct_fields.clone(), struct_columns, None).unwrap());
+
+                schema.push(Field::new(key, DataType::Struct(struct_fields), true));
+                columns.push(array);
+            }
+
+            [
+                Some(records),
+                Some(RecordBatch::try_new(schema.finish().into(), columns).expect("valid batch"))
+            ]
+        } else {
+            [
+                Some(records),
+                None
+            ]
+        }
+    }
+}
+
+impl From<TestRecords<'_>> for [Option<RecordBatch>; 2] {
+    fn from(mut value: TestRecords<'_>) -> Self {
+        value.into_batches()
     }
 }
 
@@ -141,7 +318,14 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
     }
 
     fn len(&self) -> usize {
-        self.values.len()
+        if let Some(ids) = self.ids.as_ref() {
+            ids.len()
+        } else if let Some(values) = self.values.as_ref()
+            && !values.is_empty() {
+            values.iter().next().expect("has value").1.len()
+        } else {
+            0
+        }
     }
 
     fn get_attached_records(&self, name: &str) -> Option<&dyn RecordTable<'pipeline>> {
@@ -152,22 +336,123 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
 
     fn set_values<T: ColumnarEngineDiagnosticReceiver<'pipeline>>(
         &mut self,
-        _diagnostic_receiver: &T,
+        diagnostic_receiver: &T,
         _expression: &'pipeline dyn Expression,
-        _root: &ColumnarEngineSelectionPath<'pipeline>,
-        _path: &[ColumnarEngineSelectionPath<'pipeline>],
-        _key_filter: Option<&RoaringBitmap>,
-        _values: Dictionary<'pipeline>,
+        root: &ColumnarEngineSelectionPath<'pipeline>,
+        path: &[ColumnarEngineSelectionPath<'pipeline>],
+        key_filter: Option<&RoaringBitmap>,
+        values: Dictionary<'pipeline>,
     ) -> ColumnarRecordsWriteResult {
-        todo!()
+        if key_filter.is_some_and(|v| v.is_empty()) {
+            return ColumnarRecordsWriteResult::Success;
+        }
+
+        let path_length = path.len();
+
+        match root {
+            ColumnarEngineSelectionPath::Key {
+                expression: key_expression,
+                value: root_key,
+            } => {
+                match root_key.get_value() {
+                    "ids" => {
+                        if path_length > 0 {
+                            diagnostic_receiver.add_diagnostic_if_enabled(
+                                ColumnarEngineDiagnosticLevel::Warn,
+                                *key_expression,
+                                || format!("Cannot access into field 'ids'"),
+                            );
+                            return ColumnarRecordsWriteResult::NotFound;
+                        }
+
+                        let value = if let Some(key_filter) = key_filter {
+                            let existing_values = match self.ids.as_ref() {
+                                Some(v) => Dictionary::from_array::<UInt16Type, _>(v),
+                                None => {
+                                    let key_length = self.len();
+                                    Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
+                                }
+                            };
+
+                            existing_values.with_values(Some(key_filter), &values)
+                        } else {
+                            values.clone()
+                        };
+
+                        if value.is_null() {
+                            self.ids = None;
+                        } else {
+                            self.ids = Some(values.transform_into_primitive(DictionaryValueArray::into_int_array::<Int64Type>));
+                        }
+                    }
+                    key => {
+                        let key_length = self.len();
+
+                        let attribute_values = self.values.get_or_insert_with(|| HashMap::new());
+
+                        let value = if path_length > 0 {
+                            match attribute_values.remove(key) {
+                                None => {
+                                    diagnostic_receiver.add_diagnostic_if_enabled(
+                                        ColumnarEngineDiagnosticLevel::Warn,
+                                        *key_expression,
+                                        || format!("Cannot access into empty '{key}'"),
+                                    );
+                                    return ColumnarRecordsWriteResult::NotFound;
+                                }
+                                Some(v) => {
+                                    todo!()
+                                }
+                            }
+                        } else if let Some(key_filter) = key_filter {
+                            let existing_values = match attribute_values.remove(key) {
+                                Some(v) => v,
+                                None => {
+                                    Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
+                                }
+                            };
+
+                            existing_values.with_values(Some(key_filter), &values)
+                        } else {
+                            values.clone()
+                        };
+
+                        if !value.is_null() {
+                            attribute_values.insert(key.into(), value);
+                        }
+                    }
+                }
+
+                ColumnarRecordsWriteResult::Success
+            }
+            ColumnarEngineSelectionPath::Dictionary {
+                expression: _,
+                value: _,
+            } => {
+                todo!()
+            }
+            ColumnarEngineSelectionPath::Index {
+                expression,
+                value: _,
+            } => {
+                diagnostic_receiver.add_diagnostic_if_enabled(
+                    ColumnarEngineDiagnosticLevel::Warn,
+                    *expression,
+                    || "Test record cannot be accessed by array index".into(),
+                );
+                ColumnarRecordsWriteResult::NotFound
+            }
+        }
     }
 }
 
 impl<'pipeline> RecordTable<'pipeline> for TestRecords<'pipeline> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         self.values
+            .as_ref()
+            .and_then(|v| v
             .get(key)
-            .map(|v| RecordTableValue::Dictionary(v.clone()))
+            .map(|v| RecordTableValue::Dictionary(v.clone())))
     }
 }
 

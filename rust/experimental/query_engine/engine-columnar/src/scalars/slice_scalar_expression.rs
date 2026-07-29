@@ -420,7 +420,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_no_ranges),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -443,7 +443,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_full_range),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -468,7 +468,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_range),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -491,7 +491,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_invalid_range),
             |r| {
                 matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
@@ -531,7 +531,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_no_ranges),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -560,7 +560,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_full_range),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -591,7 +591,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_range),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -629,7 +629,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_invalid_range),
             |r| {
                 matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
@@ -665,7 +665,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -693,7 +693,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -723,7 +723,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -765,7 +765,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -806,7 +806,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Slice(slice_null),
             |r| match r {
                 ResolvedScalarValue::Single(ValueOrRef::Null) => {}
@@ -832,7 +832,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -860,7 +860,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -888,7 +888,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -916,7 +916,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -944,7 +944,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([("values".into(), values_dictionary)])),
+            TestRecords::new().with_values(HashMap::from([("values".into(), values_dictionary)])),
             ScalarExpression::Slice(slice_invalid_range),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
@@ -993,7 +993,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -1021,7 +1021,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -1051,7 +1051,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -1092,7 +1092,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -1136,7 +1136,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([("values".into(), values_dictionary)])),
+            TestRecords::new().with_values(HashMap::from([("values".into(), values_dictionary)])),
             ScalarExpression::Slice(slice_invalid_range),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
@@ -1213,7 +1213,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([
+            TestRecords::new().with_values(HashMap::from([
                 ("values".into(), values_dictionary.clone()),
                 ("range_start_values".into(), range_start_values),
                 ("range_length_values".into(), range_length_values.clone()),
@@ -1272,7 +1272,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "range_start_values".into(),
                 range_invalid.clone(),
             )])),
@@ -1312,7 +1312,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "range_length_values".into(),
                 range_invalid,
             )])),
@@ -1356,7 +1356,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "range_length_values".into(),
                 range_length_empty,
             )])),
@@ -1430,7 +1430,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([
+            TestRecords::new().with_values(HashMap::from([
                 ("values".into(), values_dictionary.clone()),
                 ("range_start_values".into(), range_start_values),
                 ("range_length_values".into(), range_length_values.clone()),
@@ -1487,7 +1487,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "range_length_values".into(),
                 range_length_empty,
             )])),

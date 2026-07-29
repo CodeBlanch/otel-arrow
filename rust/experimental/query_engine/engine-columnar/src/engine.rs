@@ -624,3 +624,70 @@ fn write_diagnostics(
 
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow::datatypes::*;
+
+    use crate::test_helpers::*;
+
+    use super::*;
+
+    #[test]
+    fn test_engine_with_initialization() {
+        let mut pipeline_builder = PipelineExpressionBuilder::new("");
+
+        pipeline_builder.push_global_variable(
+            "gvar1",
+            ScalarExpression::Temporal(TemporalScalarExpression::Now(NowScalarExpression::new(
+                QueryLocation::new_fake(),
+            ))),
+        );
+
+        pipeline_builder.push_expression(DataExpression::Transform(TransformExpression::Set(
+            SetTransformExpression::new(
+                QueryLocation::new_fake(),
+                ScalarExpression::Variable(VariableScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    StringScalarExpression::new(QueryLocation::new_fake(), "gvar1"),
+                    ValueAccessor::new(),
+                )),
+                MutableValueExpression::Source(SourceScalarExpression::new(
+                    QueryLocation::new_fake(),
+                    ValueAccessor::new_with_selectors(vec![ScalarExpression::Static(
+                        StaticScalarExpression::String(StringScalarExpression::new(
+                            QueryLocation::new_fake(),
+                            "now",
+                        )),
+                    )]),
+                )),
+            ),
+        )));
+
+        let pipeline = pipeline_builder.build().unwrap();
+
+        let engine = ColumnarEngine::new_with_options(
+            pipeline,
+            ColumnarEngineOptions::new()
+                .with_diagnostic_level(ColumnarEngineDiagnosticLevel::Verbose),
+        );
+
+        let mut batch = engine.begin_batch();
+
+        batch.push_records(
+            &TestRecordsFactory { },
+            TestRecords::new()
+                .with_ids(PrimitiveArray::<Int64Type>::from(vec![0])).into());
+
+        let results = batch.flush();
+
+        print!("{results}");
+
+        let batches = results.included_batches.first().expect("has batches");
+        let records = batches[0].as_ref().expect("has records");
+
+        assert_eq!(1, records.num_rows());
+
+        records.column_by_name("now").expect("has now column");
+    }
+}

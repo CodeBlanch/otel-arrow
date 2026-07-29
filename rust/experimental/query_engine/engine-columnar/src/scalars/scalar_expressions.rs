@@ -4,17 +4,9 @@
 use data_engine_expressions::*;
 
 use crate::{
-    execution_context::ExecutionContext,
-    resolved_value::*,
-    scalars::{
-        attached_scalar_expression::execute_attached_scalar_expression,
-        constant_scalar_expression::execute_constant_scalar_expression,
-        length_scalar_expression::execute_length_scalar_expression,
-        slice_scalar_expression::execute_slice_scalar_expression,
-        source_scalar_expression::execute_source_scalar_expression,
-        variable_scalar_expression::execute_variable_scalar_expression,
-    },
-    *,
+    execution_context::ExecutionContext, resolved_value::*, scalars::{
+        attached_scalar_expression::execute_attached_scalar_expression, constant_scalar_expression::execute_constant_scalar_expression, length_scalar_expression::execute_length_scalar_expression, slice_scalar_expression::execute_slice_scalar_expression, source_scalar_expression::execute_source_scalar_expression, temporal_scalar_expression::execute_temporal_scalar_expression, variable_scalar_expression::execute_variable_scalar_expression,
+    }, *,
 };
 
 pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipeline>>(
@@ -41,7 +33,7 @@ pub fn execute_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecords<'pipel
         ScalarExpression::Slice(s) => execute_slice_scalar_expression(execution_context, s),
         ScalarExpression::Source(s) => execute_source_scalar_expression(execution_context, s),
         ScalarExpression::Static(s) => ResolvedScalarValue::new_from_value(s.to_value()),
-        ScalarExpression::Temporal(_) => todo!(),
+        ScalarExpression::Temporal(t) => execute_temporal_scalar_expression(execution_context, t),
         ScalarExpression::Text(_) => todo!(),
         ScalarExpression::Variable(v) => execute_variable_scalar_expression(execution_context, v),
     };

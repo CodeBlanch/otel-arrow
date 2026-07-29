@@ -1412,19 +1412,15 @@ impl OtapLogRecordField {
     pub fn get_column_name_and_transform(&self) -> (&'static str, ColumnTransform) {
         match self {
             OtapLogRecordField::TimeUnixNano => (consts::TIME_UNIX_NANO, |keys, values| {
-                primitive_array_writer(
-                    keys,
-                    values,
+                Some(Arc::new(Dictionary::new(keys, values).transform_into_primitive(
                     DictionaryValueArray::into_timestamp_nanoseconds_array,
-                )
+                )))
             }),
             OtapLogRecordField::ObservedTimeUnixNano => {
                 (consts::OBSERVED_TIME_UNIX_NANO, |keys, values| {
-                    primitive_array_writer(
-                        keys,
-                        values,
+                    Some(Arc::new(Dictionary::new(keys, values).transform_into_primitive(
                         DictionaryValueArray::into_timestamp_nanoseconds_array,
-                    )
+                    )))
                 })
             }
             OtapLogRecordField::SeverityNumber => (consts::SEVERITY_NUMBER, |keys, values| {
@@ -1452,11 +1448,9 @@ impl OtapLogRecordField {
                 )
             }),
             OtapLogRecordField::Flags => (consts::FLAGS, |keys, values| {
-                primitive_array_writer(
-                    keys,
-                    values,
+                Some(Arc::new(Dictionary::new(keys, values).transform_into_primitive(
                     DictionaryValueArray::into_int_array::<UInt32Type>,
-                )
+                )))
             }),
             OtapLogRecordField::EventName => (consts::EVENT_NAME, |keys, values| {
                 adaptive_dictionary_writer(keys, values, DictionaryValueArray::into_string_array)

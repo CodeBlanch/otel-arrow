@@ -84,7 +84,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Length(length_string),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -103,7 +103,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Length(length_array),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -122,7 +122,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Length(length_map),
             |r| match r {
                 ResolvedScalarValue::Single(actual) => {
@@ -159,7 +159,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),

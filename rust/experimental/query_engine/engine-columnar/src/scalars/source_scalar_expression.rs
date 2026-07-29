@@ -68,7 +68,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -92,7 +92,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Source(select_invalid_key),
             |r| {
                 matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
@@ -103,7 +103,7 @@ mod tests {
             SourceScalarExpression::new(QueryLocation::new_fake(), ValueAccessor::new());
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Source(select_root),
             |r| {
                 matches!(r, ResolvedScalarValue::Table(_));
@@ -123,7 +123,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -155,7 +155,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -199,7 +199,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -231,7 +231,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -263,7 +263,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([(
+            TestRecords::new().with_values(HashMap::from([(
                 "values".into(),
                 values_dictionary.clone(),
             )])),
@@ -368,7 +368,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([
+            TestRecords::new().with_values(HashMap::from([
                 ("values".into(), values_dictionary.clone()),
                 ("keys".into(), keys_dictionary.clone()),
             ])),
@@ -419,7 +419,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::from([
+            TestRecords::new().with_values(HashMap::from([
                 ("values".into(), values_dictionary.clone()),
                 ("indicies".into(), indicies_dictionary.clone()),
             ])),

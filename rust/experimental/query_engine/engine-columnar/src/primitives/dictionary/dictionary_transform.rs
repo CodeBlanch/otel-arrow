@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::OnceCell, sync::Arc};
+use std::{cell::OnceCell, hash::Hash, sync::Arc};
 
 use arrow::{array::*, buffer::*, datatypes::*};
 
@@ -80,6 +80,49 @@ impl<'a> Dictionary<'a> {
                 BooleanArrayOrValue::Array(BooleanArray::new(key_buffer, null_buffer))
             }
         }
+    }
+
+    pub fn transform_into_primitive<T: ArrowPrimitiveType, FTransform>(
+        self,
+        transform: FTransform
+    ) -> PrimitiveArray<T>
+    where
+        T::Native: Hash + Eq + TryFrom<i64>,
+        PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
+        FTransform: Fn(DictionaryValueArray<'a>) -> (PrimitiveArray<T>, IndexLookup),
+    {
+        let (keys, values) = self.into_parts();
+
+        let (transformed_values, lookup) = transform(values);
+
+        let key_length = keys.len();
+
+        if matches!(keys, DictionaryKeyArray::UniqueValues { data_type: _, length: _ })
+            && transformed_values.len() == key_length {
+            return transformed_values;
+        }
+
+        let mut builder = PrimitiveBuilder::<T>::with_capacity(key_length);
+
+        for key_index in 0..key_length {
+            if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
+                let transformed_value_index = match lookup.as_ref() {
+                    Some(lookup) => lookup.get(&value_index).and_then(|v| *v),
+                    None => Some(value_index),
+                };
+
+                if let Some(transformed_value_index) = transformed_value_index {
+                    builder.append_value(unsafe {
+                        transformed_values.value_unchecked(transformed_value_index)
+                    });
+                    continue;
+                }
+            }
+
+            builder.append_null();
+        }
+
+        builder.finish()
     }
 
     pub(crate) fn transform_into_any<FTransform>(self, mut transform: FTransform) -> Dictionary<'a>

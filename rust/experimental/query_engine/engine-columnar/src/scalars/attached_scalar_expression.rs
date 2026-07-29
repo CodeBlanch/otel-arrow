@@ -75,11 +75,10 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::with_attached_records(
-                HashMap::new(),
+            TestRecords::new().with_attached_records(
                 HashMap::from([(
                     "data".into(),
-                    TestRecords::new(HashMap::from([(
+                    TestRecords::new().with_values(HashMap::from([(
                         "values".into(),
                         values_dictionary.clone(),
                     )])),
@@ -106,7 +105,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Attached(select_invalid_attached_data),
             |r| {
                 matches!(r, ResolvedScalarValue::Single(ValueOrRef::Null));
@@ -120,7 +119,7 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new(HashMap::new()),
+            TestRecords::new(),
             ScalarExpression::Attached(select_root),
             |r| {
                 matches!(r, ResolvedScalarValue::Table(_));

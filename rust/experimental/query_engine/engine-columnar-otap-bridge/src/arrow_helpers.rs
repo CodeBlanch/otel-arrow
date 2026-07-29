@@ -162,47 +162,6 @@ where
     })
 }
 
-pub(crate) fn primitive_array_writer<'a, T: ArrowPrimitiveType, FTransform>(
-    keys: DictionaryKeyArray,
-    values: DictionaryValueArray<'a>,
-    transform: FTransform,
-) -> Option<Arc<dyn Array>>
-where
-    T::Native: Hash + Eq + TryFrom<i64>,
-    PrimitiveArray<T>: From<Vec<<T as ArrowPrimitiveType>::Native>>,
-    FTransform: Fn(DictionaryValueArray<'a>) -> (PrimitiveArray<T>, IndexLookup),
-{
-    let (transformed_values, lookup) = transform(values);
-
-    let key_length = keys.len();
-
-    if transformed_values.len() == key_length {
-        return Some(Arc::new(transformed_values));
-    }
-
-    let mut builder = PrimitiveBuilder::<T>::with_capacity(key_length);
-
-    for key_index in 0..key_length {
-        if let Some(value_index) = keys.get_value_index_for_key_index(key_index) {
-            let transformed_value_index = match lookup.as_ref() {
-                Some(lookup) => lookup.get(&value_index).and_then(|v| *v),
-                None => Some(value_index),
-            };
-
-            if let Some(transformed_value_index) = transformed_value_index {
-                builder.append_value(unsafe {
-                    transformed_values.value_unchecked(transformed_value_index)
-                });
-                continue;
-            }
-        }
-
-        builder.append_null();
-    }
-
-    Some(Arc::new(builder.finish()))
-}
-
 pub(crate) fn attributes_writer<'a>(
     record_count: usize,
     values: AHashMap<Box<str>, OtapValue<'a>>,
