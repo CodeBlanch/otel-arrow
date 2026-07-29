@@ -106,8 +106,7 @@ pub(crate) fn build_dictionary(
     Dictionary::new(keys.into(), DictionaryValueArray::Vec(values.into()))
 }
 
-pub(crate) struct TestRecordsFactory {
-}
+pub(crate) struct TestRecordsFactory {}
 
 impl ColumnarRecordsFactory<2> for TestRecordsFactory {
     type Records<'pipeline, 'record> = TestRecords<'pipeline>;
@@ -167,18 +166,12 @@ impl<'pipeline> TestRecords<'pipeline> {
         }
     }
 
-    pub fn with_ids(
-        mut self,
-        ids: PrimitiveArray<Int64Type>
-    ) -> Self {
+    pub fn with_ids(mut self, ids: PrimitiveArray<Int64Type>) -> Self {
         self.ids = Some(ids);
         self
     }
 
-    pub fn with_values(
-        mut self,
-        values: HashMap<Box<str>, Dictionary<'pipeline>>,
-    ) -> Self {
+    pub fn with_values(mut self, values: HashMap<Box<str>, Dictionary<'pipeline>>) -> Self {
         self.values = Some(values);
         self
     }
@@ -201,14 +194,13 @@ impl<'pipeline> TestRecords<'pipeline> {
                 if field.name() == "ids" {
                     state = state.with_ids(records.column(id).as_primitive::<Int64Type>().clone())
                 } else {
-                    let d = records.column(id)
+                    let d = records
+                        .column(id)
                         .as_dictionary::<UInt16Type>()
                         .downcast_dict::<StringArray>()
                         .expect("string dict");
 
-                    values.insert(
-                        field.name().as_str().into(),
-                        d.into());
+                    values.insert(field.name().as_str().into(), d.into());
                 }
             }
 
@@ -283,7 +275,9 @@ impl<'pipeline> TestRecords<'pipeline> {
 
                 let struct_fields: Fields = struct_fields.into();
 
-                let array = Arc::new(StructArray::try_new(struct_fields.clone(), struct_columns, None).unwrap());
+                let array = Arc::new(
+                    StructArray::try_new(struct_fields.clone(), struct_columns, None).unwrap(),
+                );
 
                 schema.push(Field::new(key, DataType::Struct(struct_fields), true));
                 columns.push(array);
@@ -291,13 +285,10 @@ impl<'pipeline> TestRecords<'pipeline> {
 
             [
                 Some(records),
-                Some(RecordBatch::try_new(schema.finish().into(), columns).expect("valid batch"))
+                Some(RecordBatch::try_new(schema.finish().into(), columns).expect("valid batch")),
             ]
         } else {
-            [
-                Some(records),
-                None
-            ]
+            [Some(records), None]
         }
     }
 }
@@ -321,7 +312,8 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
         if let Some(ids) = self.ids.as_ref() {
             ids.len()
         } else if let Some(values) = self.values.as_ref()
-            && !values.is_empty() {
+            && !values.is_empty()
+        {
             values.iter().next().expect("has value").1.len()
         } else {
             0
@@ -370,7 +362,10 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
                                 Some(v) => Dictionary::from_array::<UInt16Type, _>(v),
                                 None => {
                                     let key_length = self.len();
-                                    Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
+                                    Dictionary::new_null_with_data_type(
+                                        key_length,
+                                        DataType::UInt16,
+                                    )
                                 }
                             };
 
@@ -382,7 +377,9 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
                         if value.is_null() {
                             self.ids = None;
                         } else {
-                            self.ids = Some(values.transform_into_primitive(DictionaryValueArray::into_int_array::<Int64Type>));
+                            self.ids = Some(values.transform_into_primitive(
+                                DictionaryValueArray::into_int_array::<Int64Type>,
+                            ));
                         }
                     }
                     key => {
@@ -400,16 +397,20 @@ impl<'pipeline> ColumnarRecords<'pipeline> for TestRecords<'pipeline> {
                                     );
                                     return ColumnarRecordsWriteResult::NotFound;
                                 }
-                                Some(v) => {
-                                    todo!()
-                                }
+                                Some(v) => v.with_values_and_path_typed(
+                                    diagnostic_receiver,
+                                    key_filter,
+                                    path,
+                                    &values,
+                                ),
                             }
                         } else if let Some(key_filter) = key_filter {
                             let existing_values = match attribute_values.remove(key) {
                                 Some(v) => v,
-                                None => {
-                                    Dictionary::new_null_with_data_type(key_length, DataType::UInt16)
-                                }
+                                None => Dictionary::new_null_with_data_type(
+                                    key_length,
+                                    DataType::UInt16,
+                                ),
                             };
 
                             existing_values.with_values(Some(key_filter), &values)
@@ -450,9 +451,7 @@ impl<'pipeline> RecordTable<'pipeline> for TestRecords<'pipeline> {
     fn get_values(&self, key: &str) -> Option<RecordTableValue<'pipeline, '_>> {
         self.values
             .as_ref()
-            .and_then(|v| v
-            .get(key)
-            .map(|v| RecordTableValue::Dictionary(v.clone())))
+            .and_then(|v| v.get(key).map(|v| RecordTableValue::Dictionary(v.clone())))
     }
 }
 

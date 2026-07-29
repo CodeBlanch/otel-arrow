@@ -84,7 +84,7 @@ impl<'a> Dictionary<'a> {
 
     pub fn transform_into_primitive<T: ArrowPrimitiveType, FTransform>(
         self,
-        transform: FTransform
+        transform: FTransform,
     ) -> PrimitiveArray<T>
     where
         T::Native: Hash + Eq + TryFrom<i64>,
@@ -97,8 +97,14 @@ impl<'a> Dictionary<'a> {
 
         let key_length = keys.len();
 
-        if matches!(keys, DictionaryKeyArray::UniqueValues { data_type: _, length: _ })
-            && transformed_values.len() == key_length {
+        if matches!(
+            keys,
+            DictionaryKeyArray::UniqueValues {
+                data_type: _,
+                length: _
+            }
+        ) && transformed_values.len() == key_length
+        {
             return transformed_values;
         }
 

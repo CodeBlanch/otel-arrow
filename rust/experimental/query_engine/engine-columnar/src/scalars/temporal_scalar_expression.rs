@@ -11,7 +11,9 @@ pub fn execute_temporal_scalar_expression<'a, 'pipeline, TRecords: ColumnarRecor
     temporal_scalar_expression: &'pipeline TemporalScalarExpression,
 ) -> ResolvedScalarValue<'pipeline, 'a> {
     match temporal_scalar_expression {
-        TemporalScalarExpression::Now(_) => ResolvedScalarValue::Single(ValueOrRef::DateTime(Utc::now().into())),
+        TemporalScalarExpression::Now(_) => {
+            ResolvedScalarValue::Single(ValueOrRef::DateTime(Utc::now().into()))
+        }
     }
 }
 
@@ -27,9 +29,9 @@ mod tests {
     fn test_execute_now_temporal_scalar_expression() {
         run_scalar_expression_test_with_state(
             ExecutionContextState::new(),
-            ScalarExpression::Temporal(TemporalScalarExpression::Now(
-            NowScalarExpression::new(QueryLocation::new_fake()),
-        )),
+            ScalarExpression::Temporal(TemporalScalarExpression::Now(NowScalarExpression::new(
+                QueryLocation::new_fake(),
+            ))),
             |r| match r {
                 ResolvedScalarValue::Single(value) => {
                     assert_eq!(ValueType::DateTime, value.get_value_type());

@@ -675,9 +675,11 @@ mod tests {
         let mut batch = engine.begin_batch();
 
         batch.push_records(
-            &TestRecordsFactory { },
+            &TestRecordsFactory {},
             TestRecords::new()
-                .with_ids(PrimitiveArray::<Int64Type>::from(vec![0])).into());
+                .with_ids(PrimitiveArray::<Int64Type>::from(vec![0]))
+                .into(),
+        );
 
         let results = batch.flush();
 

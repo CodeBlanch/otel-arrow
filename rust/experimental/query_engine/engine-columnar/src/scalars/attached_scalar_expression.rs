@@ -75,15 +75,13 @@ mod tests {
         );
 
         run_scalar_expression_test(
-            TestRecords::new().with_attached_records(
-                HashMap::from([(
-                    "data".into(),
-                    TestRecords::new().with_values(HashMap::from([(
-                        "values".into(),
-                        values_dictionary.clone(),
-                    )])),
-                )]),
-            ),
+            TestRecords::new().with_attached_records(HashMap::from([(
+                "data".into(),
+                TestRecords::new().with_values(HashMap::from([(
+                    "values".into(),
+                    values_dictionary.clone(),
+                )])),
+            )])),
             ScalarExpression::Attached(select_valid_attached_data),
             |r| match r {
                 ResolvedScalarValue::Dictionary(actual) => {
