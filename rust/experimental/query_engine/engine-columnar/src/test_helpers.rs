@@ -204,13 +204,42 @@ impl<'pipeline> TestRecords<'pipeline> {
                 }
             }
 
-            if values.len() > 0 {
+            if !values.is_empty() {
                 state = state.with_values(values);
             }
         }
 
         if let Some(attached_records) = &batches[1] {
-            todo!()
+            let mut values: HashMap<Box<str>, TestRecords> = HashMap::new();
+
+            for (id, field) in attached_records.schema_ref().fields().iter().enumerate() {
+                let name = field.name();
+
+                let s = attached_records.column(id).as_struct();
+
+                let mut field_values: HashMap<Box<str>, Dictionary> = HashMap::new();
+
+                for (id, field) in s.fields().iter().enumerate() {
+                    let v = s
+                        .column(id)
+                        .as_dictionary::<UInt16Type>()
+                        .downcast_dict::<StringArray>()
+                        .expect("has strings");
+
+                    field_values.insert(field.name().as_str().into(), v.into());
+                }
+
+                if !field_values.is_empty() {
+                    values.insert(
+                        name.as_str().into(),
+                        TestRecords::new().with_values(field_values),
+                    );
+                }
+            }
+
+            if !values.is_empty() {
+                state = state.with_attached_records(values);
+            }
         }
 
         state

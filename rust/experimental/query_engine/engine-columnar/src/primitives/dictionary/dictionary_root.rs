@@ -575,6 +575,15 @@ fn with_values_and_path_typed<
         unsafe { key_writer.set_null_unchecked(key_index) }
     }
 
+    if source_values.is_empty() {
+        return Dictionary::new_null::<K>(key_length);
+    } else if source_values.len() == 1 && !key_builder.has_nulls() {
+        return Dictionary::new_scalar::<K>(
+            key_length,
+            source_values.into_iter().next().expect("has value"),
+        );
+    }
+
     Dictionary::new(key_builder.finish().into(), source_values.into())
 }
 

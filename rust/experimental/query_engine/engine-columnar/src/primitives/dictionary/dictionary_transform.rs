@@ -131,6 +131,20 @@ impl<'a> Dictionary<'a> {
         builder.finish()
     }
 
+    pub fn transform_into_dictionary<K: ArrowDictionaryKeyType, V: Array + 'static, FTransform>(
+        self,
+        transform: FTransform,
+    ) -> DictionaryArray<K>
+    where
+        FTransform: Fn(DictionaryValueArray<'a>) -> (V, IndexLookup),
+    {
+        let (keys, values) = self.into_parts();
+
+        let (transformed_values, lookup) = transform(values);
+
+        DictionaryArray::<K>::new(keys.into_key_array(lookup), Arc::new(transformed_values))
+    }
+
     pub(crate) fn transform_into_any<FTransform>(self, mut transform: FTransform) -> Dictionary<'a>
     where
         FTransform: FnMut(&ValueOrRef<'a>) -> ValueOrRef<'a>,
