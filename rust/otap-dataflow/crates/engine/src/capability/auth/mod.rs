@@ -17,5 +17,6 @@ mod models;
 pub mod agent_fed_credential_provider;
 pub mod bearer_token_authorizer;
 pub mod bearer_token_provider;
+pub mod credential_provider;
 
 pub use models::{AuthorizedIdentity, AuthzDecision, BearerToken, ClaimValue, DenyReason};

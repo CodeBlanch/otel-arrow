@@ -8,3 +8,6 @@
     feature = "oauth2-client-auth-extension"
 ))]
 pub mod token_refresh;
+
+#[cfg(feature = "flat-file-credentials-extension")]
+pub mod background_refresh;

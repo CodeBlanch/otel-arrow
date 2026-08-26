@@ -53,6 +53,8 @@ azure-identity-auth-extension = ["dep:azure_core", "dep:azure_identity", "dep:hu
 k8s-service-account-token-auth-extension = ["dep:kube", "dep:k8s-openapi", "dep:humantime-serde", "dep:sha2"]
 # OAuth 2.0 Client Auth extension (BearerTokenProvider capability).
 oauth2-client-auth-extension = ["dep:oauth2", "dep:reqwest", "dep:http", "dep:jsonwebtoken", "dep:humantime-serde", "dep:rand", "dep:secrecy"]
+# Flat File Credentials extensions (CredentialProvider capability).
+flat-file-credentials-extension = ["dep:humantime-serde"]
 
 # JWT assertion-signing backend for the OAuth 2.0 client auth extension. These
 # mirror the workspace `crypto-*` features so a build signs assertions with the

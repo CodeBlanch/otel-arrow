@@ -26,6 +26,10 @@ pub mod auth {
     pub mod bearer_token_provider {
         pub use crate::capability::auth::bearer_token_provider::local::BearerTokenProvider;
     }
+    /// Local (!Send) trait variant of the credential-provider capability.
+    pub mod credential_provider {
+        pub use crate::capability::auth::credential_provider::local::CredentialProvider;
+    }
 }
 
 /// Local (!Send) trait variant of the vendor-bundle capability.
