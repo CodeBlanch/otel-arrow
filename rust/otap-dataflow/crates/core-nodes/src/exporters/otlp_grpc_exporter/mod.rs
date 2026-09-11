@@ -24,6 +24,7 @@ use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
 use otel_arrow_dfe_engine::ExporterFactory;
+use otel_arrow_dfe_engine::capability::registry::CapabilityWithMetadata;
 use otel_arrow_dfe_engine::config::ExporterConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_engine::control::{AckMsg, NackMsg, NodeControlMsg};
@@ -135,7 +136,7 @@ pub static OTLP_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
             .optional_local::<otel_arrow_dfe_engine::capability::auth::bearer_token_provider::BearerTokenProvider>()
             .map_err(|e| otel_arrow_dfe_config::error::Error::InvalidUserConfig {
                 error: e.to_string(),
-            })?;
+            })?.map(CapabilityWithMetadata::into_capability);
         Ok(ExporterWrapper::local(
             OTLPExporter::from_config(pipeline, &node_config.config, token_provider)?,
             node,

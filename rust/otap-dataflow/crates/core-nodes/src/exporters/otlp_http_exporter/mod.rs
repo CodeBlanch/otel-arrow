@@ -28,6 +28,7 @@ use linkme::distributed_slice;
 use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_config::error::Error as ConfigError;
 use otel_arrow_dfe_config::node::NodeUserConfig;
+use otel_arrow_dfe_engine::capability::registry::CapabilityWithMetadata;
 use otel_arrow_dfe_engine::config::ExporterConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_engine::control::{AckMsg, NackMsg, NodeControlMsg};
@@ -283,10 +284,12 @@ fn factory_create(
     // extension) supplies refreshed OAuth tokens.
     let token_provider = capabilities
         .optional_local::<otel_arrow_dfe_engine::capability::auth::bearer_token_provider::BearerTokenProvider>()
-        .map_err(capability_config_error)?;
+        .map_err(capability_config_error)?
+        .map(CapabilityWithMetadata::into_capability);
     let agent_fed_provider = capabilities
         .optional_local::<otel_arrow_dfe_engine::capability::auth::agent_fed_credential_provider::AgentFedCredentialProvider>()
-        .map_err(capability_config_error)?;
+        .map_err(capability_config_error)?
+        .map(CapabilityWithMetadata::into_capability);
     let dynamic_auth = select_dynamic_auth(token_provider, agent_fed_provider)?;
     Ok(ExporterWrapper::local(
         OtlpHttpExporter::from_config(pipeline, &node_config.config, dynamic_auth)?,

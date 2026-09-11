@@ -1154,7 +1154,8 @@ fn resolve_agent_fed_source(
                  capability to provide a shared implementation; local-only registrations \
                  are unsupported: {error}"
             ),
-        })?;
+        })?
+        .into_capability();
 
     Ok(AgentFedGenevaSource::new(credential_provider))
 }
@@ -2458,7 +2459,8 @@ mod tests {
         let (capabilities, snapshot) = resolved_agent_fed_capabilities(&node_config);
         let credential_provider = capabilities
             .require_shared::<AgentFedCredentialProviderCap>()
-            .expect("agent-fed credential provider");
+            .expect("agent-fed credential provider")
+            .into_capability();
         let source = AgentFedGenevaSource::new(credential_provider);
 
         let initial = source.current().await.expect("initial credential");

@@ -33,7 +33,7 @@ pub type Error = crate::error::Error;
 
 // -- Public re-exports --------------------------------------------------------
 
-pub use capabilities::Capabilities;
+pub use capabilities::*;
 pub use entry::{LocalCapabilityEntry, SharedCapabilityEntry};
 pub use storage::CapabilityRegistry;
 

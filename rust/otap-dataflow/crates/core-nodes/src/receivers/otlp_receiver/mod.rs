@@ -22,6 +22,7 @@ otel_arrow_dfe_telemetry::otel_component_scope!(
     target = "otel.receiver.otlp",
 );
 
+use otel_arrow_dfe_engine::capability::registry::CapabilityWithMetadata;
 use otel_arrow_dfe_otap::OTAP_RECEIVER_FACTORIES;
 use otel_arrow_dfe_otap::otap_grpc::otlp::server_new::{
     AuthorizationLayer, LogsServiceServer, MetricsServiceServer, OtlpServerSettings, RouteResponse,
@@ -223,7 +224,8 @@ pub static OTLP_RECEIVER: ReceiverFactory<OtapPdata> = ReceiverFactory {
                 |error| otel_arrow_dfe_config::error::Error::InvalidUserConfig {
                     error: error.to_string(),
                 },
-            )?;
+            )?
+            .map(CapabilityWithMetadata::into_capability);
         receiver.rate_limiter = admission
             .bind_shared(AdmissionDimension::Bytes, receiver.admission_state.clone())
             .map_err(

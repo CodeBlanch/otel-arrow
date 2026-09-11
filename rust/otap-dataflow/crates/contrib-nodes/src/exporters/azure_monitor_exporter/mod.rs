@@ -81,7 +81,8 @@ pub static AZURE_MONITOR_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory 
             .require_local::<BearerTokenProvider>()
             .map_err(|e| otel_arrow_dfe_config::error::Error::InvalidUserConfig {
                 error: e.to_string(),
-            })?;
+            })?
+            .into_capability();
 
         Ok(ExporterWrapper::local(
             AzureMonitorExporter::new(pipeline_ctx, cfg, token_provider).map_err(|e| {

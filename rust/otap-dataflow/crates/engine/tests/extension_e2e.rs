@@ -318,7 +318,7 @@ fn probe_receiver_create(
         CallSequence::Local => {
             if let Ok(handle) = capabilities.require_local::<NoOpStateless>() {
                 let _ = probe.first_call_succeeded.fetch_add(1, Ordering::SeqCst);
-                *probe.captured_name.lock() = Some(handle.name().to_owned());
+                *probe.captured_name.lock() = Some(handle.into_capability().name().to_owned());
             }
         }
         CallSequence::Shared => {
@@ -408,13 +408,13 @@ fn probe_receiver_create(
         CallSequence::LocalStatefulRecordAsync => {
             if let Ok(handle) = capabilities.require_local::<NoOpStateful>() {
                 let _ = probe.first_call_succeeded.fetch_add(1, Ordering::SeqCst);
-                async_local_stateful = Some(handle);
+                async_local_stateful = Some(handle.into_capability());
             }
         }
         CallSequence::SharedStatefulRecordAsync => {
             if let Ok(handle) = capabilities.require_shared::<NoOpStateful>() {
                 let _ = probe.first_call_succeeded.fetch_add(1, Ordering::SeqCst);
-                async_shared_stateful = Some(handle);
+                async_shared_stateful = Some(handle.into_capability());
             }
         }
         CallSequence::SharedStatefulReadCount => {

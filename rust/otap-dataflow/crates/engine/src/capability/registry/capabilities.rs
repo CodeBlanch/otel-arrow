@@ -4,9 +4,13 @@
 //! [`Capabilities`] -- the per-node consumer API for resolved capability
 //! bindings, with `require_*` and `optional_*` accessors.
 
+use otel_arrow_dfe_config::ExtensionId;
+
 use super::{Error, ResolvedLocalEntry, ResolvedSharedEntry};
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 /// Per-node capability bindings resolved from the
 /// [`CapabilityRegistry`](super::CapabilityRegistry).
 ///
@@ -130,7 +134,7 @@ impl Capabilities {
     /// stored entry's concrete type matches `C::Local`).
     pub fn require_local<C: crate::capability::ExtensionCapability>(
         &self,
-    ) -> Result<Box<C::Local>, Error> {
+    ) -> Result<CapabilityWithMetadata<C::Local>, Error> {
         let id = TypeId::of::<C>();
 
         // Native local path. `Cell::take()` is the one-shot guard.
@@ -162,7 +166,11 @@ impl Capabilities {
             if let Some(shared_entry) = self.shared.get(&id) {
                 let _ = shared_entry.produce.take();
             }
-            return Ok(trait_object);
+            return Ok(CapabilityWithMetadata::new(
+                C::name().into(),
+                entry.extension_id.clone(),
+                trait_object,
+            ));
         }
 
         // SharedAsLocal fallback. The same `Cell::take()` on the
@@ -191,7 +199,11 @@ impl Capabilities {
                 )
             });
         entry.tracker_consumed.set(true);
-        Ok(trait_object)
+        Ok(CapabilityWithMetadata::new(
+            C::name().into(),
+            entry.extension_id.clone(),
+            trait_object,
+        ))
     }
 
     /// Resolve a **required** shared capability.
@@ -219,7 +231,7 @@ impl Capabilities {
     /// stored entry's concrete type matches `C::Shared`).
     pub fn require_shared<C: crate::capability::ExtensionCapability>(
         &self,
-    ) -> Result<Box<C::Shared>, Error> {
+    ) -> Result<CapabilityWithMetadata<C::Shared>, Error> {
         let id = TypeId::of::<C>();
         let entry = self
             .shared
@@ -250,7 +262,11 @@ impl Capabilities {
         if let Some(local_entry) = self.local.get(&id) {
             let _ = local_entry.produce.take();
         }
-        Ok(trait_object)
+        Ok(CapabilityWithMetadata::new(
+            C::name().into(),
+            entry.extension_id.clone(),
+            trait_object,
+        ))
     }
 
     /// Resolve an **optional** local capability.
@@ -273,7 +289,7 @@ impl Capabilities {
     /// Panics on a type-erasure downcast mismatch (registry bug).
     pub fn optional_local<C: crate::capability::ExtensionCapability>(
         &self,
-    ) -> Result<Option<Box<C::Local>>, Error> {
+    ) -> Result<Option<CapabilityWithMetadata<C::Local>>, Error> {
         let id = TypeId::of::<C>();
         // A shared entry can satisfy a local request through SharedAsLocal.
         if !self.local.contains_key(&id) && !self.shared.contains_key(&id) {
@@ -303,7 +319,7 @@ impl Capabilities {
     /// Panics on a type-erasure downcast mismatch (registry bug).
     pub fn optional_shared<C: crate::capability::ExtensionCapability>(
         &self,
-    ) -> Result<Option<Box<C::Shared>>, Error> {
+    ) -> Result<Option<CapabilityWithMetadata<C::Shared>>, Error> {
         let id = TypeId::of::<C>();
         if !self.local.contains_key(&id) && !self.shared.contains_key(&id) {
             return Ok(None);
@@ -319,5 +335,59 @@ impl std::fmt::Debug for Capabilities {
             .field("local_bindings", &self.local.len())
             .field("shared_bindings", &self.shared.len())
             .finish()
+    }
+}
+
+/// Contains resolved capability and associated metadata.
+pub struct CapabilityWithMetadata<C: ?Sized> {
+    capability_name: Cow<'static, str>,
+    extension_id: ExtensionId,
+    capability: Box<C>,
+}
+
+impl<C: ?Sized> CapabilityWithMetadata<C> {
+    #[must_use]
+    pub(crate) fn new(
+        capability_name: Cow<'static, str>,
+        extension_id: ExtensionId,
+        capability: Box<C>,
+    ) -> CapabilityWithMetadata<C> {
+        Self {
+            capability_name,
+            extension_id,
+            capability,
+        }
+    }
+
+    /// Gets the capability name.
+    #[must_use]
+    pub fn capability_name(&self) -> Cow<'static, str> {
+        self.capability_name.clone()
+    }
+
+    /// Gets the extension id.
+    #[must_use]
+    pub fn extension_id(&self) -> ExtensionId {
+        self.extension_id.clone()
+    }
+
+    /// Takes the capability.
+    #[must_use]
+    pub fn into_capability(self) -> Box<C> {
+        self.capability
+    }
+}
+
+impl<C: ?Sized> Deref for CapabilityWithMetadata<C> {
+    type Target = C;
+
+    fn deref(&self) -> &Self::Target {
+        &self.capability
+    }
+}
+
+impl<C: ?Sized> DerefMut for CapabilityWithMetadata<C> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.capability
     }
 }

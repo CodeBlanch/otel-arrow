@@ -102,7 +102,8 @@ pub static PARQUET_EXPORTER: ExporterFactory<OtapPdata> = ExporterFactory {
                     .require_shared::<BearerTokenProvider>()
                     .map_err(|e| otel_arrow_dfe_config::error::Error::InvalidUserConfig {
                         error: e.to_string(),
-                    })?,
+                    })?
+                    .into_capability(),
             );
         }
         Ok(ExporterWrapper::local(
