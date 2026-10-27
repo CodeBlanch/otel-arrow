@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    any::TypeId,
     cell::{Ref, RefCell},
     collections::{HashMap, HashSet},
 };
@@ -14,6 +15,7 @@ pub struct ParserState {
     source_map_schema: Option<ParserMapSchema>,
     summary_map_schema: Option<ParserMapSchema>,
     attached_data_names: HashSet<Box<str>>,
+    disabled_features: HashSet<TypeId>,
     global_variable_names: RefCell<HashSet<Box<str>>>,
     variable_names: RefCell<HashSet<Box<str>>>,
     constants: RefCell<HashMap<Box<str>, (usize, ValueType)>>,
@@ -31,6 +33,7 @@ impl ParserState {
             source_map_schema: options.source_map_schema,
             summary_map_schema: options.summary_map_schema,
             attached_data_names: options.attached_data_names,
+            disabled_features: options.disabled_features,
             global_variable_names: RefCell::new(HashSet::new()),
             variable_names: RefCell::new(HashSet::new()),
             constants: RefCell::new(HashMap::new()),
@@ -141,6 +144,10 @@ impl ParserScope for ParserState {
         self.global_variable_names.borrow().contains(name)
     }
 
+    fn has_feature_disabled(&self, feature_type_id: &TypeId) -> bool {
+        self.disabled_features.contains(feature_type_id)
+    }
+
     fn get_constant_id(&self, name: &str) -> Option<(usize, ValueType)> {
         self.constants.borrow().get(name).cloned()
     }
@@ -187,6 +194,7 @@ impl ParserScope for ParserState {
             source_map_schema: parser_options.source_map_schema,
             summary_map_schema: parser_options.summary_map_schema,
             attached_data_names: parser_options.attached_data_names,
+            disabled_features: &self.disabled_features,
             global_variable_names: &self.global_variable_names,
             variable_names: RefCell::new(HashSet::new()),
             constants: &self.constants,
@@ -204,6 +212,7 @@ pub struct ParserStateScope<'a> {
     source_map_schema: Option<ParserMapSchema>,
     summary_map_schema: Option<ParserMapSchema>,
     attached_data_names: HashSet<Box<str>>,
+    disabled_features: &'a HashSet<TypeId>,
     global_variable_names: &'a RefCell<HashSet<Box<str>>>,
     variable_names: RefCell<HashSet<Box<str>>>,
     constants: &'a RefCell<HashMap<Box<str>, (usize, ValueType)>>,
@@ -265,6 +274,10 @@ impl ParserScope for ParserStateScope<'_> {
         self.global_variable_names.borrow().contains(name)
     }
 
+    fn has_feature_disabled(&self, feature_type_id: &TypeId) -> bool {
+        self.disabled_features.contains(feature_type_id)
+    }
+
     fn get_constant_id(&self, name: &str) -> Option<(usize, ValueType)> {
         self.constants.borrow().get(name).cloned()
     }
@@ -315,6 +328,7 @@ impl ParserScope for ParserStateScope<'_> {
             source_map_schema: options.source_map_schema,
             summary_map_schema: options.summary_map_schema,
             attached_data_names: options.attached_data_names,
+            disabled_features: self.disabled_features,
             global_variable_names: self.global_variable_names,
             variable_names: RefCell::new(HashSet::new()),
             constants: self.constants,
@@ -348,6 +362,8 @@ pub trait ParserScope {
     fn is_local_variable_defined(&self, name: &str) -> bool;
 
     fn is_global_variable_defined(&self, name: &str) -> bool;
+
+    fn has_feature_disabled(&self, feature_type_id: &TypeId) -> bool;
 
     fn get_constant_id(&self, name: &str) -> Option<(usize, ValueType)>;
 

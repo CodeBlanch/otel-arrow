@@ -1,6 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 
 use otel_arrow_contrib_data_engine_expressions::*;
@@ -28,12 +29,15 @@ type ParserFunctionDefinition = (
     Option<ValueType>,
 );
 
+pub trait ParserFeature {}
+
 #[derive(Clone)]
 pub struct ParserOptions {
     pub(crate) source_map_schema: Option<ParserMapSchema>,
     pub(crate) summary_map_schema: Option<ParserMapSchema>,
     pub(crate) attached_data_names: HashSet<Box<str>>,
     pub(crate) functions: Vec<ParserFunctionDefinition>,
+    pub(crate) disabled_features: HashSet<TypeId>,
 }
 
 impl ParserOptions {
@@ -43,6 +47,7 @@ impl ParserOptions {
             summary_map_schema: None,
             attached_data_names: HashSet::new(),
             functions: Vec::new(),
+            disabled_features: HashSet::new(),
         }
     }
 
@@ -80,6 +85,11 @@ impl ParserOptions {
                 .collect(),
             return_value_type,
         ));
+        self
+    }
+
+    pub fn with_disabled_feature<T: ParserFeature + 'static>(mut self) -> ParserOptions {
+        self.disabled_features.insert(TypeId::of::<T>());
         self
     }
 

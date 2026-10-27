@@ -28,6 +28,9 @@ pub enum ParserError {
         location: QueryLocation,
         key: String,
     },
+
+    #[error("{1}")]
+    FeatureDisabled(QueryLocation, String),
 }
 
 impl From<&ExpressionError> for ParserError {

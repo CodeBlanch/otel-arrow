@@ -22,6 +22,10 @@ impl Parser for KqlParser {
     }
 }
 
+pub struct KqlSummaryFeature {}
+
+impl ParserFeature for KqlSummaryFeature {}
+
 pub(crate) fn map_kql_errors(error: ParserError) -> ParserError {
     match error {
         ParserError::KeyNotFound { location, key } => ParserError::QueryLanguageDiagnostic {

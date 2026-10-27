@@ -1,7 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    any::TypeId,
+    collections::{HashMap, HashSet},
+};
 
 use otel_arrow_contrib_data_engine_expressions::*;
 use otel_arrow_contrib_data_engine_parser_abstractions::*;
@@ -9,7 +12,7 @@ use pest::iterators::Pair;
 use regex::Regex;
 
 use crate::{
-    Rule,
+    KqlSummaryFeature, Rule,
     aggregate_expressions::parse_aggregate_expression,
     logical_expressions::parse_logical_expression,
     scalar_expression::{parse_scalar_expression, try_resolve_identifier},
@@ -357,6 +360,13 @@ pub(crate) fn parse_summarize_expression(
     let mut group_by_expressions: HashMap<Box<str>, ScalarExpression> = HashMap::new();
     let mut post_expressions = Vec::new();
     let mut identifiers = HashSet::new();
+
+    if scope.has_feature_disabled(&TypeId::of::<KqlSummaryFeature>()) {
+        return Err(ParserError::FeatureDisabled(
+            query_location,
+            "summarize expression is not available in the current context".into(),
+        ));
+    }
 
     fn validate_unique_identifier(
         location: QueryLocation,
