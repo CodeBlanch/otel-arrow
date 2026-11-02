@@ -1,13 +1,20 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{LazyLock, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, RwLock},
+};
 
 use otel_arrow_contrib_data_engine_expressions::*;
 use otel_arrow_contrib_data_engine_kql_parser::*;
 use otel_arrow_contrib_data_engine_recordset::*;
 
 use crate::processors::recordset_kql_processor::otlp_bridge::*;
+
+use otel_arrow_dfe_core_nodes::receivers::syslog_cef_receiver::{
+    parser::{parse as parse_syslog, parsed_message::ParsedSyslogAttribute},
+};
 
 const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OTLP_BUFFER_INITIAL_CAPACITY: usize = 1024 * 64;
@@ -192,7 +199,12 @@ pub fn process_export_logs_service_request_using_pipeline(
     mut export_logs_service_request: ExportLogsServiceRequest,
 ) -> Result<BridgeResponse, BridgeError> {
     let engine = RecordSetEngine::new_with_options(
-        RecordSetEngineOptions::new().with_diagnostic_level(log_level),
+        RecordSetEngineOptions::new()
+            .with_diagnostic_level(log_level)
+            .with_external_function_implementation(
+                "parse_syslog",
+                RecordSetEngineFunctionClosureCallback::new(parse_syslog_function_implementation),
+            ),
     );
 
     let mut batch = engine
@@ -421,11 +433,20 @@ fn push_value(
 fn build_parser_options_for_logs_query(
     options: &mut BridgeOptions,
 ) -> Result<ParserOptions, ParserError> {
-    let mut parser_options = ParserOptions::new().with_attached_data_names(&[
-        "resource",
-        "instrumentation_scope",
-        "scope",
-    ]);
+    let mut parser_options = ParserOptions::new()
+        .with_attached_data_names(&["resource", "instrumentation_scope", "scope"])
+        .with_external_function(
+            "parse_syslog",
+            vec![(
+                &"source",
+                PipelineFunctionParameter::new(
+                    QueryLocation::new_fake(),
+                    PipelineFunctionParameterType::Scalar(Some(ValueType::String)),
+                ),
+                None,
+            )],
+            Some(ValueType::Map),
+        );
 
     let (log_record_schema, summary_schema) =
         build_log_record_schema(options.take_attributes_schema())?;
@@ -571,6 +592,90 @@ fn handle_diagnostics<S, FBuild, FAddAddtribute>(
             BridgeDiagnosticOptions::Callback(c) => c(diagnostics),
         }
     }
+}
+
+fn parse_syslog_function_implementation<'a, 'b>(
+    expression: &'a dyn Expression,
+    execution_context: &'b ExecutionContext<'a, '_, MapValueStorage<OwnedValue>>,
+) -> Result<ResolvedValue<'b>, ExpressionError> {
+    let input = execution_context
+        .get_arguments()
+        .expect("has arguments")
+        .get_argument(0)?;
+
+    let input_as_string = input.to_value().convert_to_string();
+
+    let parsed = parse_syslog(input_as_string.as_ref().as_bytes()).map_err(|e| {
+        ExpressionError::ParseError(
+            expression.get_query_location().clone(),
+            format!("Failed to parse Syslog payload: {e:?}"),
+        )
+    })?;
+
+    let mut syslog = HashMap::<Box<str>, OwnedValue>::with_capacity(4);
+
+    if let Some(timestamp) = parsed.timestamp() {
+        syslog.insert(
+            "time_unix_nano".into(),
+            OwnedValue::Integer(IntegerValueStorage::new(timestamp as i64)),
+        );
+    }
+
+    if let Some((severity_number, severity_text)) = parsed.severity() {
+        syslog.insert(
+            "severity_number".into(),
+            OwnedValue::Integer(IntegerValueStorage::new(severity_number as i64)),
+        );
+        syslog.insert(
+            "severity_text".into(),
+            OwnedValue::String(StringValueStorage::new(severity_text.into())),
+        );
+    }
+
+    let mut attributes = HashMap::<Box<str>, OwnedValue>::new();
+
+    let mut scratch_buffer = vec![];
+
+    for attribute in parsed.iter() {
+        match attribute {
+            ParsedSyslogAttribute::Integer { key, value } => {
+                attributes.insert(
+                    key.into(),
+                    OwnedValue::Integer(IntegerValueStorage::new(value)),
+                );
+            }
+            ParsedSyslogAttribute::String { key, value } => {
+                attributes.insert(
+                    key.into(),
+                    OwnedValue::String(StringValueStorage::new(value.into())),
+                );
+            }
+            ParsedSyslogAttribute::Extension(cef_extension) => {
+                if let Ok(key) = str::from_utf8(cef_extension.get_key())
+                    && let Ok(value) = str::from_utf8(cef_extension.get_value(&mut scratch_buffer))
+                {
+                    attributes.insert(
+                        key.into(),
+                        OwnedValue::String(StringValueStorage::new(value.into())),
+                    );
+                }
+            }
+        }
+    }
+
+    attributes.insert(
+        "input.format".into(),
+        OwnedValue::String(StringValueStorage::new(parsed.format().into())),
+    );
+
+    syslog.insert(
+        "attributes".into(),
+        OwnedValue::Map(MapValueStorage::new(attributes)),
+    );
+
+    Ok(ResolvedValue::Computed(OwnedValue::Map(
+        MapValueStorage::new(syslog),
+    )))
 }
 
 #[cfg(test)]

@@ -5,7 +5,9 @@ use crate::receivers::syslog_cef_receiver::arrow_records_encoder::{
     KnownAttributeKey, SyslogAttributesBuilder,
 };
 use crate::receivers::syslog_cef_receiver::parser::{
-    cef::CefMessage, rfc3164::Rfc3164Message, rfc5424::Rfc5424Message,
+    cef::{CefExtension, CefExtensionsIter, CefMessage},
+    rfc3164::Rfc3164Message,
+    rfc5424::Rfc5424Message,
 };
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone};
 
@@ -138,7 +140,7 @@ impl ParsedSyslogMessage<'_> {
     ///
     /// This is emitted as the `input.format` log attribute so that downstream
     /// processors can filter or route records by format.
-    pub(crate) const fn format(&self) -> &'static str {
+    pub const fn format(&self) -> &'static str {
         match self {
             ParsedSyslogMessage::Rfc5424(_) => "rfc5424",
             ParsedSyslogMessage::Rfc3164(_) => "rfc3164",
@@ -150,7 +152,7 @@ impl ParsedSyslogMessage<'_> {
 
     /// Returns the time when the event occurred.
     // Value is UNIX Epoch time in nanoseconds since 00:00:00 UTC on 1 January 1970.
-    pub(crate) fn timestamp(&self) -> Option<u64> {
+    pub fn timestamp(&self) -> Option<u64> {
         self.timestamp_inner(None)
     }
 
@@ -192,7 +194,7 @@ impl ParsedSyslogMessage<'_> {
     }
 
     /// Returns the severity level of the log message.
-    pub(crate) fn severity(&self) -> Option<(i32, &str)> {
+    pub fn severity(&self) -> Option<(i32, &str)> {
         match self {
             ParsedSyslogMessage::Rfc5424(msg) | ParsedSyslogMessage::CefWithRfc5424(msg, _) => {
                 Some(Self::to_otel_severity(msg.priority.severity))
@@ -202,6 +204,38 @@ impl ParsedSyslogMessage<'_> {
                 .as_ref()
                 .map(|p| Self::to_otel_severity(p.severity)),
             ParsedSyslogMessage::Cef(_) => None,
+        }
+    }
+
+    /// Iterates attributes of the log message.
+    pub fn iter(&self) -> ParsedSyslogAttributesIter<'_> {
+        match self {
+            ParsedSyslogMessage::Rfc5424(rfc5424_message) => ParsedSyslogAttributesIter {
+                rfc_5424: Some(rfc5424_message),
+                ..Default::default()
+            },
+            ParsedSyslogMessage::Rfc3164(rfc3164_message) => ParsedSyslogAttributesIter {
+                rfc_3164: Some(rfc3164_message),
+                ..Default::default()
+            },
+            ParsedSyslogMessage::Cef(cef_message) => ParsedSyslogAttributesIter {
+                cef: Some(cef_message),
+                ..Default::default()
+            },
+            ParsedSyslogMessage::CefWithRfc3164(rfc3164_message, cef_message) => {
+                ParsedSyslogAttributesIter {
+                    rfc_3164: Some(rfc3164_message),
+                    cef: Some(cef_message),
+                    ..Default::default()
+                }
+            }
+            ParsedSyslogMessage::CefWithRfc5424(rfc5424_message, cef_message) => {
+                ParsedSyslogAttributesIter {
+                    rfc_5424: Some(rfc5424_message),
+                    cef: Some(cef_message),
+                    ..Default::default()
+                }
+            }
         }
     }
 
@@ -448,12 +482,14 @@ impl ParsedSyslogMessage<'_> {
             .any_values_builder
             .append_str(msg.severity);
 
+        let mut scratch_buffer = Vec::new();
         let mut extensions_iter = msg.parse_extensions();
-        while let Some((key, value)) = extensions_iter.next_extension() {
-            log_attributes_arrow_records.append_key(std::str::from_utf8(key).unwrap_or_default());
+        while let Some(extension) = extensions_iter.next_extension() {
+            log_attributes_arrow_records
+                .append_key(std::str::from_utf8(extension.get_key()).unwrap_or_default());
             log_attributes_arrow_records
                 .any_values_builder
-                .append_str(value);
+                .append_str(extension.get_value(&mut scratch_buffer));
             attributes_count += 1;
         }
 
@@ -473,6 +509,353 @@ impl ParsedSyslogMessage<'_> {
             6 => (9, "INFO"),        // Informational -> SEVERITY_NUMBER_INFO
             7 => (5, "DEBUG"),       // Debug -> SEVERITY_NUMBER_DEBUG
             _ => (0, "UNSPECIFIED"), // Unknown severity -> SEVERITY_NUMBER_UNSPECIFIED
+        }
+    }
+}
+
+/// Iterator for [`ParsedSyslogMessage`] attributes.
+#[derive(Default)]
+pub struct ParsedSyslogAttributesIter<'a> {
+    rfc_5424: Option<&'a Rfc5424Message<'a>>,
+    rfc_3164: Option<&'a Rfc3164Message<'a>>,
+    cef: Option<&'a CefMessage<'a>>,
+    cef_extensions: Option<CefExtensionsIter<'a>>,
+    format: &'a str,
+    stage: usize,
+    position: usize,
+}
+
+impl<'a> Iterator for ParsedSyslogAttributesIter<'a> {
+    type Item = ParsedSyslogAttribute<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut position = self.position;
+        self.position = position + 1;
+
+        if self.stage == 0 {
+            if let Some(rfc_5424) = self.rfc_5424 {
+                match position {
+                    0 => {
+                        return Some(ParsedSyslogAttribute::new_integer(
+                            KnownAttributeKey::Version,
+                            rfc_5424.version as i64,
+                        ));
+                    }
+                    1 => {
+                        return Some(ParsedSyslogAttribute::new_integer(
+                            KnownAttributeKey::Facility,
+                            rfc_5424.priority.facility as i64,
+                        ));
+                    }
+                    2 => {
+                        return Some(ParsedSyslogAttribute::new_integer(
+                            KnownAttributeKey::Severity,
+                            rfc_5424.priority.severity as i64,
+                        ));
+                    }
+                    3 => {
+                        if let Some(hostname) = rfc_5424.hostname
+                            && let Ok(hostname) = str::from_utf8(hostname)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::HostName,
+                                hostname,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    4 => {
+                        if let Some(app_name) = rfc_5424.app_name
+                            && let Ok(app_name) = str::from_utf8(app_name)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::AppName,
+                                app_name,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    5 => {
+                        if let Some(proc_id) = rfc_5424.proc_id
+                            && let Ok(proc_id) = str::from_utf8(proc_id)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::ProcessIdStr,
+                                proc_id,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    6 => {
+                        if let Some(proc_id) = rfc_5424.proc_id
+                            && let Ok(proc_id) = str::from_utf8(proc_id)
+                            && let Ok(proc_id_int) = proc_id.parse::<i64>()
+                        {
+                            return Some(ParsedSyslogAttribute::new_integer(
+                                KnownAttributeKey::ProcessId,
+                                proc_id_int,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    7 => {
+                        if let Some(msg_id) = rfc_5424.msg_id
+                            && let Ok(msg_id) = str::from_utf8(msg_id)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::MessageId,
+                                msg_id,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    8 => {
+                        if let Some(structured_data) = rfc_5424.structured_data
+                            && let Ok(structured_data) = str::from_utf8(structured_data)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::StructuredData,
+                                structured_data,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    9 => {
+                        if let Some(message) = rfc_5424.message
+                            && let Ok(message) = str::from_utf8(message)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::Message,
+                                message,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    _ => {}
+                }
+            }
+
+            self.stage = 1;
+            position = 0;
+            self.position = 1;
+        }
+
+        if self.stage == 1 {
+            if let Some(rfc_3164) = self.rfc_3164 {
+                match position {
+                    0 => {
+                        if let Some(priority) = rfc_3164.priority.as_ref() {
+                            return Some(ParsedSyslogAttribute::new_integer(
+                                KnownAttributeKey::Facility,
+                                priority.facility as i64,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    1 => {
+                        if let Some(priority) = rfc_3164.priority.as_ref() {
+                            return Some(ParsedSyslogAttribute::new_integer(
+                                KnownAttributeKey::Severity,
+                                priority.severity as i64,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    2 => {
+                        if let Some(hostname) = rfc_3164.hostname
+                            && let Ok(hostname) = str::from_utf8(hostname)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::HostName,
+                                hostname,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    3 => {
+                        if let Some(tag) = rfc_3164.tag
+                            && let Ok(tag) = str::from_utf8(tag)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::Tag,
+                                tag,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    4 => {
+                        if let Some(app_name) = rfc_3164.app_name
+                            && let Ok(app_name) = str::from_utf8(app_name)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::AppName,
+                                app_name,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    5 => {
+                        if let Some(proc_id) = rfc_3164.proc_id
+                            && let Ok(proc_id) = str::from_utf8(proc_id)
+                            && let Ok(proc_id_int) = proc_id.parse::<i64>()
+                        {
+                            return Some(ParsedSyslogAttribute::new_integer(
+                                KnownAttributeKey::ProcessId,
+                                proc_id_int,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    6 => {
+                        if let Some(content) = rfc_3164.content
+                            && let Ok(content) = str::from_utf8(content)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::Content,
+                                content,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    _ => {}
+                }
+            }
+
+            self.stage = 2;
+            position = 0;
+            self.position = 1;
+        }
+
+        if self.stage == 2 {
+            if let Some(cef) = self.cef {
+                match position {
+                    0 => {
+                        return Some(ParsedSyslogAttribute::new_integer(
+                            KnownAttributeKey::CefVersion,
+                            cef.version as i64,
+                        ));
+                    }
+                    1 => {
+                        if let Ok(device_vendor) = str::from_utf8(cef.device_vendor) {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::CefDeviceVendor,
+                                device_vendor,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    2 => {
+                        if let Ok(device_product) = str::from_utf8(cef.device_product) {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::CefDeviceProduct,
+                                device_product,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    3 => {
+                        if let Ok(device_version) = str::from_utf8(cef.device_version) {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::CefDeviceVersion,
+                                device_version,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    4 => {
+                        if let Ok(device_event_class_id) = str::from_utf8(cef.device_event_class_id)
+                        {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::CefEventClassId,
+                                device_event_class_id,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    5 => {
+                        if let Ok(name) = str::from_utf8(cef.name) {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::CefName,
+                                name,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    6 => {
+                        if let Ok(severity) = str::from_utf8(cef.severity) {
+                            return Some(ParsedSyslogAttribute::new_string(
+                                KnownAttributeKey::CefSeverity,
+                                severity,
+                            ));
+                        }
+                        return self.next();
+                    }
+                    7 => {
+                        self.cef_extensions = Some(cef.parse_extensions());
+                    }
+                    _ => {}
+                }
+            }
+
+            self.stage = 3;
+            position = 0;
+            self.position = 1;
+        }
+
+        if self.stage == 3 {
+            if let Some(cef_extensions) = self.cef_extensions.as_mut()
+                && let Some(extension) = cef_extensions.next_extension()
+            {
+                return Some(ParsedSyslogAttribute::Extension(extension));
+            }
+
+            self.stage = 4;
+            position = 0;
+            self.position = 1;
+        }
+
+        match position {
+            0 => Some(ParsedSyslogAttribute::new_string(
+                KnownAttributeKey::InputFormat,
+                self.format,
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Contains a parsed message attribute value.
+pub enum ParsedSyslogAttribute<'a> {
+    /// Integer.
+    Integer {
+        /// Key.
+        key: &'static str,
+        /// Value.
+        value: i64,
+    },
+    /// String.
+    String {
+        /// Key.
+        key: &'static str,
+        /// Value.
+        value: &'a str,
+    },
+    /// Extension.
+    Extension(CefExtension<'a>),
+}
+
+impl<'a> ParsedSyslogAttribute<'a> {
+    pub(crate) fn new_integer(key: KnownAttributeKey, value: i64) -> ParsedSyslogAttribute<'a> {
+        ParsedSyslogAttribute::Integer {
+            key: key.as_str(),
+            value,
+        }
+    }
+
+    pub(crate) fn new_string(key: KnownAttributeKey, value: &'a str) -> ParsedSyslogAttribute<'a> {
+        ParsedSyslogAttribute::String {
+            key: key.as_str(),
+            value,
         }
     }
 }

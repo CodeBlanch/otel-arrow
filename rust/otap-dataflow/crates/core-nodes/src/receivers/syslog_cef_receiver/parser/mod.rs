@@ -197,19 +197,27 @@ pub mod bench_support {
     }
 
     /// Opaque wrapper around the internal CEF extensions iterator.
-    pub struct CefExtensionsIter<'a>(super::cef::CefExtensionsIter<'a>);
+    pub struct CefExtensionsIter<'a> {
+        inner: super::cef::CefExtensionsIter<'a>,
+        buffer: Vec<u8>,
+    }
 
     impl<'a> CefExtensionsIter<'a> {
         /// Returns the next key-value extension pair, or `None` when exhausted.
         pub fn next_extension(&mut self) -> Option<(&[u8], &[u8])> {
-            self.0.next_extension()
+            self.inner
+                .next_extension()
+                .map(|v| (v.get_key(), v.get_value(&mut self.buffer)))
         }
     }
 
     /// Start iterating over CEF extensions.
     #[must_use]
     pub const fn parse_extensions<'a>(msg: &'a CefMessage<'a>) -> CefExtensionsIter<'a> {
-        CefExtensionsIter(msg.parse_extensions())
+        CefExtensionsIter {
+            inner: msg.parse_extensions(),
+            buffer: vec![],
+        }
     }
 }
 

@@ -209,21 +209,15 @@ pub fn parse_cef(input: &[u8]) -> Result<CefMessage<'_>, super::ParseError> {
 pub(super) struct CefExtensionsIter<'a> {
     data: &'a [u8],
     pos: usize,
-    // Scratch buffer for unescaping - reused across iterations
-    scratch_buffer: Vec<u8>,
 }
 
 impl<'a> CefExtensionsIter<'a> {
     const fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            pos: 0,
-            scratch_buffer: Vec::new(), // TODO: This would allocate if the extensions provided in the input have to be unescaped. Could we avoid this allocation?
-        }
+        Self { data, pos: 0 }
     }
 
     /// Returns the next key-value extension pair, or `None` when exhausted.
-    pub(super) fn next_extension(&mut self) -> Option<(&[u8], &[u8])> {
+    pub(super) fn next_extension(&mut self) -> Option<CefExtension<'a>> {
         if self.pos >= self.data.len() {
             return None;
         }
@@ -265,7 +259,10 @@ impl<'a> CefExtensionsIter<'a> {
 
         if self.pos >= self.data.len() {
             // Empty value at end
-            return Some((&self.data[key_start..key_end], &[]));
+            return Some(CefExtension {
+                key: &self.data[key_start..key_end],
+                raw_value: &[],
+            });
         }
 
         let value_start = self.pos;
@@ -334,29 +331,52 @@ impl<'a> CefExtensionsIter<'a> {
             self.pos += 1;
         }
 
-        // Handle unescaping efficiently
-        let value = if needs_unescaping(raw_value) {
-            // Reuse scratch buffer to avoid allocations
-            self.scratch_buffer.clear();
-            self.scratch_buffer.extend_from_slice(raw_value);
-            let new_len = unescape_inplace(&mut self.scratch_buffer);
-            self.scratch_buffer.truncate(new_len);
-            &self.scratch_buffer[..]
-        } else {
-            raw_value
-        };
-
-        Some((key, value))
+        Some(CefExtension { key, raw_value })
     }
 
     /// Collect all extensions into a Vec, allocating only when necessary
     #[cfg(test)]
     pub(super) fn collect_all(mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut scratch_buffer = Vec::new();
         let mut result = Vec::new();
-        while let Some((key, value)) = self.next_extension() {
-            result.push((key.to_vec(), value.to_vec()));
+        while let Some(extension) = self.next_extension() {
+            result.push((
+                extension.get_key().to_vec(),
+                extension.get_value(&mut scratch_buffer).to_vec(),
+            ));
         }
         result
+    }
+}
+
+/// CEF message extension
+pub struct CefExtension<'a> {
+    key: &'a [u8],
+    raw_value: &'a [u8],
+}
+
+impl<'a> CefExtension<'a> {
+    /// Get CEF message extension key.
+    pub fn get_key(&self) -> &'a [u8] {
+        self.key
+    }
+
+    /// Get CEF message extension value.
+    pub fn get_value<'b, 'c>(&self, scratch_buffer: &'b mut Vec<u8>) -> &'c [u8]
+    where
+        'a: 'c,
+        'b: 'c,
+    {
+        if needs_unescaping(self.raw_value) {
+            // Reuse scratch buffer to avoid allocations
+            scratch_buffer.clear();
+            scratch_buffer.extend_from_slice(self.raw_value);
+            let new_len = unescape_inplace(scratch_buffer);
+            scratch_buffer.truncate(new_len);
+            &scratch_buffer[..]
+        } else {
+            self.raw_value
+        }
     }
 }
 
